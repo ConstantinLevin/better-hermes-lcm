@@ -317,6 +317,7 @@ _KNOWN_FEATURE_TABLE_PREFIXES = (
     "lcm_assertion",
     "lcm_query",
     "lcm_trajectory",
+    "lcm_node",  # fork: betterlcm — lcm_node_meta sidecar (node_meta.py)
 )
 
 # The known opt-in feature families whose derived tables an interim build may

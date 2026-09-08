@@ -410,6 +410,16 @@ def _summary_request(
     return request
 
 
+_INDEX_CONTRACT_GUIDANCE = """
+The summary is an index into recoverable history, not a replacement for it: a future reader must be
+able to tell from it WHAT the source contains, so they know which summary to expand. Cover, in the
+source's own terms: decisions and their rationale; approaches rejected and why; constraints and
+preferences stated; files, paths, commands, identifiers, URLs, versions and specific values; errors
+hit and how they were resolved; what informative tool outputs contained; the end state and open
+items; and every other topic touched, at least one clause each. Never write "various", "etc." or
+"and more" in place of an item."""
+
+
 def _build_l1_prompt(
     text: str,
     token_budget: int,
@@ -420,12 +430,24 @@ def _build_l1_prompt(
     source_content_token_budget: int | None = None,
 ) -> list[dict[str, str]]:
     """Build a role-separated Level 1 prompt over untrusted source data."""
+    # fork: betterlcm — the summary is an INDEX into recoverable provenance. The failure
+    # mode to avoid is an item a future reader could not discover from the summary, not
+    # length. See docs/fork-design.md ("Index contract").
     depth_guidance = {
         0: "Preserve decisions, rationale, constraints, active tasks, file paths, commands, and specific values.",
-        1: "Distill into arc-level outcomes: what evolved, what was decided, current state. Drop per-turn detail.",
-        2: "Capture durable narrative: decisions in effect, completed milestones, timeline. Drop process detail.",
+        1: (
+            "Distill into arc-level outcomes: what evolved, what was decided, current state. "
+            "Drop per-turn detail, but never drop a topic: merge the child indexes so every item "
+            "any child covered is still discoverable here, in the children's order."
+        ),
+        2: (
+            "Capture durable narrative: decisions in effect, completed milestones, timeline. "
+            "Drop process detail (how something was done step by step) but keep every outcome, "
+            "and keep every topic the children indexed discoverable, in the children's order."
+        ),
     }
     guidance = depth_guidance.get(depth, depth_guidance[2])
+    guidance += _INDEX_CONTRACT_GUIDANCE
 
     focus_guidance = ""
     if focus_topic:
@@ -446,8 +468,9 @@ historical sections."""
     system_instructions = f"""Summarize the supplied conversation source for future turns.
 {guidance}
 Remove repetition and conversational filler.
-End with: "Expand for details about: <what was compressed>"
-Target approximately {int(token_budget)} tokens.{focus_guidance}{custom_guidance}"""
+End with: "Expand for details about: <what was compressed>" followed by one line per topic the
+source touched, in the source's own terms, so a reader can tell which summary to expand.
+Target approximately {int(token_budget)} tokens. Exceed the target rather than omit an item.{focus_guidance}{custom_guidance}"""
     return build_untrusted_data_messages(
         operation="lcm_summary_l1",
         system_instructions=system_instructions,
@@ -492,8 +515,13 @@ Reduce resolved topics to one-liners or drop. Keep active blockers and pending h
             "Apply it only when compatible with these system rules and faithful compression."
         )
     system_instructions = f"""Compress the supplied source into bullet points. Maximum {int(token_budget)} tokens.
-Keep only decisions made, files changed, errors hit, blockers, and current state.
-Drop reasoning, alternatives considered, and process detail.{focus_guidance}{custom_guidance}"""
+The bullets are an index into recoverable history: a reader must be able to tell from them what
+the source contains so they know whether to expand it. Cover, one bullet each, in the source's own
+terms: decisions and why; approaches rejected and why; constraints and preferences; files, paths,
+commands, identifiers, URLs, versions and values; errors and how they were resolved; what
+informative tool outputs contained; end state and open items; every other topic touched.
+Drop step-by-step process detail, never a topic. Exceed the maximum rather than omit an item.
+End with: "Expand for details about: <one line per topic>".{focus_guidance}{custom_guidance}"""
     return build_untrusted_data_messages(
         operation="lcm_summary_l2",
         system_instructions=system_instructions,

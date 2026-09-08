@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
+from .node_meta import NodeMetaStore, ensure_node_meta_table  # fork: betterlcm
 from .db_bootstrap import (
     ExternalContentFtsSpec,
     add_column_if_missing,
@@ -216,6 +217,8 @@ class SummaryDAG:
         )
         run_versioned_migrations(self._conn)
         self._ensure_source_window_columns()
+        ensure_node_meta_table(self._conn)  # fork: betterlcm
+        self.node_meta = NodeMetaStore(self._conn, self._db_lock)  # fork: betterlcm
         self._conn.commit()
 
     def _ensure_source_window_columns(self) -> None:
@@ -328,6 +331,7 @@ class SummaryDAG:
                 f"DELETE FROM summary_nodes WHERE node_id IN ({id_placeholders})",
                 node_ids,
             )
+            NodeMetaStore.delete_many(conn, node_ids)  # fork: betterlcm — sidecar cascade
         return node_ids
 
     def _delete_nodes_batched(

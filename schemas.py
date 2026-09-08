@@ -1052,8 +1052,18 @@ LCM_EXPAND = {
             },
             "max_tokens": {
                 "type": "integer",
-                "description": "Token budget for returned content (default 4000)",
-                "default": 4000,
+                "description": (
+                    "Token budget for returned content. Default is window-weighted "
+                    "(4000 at a 256k context, 32000 at 1M; see lcm_status window_scaling)."
+                ),
+            },
+            "hydrate": {
+                "type": "boolean",
+                "description": (
+                    "node_id mode only: return the full content of externalized tool outputs "
+                    "inline instead of their '[Externalized tool output: …]' stubs."
+                ),
+                "default": False,
             },
             "source_offset": {
                 "type": "integer",

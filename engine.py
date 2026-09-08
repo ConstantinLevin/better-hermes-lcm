@@ -132,6 +132,7 @@ from .window_scaled_mixin import WindowScaledSettingsMixin  # fork: betterlcm
 from .host_cooldown import HostCooldownMixin  # fork: betterlcm
 from .errors import SummaryUnavailableError  # fork: betterlcm
 from . import marked_loss  # fork: betterlcm
+from . import node_meta  # fork: betterlcm
 from .lifecycle_state import LifecycleStateStore
 from .message_content import (
     normalize_content_value,
@@ -3587,6 +3588,17 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         # into the new session; the rest stay with the old session, reachable through
         # ``lcm_grep``/``lcm_expand`` with session_scope='all'.
 
+    def _node_meta_for_assembly(self, node_ids: list[int]) -> Dict[int, Dict[str, Any]]:
+        """fork: betterlcm — sidecar rows for the rendered nodes; fail-open (empty) on error."""
+        store = getattr(self._dag, "node_meta", None)
+        if store is None or not node_ids:
+            return {}
+        try:
+            return store.read_many(node_ids)
+        except Exception:
+            logger.debug("LCM node meta read failed", exc_info=True)
+            return {}
+
     @staticmethod
     def _assembly_omission_marker(
         *,
@@ -5741,6 +5753,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
             expand_hint=self._extract_expand_hint(summary_text),
         )
         self._dag.add_node(condensed_node)
+        self._dag.node_meta.write(condensed_node.node_id, level=int(level), summary=summary_text)  # fork: sidecar
         self._invalidate_rollups_for_published_node(condensed_node)
         return source_tokens, summary_tokens, level
 
@@ -5823,10 +5836,17 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
 
     @staticmethod
     def _append_lcm_note_to_content(content: Any) -> Any:
+        # fork: betterlcm — the first two sentences are the replay-scaffold signature
+        # (_is_replayed_context_scaffold_message) and must stay verbatim.
         note = (
             "\n\n[Note: This conversation uses Lossless Context Management (LCM). "
             "Earlier turns have been compacted into hierarchical summaries below. "
-            "Use lcm_grep to search history, lcm_describe to inspect the DAG, "
+            "Every summary is an index over fully retained history, not the history itself: "
+            "absence from the visible context is never absence from the record. "
+            "Stubs such as '[Externalized tool output: …]' and markers such as '[LCM elided …]' "
+            "or '[LCM rotate marker]' name what was cut and expand by node or store id. "
+            "Use lcm_grep to search history before assuming something was never said, "
+            "lcm_describe to inspect the DAG, "
             "and lcm_expand to recover original details from any summary.]"
         )
         if isinstance(content, str):
@@ -6174,6 +6194,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
             # Group by depth, take the most recent uncondensed at each level
             # For active context, we want the highest-level summaries
             # that haven't been condensed into even higher levels
+            rendered_nodes: list[tuple[int, Any]] = []  # fork: (depth, node) in render order
             for d in depths:
                 uncondensed = self._dag.get_uncondensed_at_depth(
                     self._session_id, d, limit=per_depth_limit + 1
@@ -6183,17 +6204,25 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                     uncondensed = uncondensed[:per_depth_limit]
                 for node in uncondensed:
                     active_summary_node_ids.add(node.node_id)
-                    summary_part_node_ids.append(node.node_id)
-                    depth_label = {
-                        0: "Recent",
-                        1: "Session Arc",
-                        2: "Durable",
-                    }.get(d, f"Depth-{d}")
-                    summary_parts.append(
-                        f"[{depth_label} Summary (d{d}, node {node.node_id})]\n"
-                        f"{node.summary}\n"
-                        f"[Expand for details: {node.expand_hint}]"
-                    )
+                    rendered_nodes.append((d, node))
+            # fork: betterlcm — one sidecar read for the level tag of every rendered node
+            meta_by_id = self._node_meta_for_assembly([node.node_id for _d, node in rendered_nodes])
+            for d, node in rendered_nodes:
+                summary_part_node_ids.append(node.node_id)
+                depth_label = {
+                    0: "Recent",
+                    1: "Session Arc",
+                    2: "Durable",
+                }.get(d, f"Depth-{d}")
+                meta = meta_by_id.get(node.node_id)
+                level_tag = node_meta.level_header_tag(meta.get("level") if meta else None)  # fork
+                # fork: an empty hint still tells the reader how to get underneath
+                expand_hint = node.expand_hint or f"lcm_expand(node_id={node.node_id})"
+                summary_parts.append(
+                    f"[{depth_label} Summary (d{d}, node {node.node_id})]{level_tag}\n"
+                    f"{node.summary}\n"
+                    f"[Expand for details: {expand_hint}]"
+                )
 
         omitted_node_ids: list[int] = []  # fork: nodes that did not fit the budget
         if summary_parts:
@@ -6786,7 +6815,9 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
             expand_hint=f"raw messages {min(store_ids)}..{max(store_ids)} rotated without a summary",
         )
         try:
-            return int(self._dag.add_node(node))
+            node_id = int(self._dag.add_node(node))
+            self._dag.node_meta.write(node_id, level=node_meta.LEVEL_MARKER, summary=summary)
+            return node_id
         except Exception:
             logger.warning("LCM rotate marker node write failed", exc_info=True)
             return None

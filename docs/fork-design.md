@@ -444,3 +444,18 @@ sweep's fallback pair-condensation on the pressure ratio; leave the fork checkou
 - New: a summariser failure with zero persisted passes no longer returns the input untouched
   — the cleanup preamble's drops (ignored-message placeholders etc.) are still published; the
   cooldown is armed either way and an unchanged context is returned as the same object.
+### Step 6 — sidecar
+- `lcm_node_meta(node_id PK, level, index_block, updated_at)`; created from `SummaryDAG._init_db`
+  under the named migration step `betterlcm_node_meta_v1`; prefix `lcm_node` registered with the
+  classifier. Rows cascade in `delete_node_batch`. Downgrade to an upstream build: its classifier
+  reports `genuinely_newer` for a DB carrying the table — drop `lcm_node_meta` and the
+  `betterlcm_node_meta_v1` row in `lcm_migration_state` first.
+- The index block is stored, not re-rendered: `node.summary` already contains the whole
+  "Expand for details about:" block verbatim, so the prefix would only duplicate it. The
+  sidecar copy exists for tools/doctor and for the coverage check.
+### Step 7 — index contract
+- The level tag is rendered AFTER the header bracket (`[Recent Summary (d0, node 12)] [L2 bullet
+  summary]`) because `_is_replayed_context_scaffold_message` recognises the bracket shape.
+- Depth labels past 2 keep upstream's `Depth-<n>` (same regex).
+- `lcm_expand` default page = `effective_expand_page_tokens` (4000 at 256k → 32000 at 1M);
+  `hydrate=true` returns externalized tool outputs inline in node mode.

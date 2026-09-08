@@ -5347,7 +5347,13 @@ def lcm_expand(args: Dict[str, Any], **kwargs) -> str:
             "error": "node_id, externalized_ref, or store_id is required",
         })
 
-    max_tokens = _parse_positive_int(args.get("max_tokens", 4000), 4000)
+    # fork: betterlcm — the default page is window-weighted (4000 at 256k, 32000 at 1M)
+    default_page_tokens = int(getattr(engine, "effective_expand_page_tokens", 4000) or 4000)
+    max_tokens = _parse_positive_int(args.get("max_tokens", default_page_tokens), default_page_tokens)
+    raw_hydrate = args.get("hydrate", False)
+    if not isinstance(raw_hydrate, bool):
+        return json.dumps({"error": "hydrate must be a boolean"})
+    hydrate_externalized = raw_hydrate  # fork: node mode returns externalized outputs inline
     source_offset = _parse_non_negative_int(args.get("source_offset", 0), 0)
     source_limit_arg = args.get("source_limit")
     source_limit = _parse_positive_int(source_limit_arg, 0) if source_limit_arg is not None else None
@@ -5476,6 +5482,7 @@ def lcm_expand(args: Dict[str, Any], **kwargs) -> str:
             source_offset=source_offset,
             source_limit=source_limit,
             content_offset=content_offset,
+            hydrate_externalized_content=hydrate_externalized,  # fork
         )
         return json.dumps(
             {
@@ -5484,6 +5491,7 @@ def lcm_expand(args: Dict[str, Any], **kwargs) -> str:
                 "source_type": "messages",
                 "expanded": messages,
                 "pagination": pagination,
+                "hydrated": hydrate_externalized,  # fork
             }
         )
 

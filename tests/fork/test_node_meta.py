@@ -1,0 +1,170 @@
+"""Step 6 — lcm_node_meta sidecar: level + index block per node, cascade delete, classifier."""
+import shutil
+import sqlite3
+import time
+from pathlib import Path
+
+import pytest
+
+from hermes_lcm import node_meta
+from hermes_lcm.config import LCMConfig
+from hermes_lcm.dag import SummaryDAG, SummaryNode
+from hermes_lcm.db_bootstrap import (
+    VERSION_MISMATCH_GENUINELY_NEWER,
+    classify_version_mismatch,
+)
+from hermes_lcm.engine import LCMEngine
+
+
+def _node(session, depth, summary, created=None):
+    return SummaryNode(
+        session_id=session, depth=depth, summary=summary, token_count=10,
+        source_token_count=50, source_ids=[], source_type="messages",
+        created_at=created or time.time(),
+    )
+
+
+def test_migration_is_idempotent_and_marked(tmp_path):
+    path = tmp_path / "meta.db"
+    dag = SummaryDAG(path)
+    dag.close()
+    dag = SummaryDAG(path)  # second bootstrap: no error, table still there
+    try:
+        tables = {r[0] for r in dag.connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        assert node_meta.NODE_META_TABLE in tables
+        steps = {r[0] for r in dag.connection.execute("SELECT step_name FROM lcm_migration_state")}
+        assert node_meta.MIGRATION_STEP in steps
+    finally:
+        dag.close()
+
+
+def test_classifier_accepts_the_sidecar(tmp_path):
+    # the classifier needs the full core schema (store + DAG), so bootstrap an engine
+    path = tmp_path / "classify.db"
+    cfg = LCMConfig()
+    cfg.database_path = str(path)
+    LCMEngine(config=cfg, hermes_home=str(tmp_path)).shutdown()
+    conn = sqlite3.connect(str(path))
+    try:
+        assert classify_version_mismatch(conn) != VERSION_MISMATCH_GENUINELY_NEWER
+    finally:
+        conn.close()
+
+
+def test_roundtrip_and_index_block_extraction(tmp_path):
+    dag = SummaryDAG(tmp_path / "rt.db")
+    try:
+        summary = (
+            "Decisions: use sqlite.\nExpand for details about:\n- the sqlite decision and its rationale\n"
+            "- the rejected postgres option\n- files: dag.py, node_meta.py"
+        )
+        node_id = dag.add_node(_node("s", 0, summary))
+        dag.node_meta.write(node_id, level=2, summary=summary)
+        meta = dag.node_meta.read(node_id)
+        assert meta["level"] == 2
+        assert meta["index_block"].splitlines() == [
+            "- the sqlite decision and its rationale",
+            "- the rejected postgres option",
+            "- files: dag.py, node_meta.py",
+        ]
+        # expand_hint contract unchanged: first line only
+        assert LCMEngine._extract_expand_hint(summary) == "- the sqlite decision and its rationale"
+        # re-write updates in place
+        dag.node_meta.write(node_id, level=1, summary="no marker here")
+        assert dag.node_meta.read(node_id) == {"level": 1, "index_block": ""}
+    finally:
+        dag.close()
+
+
+def test_index_block_is_bounded():
+    block = node_meta.extract_index_block("x\nExpand for details about: " + "y " * 5000)
+    assert len(block) <= node_meta.INDEX_BLOCK_MAX_CHARS
+    assert block.endswith("…")
+
+
+def test_cascade_delete_removes_sidecar_rows(tmp_path):
+    dag = SummaryDAG(tmp_path / "cascade.db")
+    try:
+        ids = [dag.add_node(_node("s", d, f"d{d}")) for d in range(3)]
+        for node_id in ids:
+            dag.node_meta.write(node_id, level=1, summary="")
+        assert len(dag.node_meta.read_many(ids)) == 3
+        dag.delete_below_depth("s", 2)
+        assert set(dag.node_meta.read_many(ids)) == {ids[2]}
+        dag.delete_session_nodes("s")
+        assert dag.node_meta.read_many(ids) == {}
+    finally:
+        dag.close()
+
+
+def test_leaf_and_condense_writes_record_level(tmp_path, monkeypatch):
+    from hermes_lcm import escalation
+    cfg = LCMConfig(fresh_tail_count=1, leaf_chunk_tokens=1, condensation_fanin=2, incremental_max_depth=3)
+    cfg.database_path = str(tmp_path / "levels.db")
+    e = LCMEngine(config=cfg, hermes_home=str(tmp_path))
+    e._session_id = "lv"
+    e.threshold_tokens = 1
+    try:
+        # first call answers on L1; the second refuses L1 so the engine takes L2 (bullets)
+        state = {"n": 0}
+
+        def fake(prompt, max_tokens, model="", timeout=None):
+            state["n"] += 1
+            system = prompt[0]["content"] if isinstance(prompt, list) else ""
+            if state["n"] > 1 and "bullet" not in system:
+                return None
+            return "s\nExpand for details about: mock"
+
+        monkeypatch.setattr(escalation, "_call_llm_for_summary", fake)
+        e.compress([{"role": "user", "content": "one " * 30}, {"role": "user", "content": "tail"}])
+        e.compress([{"role": "user", "content": "two " * 30}, {"role": "user", "content": "tail2"}])
+        nodes = e._dag.get_session_nodes("lv")
+        levels = {n.node_id: e._dag.node_meta.read(n.node_id)["level"] for n in nodes}
+        assert sorted(levels.values())[0] == 1 and 2 in levels.values()
+        assembled = e._assemble_context(None, [{"role": "user", "content": "t"}])
+        assert "L2 bullet summary" in assembled[0]["content"]
+    finally:
+        e.shutdown()
+
+
+def test_rotate_marker_records_marker_level(tmp_path):
+    cfg = LCMConfig()
+    cfg.database_path = str(tmp_path / "rot.db")
+    cfg.fresh_tail_count = 2
+    e = LCMEngine(config=cfg, hermes_home=str(tmp_path / "home"))
+    try:
+        e._session_id = e._conversation_id = "live"
+        e._session_platform = "cli"
+        e._lifecycle.bind_session("live", conversation_id="live")
+        e.context_length = 200_000
+        for i in range(6):
+            e._store.append("live", {"role": "user", "content": f"m{i} " + "x" * 50}, source="test")
+        e._store._conn.commit()
+        result = e.rotate_active_session(apply=True)
+        assert e._dag.node_meta.read(result["marker_node_id"])["level"] == node_meta.LEVEL_MARKER
+        assembled = e._assemble_context(None, [{"role": "user", "content": "t"}])
+        assert "deterministic marker" in assembled[0]["content"]
+    finally:
+        e.shutdown()
+
+
+@pytest.mark.skipif(not Path("~/.hermes/lcm.db").expanduser().exists(), reason="no pre-existing lcm.db on this box")
+def test_bootstrap_against_a_copy_of_the_preexisting_db(tmp_path):
+    src = Path("~/.hermes/lcm.db").expanduser()
+    dst = tmp_path / "copy.db"
+    shutil.copy2(src, dst)
+    before = sqlite3.connect(str(dst))
+    node_count = before.execute("SELECT COUNT(*) FROM summary_nodes").fetchone()[0]
+    before.close()
+    dag = SummaryDAG(dst)
+    try:
+        assert dag.connection.execute("SELECT COUNT(*) FROM summary_nodes").fetchone()[0] == node_count
+        tables = {r[0] for r in dag.connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        assert node_meta.NODE_META_TABLE in tables
+        conn = sqlite3.connect(str(dst))
+        try:
+            assert classify_version_mismatch(conn) != VERSION_MISMATCH_GENUINELY_NEWER
+        finally:
+            conn.close()
+    finally:
+        dag.close()
