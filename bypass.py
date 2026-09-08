@@ -546,7 +546,51 @@ class BypassMixin:
             "content": marked_loss.bypass_omission_marker(len(dropped), dropped_chars),
         }
         compacted = list(messages[:head_count]) + [marker] + list(messages[-tail_count:])
-        return self._trim_bypass_compacted_to_cap(compacted, target_tokens)
+        trimmed = self._trim_bypass_compacted_to_cap(compacted, target_tokens)
+        # fork: betterlcm — the cap loop above may remove more messages after the receipt was
+        # written, so the counts are recomputed against what actually SURVIVED. Upstream's
+        # receipt (and the fork's first version of it) claimed "8 messages dropped" while nine
+        # had gone (verify-4 #17).
+        return self._refresh_bypass_receipt(messages, trimmed)
+
+    def _refresh_bypass_receipt(
+        self,
+        original: List[Dict[str, Any]],
+        trimmed: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """fork: betterlcm — restate the receipt's counts from the FINAL result.
+
+        Counted in aggregate rather than by object identity: the surviving messages are
+        trimmed COPIES, and the characters the trim removed from them are gone too.
+        """
+        def _chars(messages: List[Dict[str, Any]]) -> int:
+            return sum(
+                len(str(normalize_content_value(message.get("content")) or ""))
+                for message in messages
+                if not marked_loss.is_bypass_omission_marker(message)
+            )
+
+        surviving = [
+            message for message in trimmed
+            if not marked_loss.is_bypass_omission_marker(message)
+        ]
+        original_messages = [
+            message for message in original
+            if not marked_loss.is_bypass_omission_marker(message)
+        ]
+        dropped = original_messages[:max(0, len(original_messages) - len(surviving))]
+        dropped_chars = max(0, _chars(original_messages) - _chars(surviving))
+        refreshed: List[Dict[str, Any]] = []
+        for message in trimmed:
+            if not marked_loss.is_bypass_omission_marker(message):
+                refreshed.append(message)
+                continue
+            was_compact = "msg /" in str(message.get("content") or "")
+            content = marked_loss.bypass_omission_marker(len(dropped), dropped_chars)
+            if was_compact:
+                content = marked_loss.compact_bypass_omission_marker(content)
+            refreshed.append({**message, "content": content})
+        return refreshed
 
     def _compress_lcm_bypassed_session(
         self,

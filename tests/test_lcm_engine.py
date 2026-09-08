@@ -23639,11 +23639,13 @@ class TestEngineTools:
             "total_sources": 5,
             "next_source_offset": 3,
             "next_content_offset": 0,
-            # fork: betterlcm — an assistant turn's tool calls are paged too (audit p02 T04)
+            # fork: betterlcm — an assistant turn's tool calls are paged too (audit p02 T04),
+            # and an expansion says whether every source it names could be read (verify-4 #15)
             "tool_calls_offset": 0,
             "next_tool_calls_offset": 0,
             "has_more": True,
             "remaining_sources": 2,
+            "complete": True,
         }
 
     def test_handle_expand_keeps_ingest_placeholder_ref_unsliced_under_tiny_budget(self, engine):

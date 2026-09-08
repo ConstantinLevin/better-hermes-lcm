@@ -132,3 +132,26 @@ def test_the_receipt_never_costs_the_newest_request(tmp_path):
         assert "LATEST REQUEST" in rendered, "the live request was deleted to keep the receipt"
     finally:
         e.shutdown()
+
+
+def test_the_receipt_counts_what_actually_went(tmp_path):
+    """verify-4 #17: the counts were computed before the cap loop removed more messages, so
+    the receipt claimed eight dropped while nine had gone; compacting an already compact
+    receipt also turned its counts into a generic sentence."""
+    from hermes_lcm import marked_loss
+    e = _bypassed_engine(tmp_path, "by17.db")
+    try:
+        messages = [{"role": "user", "content": f"turn {index} " + "t" * 400} for index in range(10)]
+        result = e._fallback_tail_compaction(messages, target_tokens=60)
+        receipt = next(m for m in result if marked_loss.is_bypass_omission_marker(m))
+        counted, chars = marked_loss.bypass_omission_counts(receipt["content"])
+        survivors = [m for m in result if not marked_loss.is_bypass_omission_marker(m)]
+        assert counted == len(messages) - len(survivors), (counted, len(survivors))
+        assert chars > 0
+
+        # compaction is idempotent: the counts survive being shortened twice
+        once = marked_loss.compact_bypass_omission_marker(receipt["content"])
+        twice = marked_loss.compact_bypass_omission_marker(once)
+        assert marked_loss.bypass_omission_counts(twice) == (counted, chars)
+    finally:
+        e.shutdown()

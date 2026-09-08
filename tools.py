@@ -1311,6 +1311,7 @@ def _expand_message_sources(
     stored_by_id = engine._store.get_batch(source_ids)
 
     messages: list[dict[str, Any]] = []
+    missing_source_ids: list[int] = []  # fork: betterlcm — sources that could not be read
     budget_used = 0
     next_source_offset: int | None = source_offset
     next_content_offset = content_offset
@@ -1327,6 +1328,10 @@ def _expand_message_sources(
             break
         stored = stored_by_id.get(store_id)
         if not stored:
+            # fork: betterlcm — a source that cannot be read is not a source that was read.
+            # Skipping it silently made a leaf whose only source was missing look like an
+            # exhausted, complete expansion (verify-4 #15).
+            missing_source_ids.append(int(store_id))
             next_source_offset = source_index + 1
             next_content_offset = 0
             has_more = next_source_offset < total_sources
@@ -1471,6 +1476,14 @@ def _expand_message_sources(
         next_tool_calls_offset=next_tool_calls_offset,
         has_more=has_more,
     )
+    if missing_source_ids:
+        pagination["missing_source_store_ids"] = missing_source_ids
+        pagination["complete"] = False
+        pagination["incomplete_reason"] = (
+            f"{len(missing_source_ids)} source row(s) referenced by this node could not be read"
+        )
+    else:
+        pagination["complete"] = True
     return messages, pagination
 
 
@@ -2255,7 +2268,10 @@ def _recent_leaf_sections(
     with engine._dag._db_lock:
         connection = engine._dag.connection
         if connection is None:
-            return []
+            # fork: betterlcm — a closed/unavailable DAG is not an empty window (verify-4 #13)
+            raise _RecentIncomplete(
+                "the summary database is not available; this window could not be scanned"
+            )
         with _sqlite_savepoint(connection):
             return _recent_leaf_sections_staged(
                 engine,
@@ -2273,7 +2289,9 @@ def _recent_leaf_sections_staged(
 ) -> list[dict[str, Any]]:
     connection = engine._dag.connection
     if connection is None:
-        return []
+        raise _RecentIncomplete(  # fork: betterlcm — see above (verify-4 #13)
+            "the summary database is not available; this window could not be scanned"
+        )
     # Include retained higher-depth/carry-forward summaries, not just depth-0
     # current-session leaves, mirroring how lcm_grep/describe select across
     # depths and retained lineage (maintainer #389 blocker 2).

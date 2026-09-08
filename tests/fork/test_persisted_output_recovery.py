@@ -96,3 +96,36 @@ def test_the_recovered_output_is_copied_durably_even_with_externalization_disabl
         assert any("DECISION: cancel the launch" in text for text in texts), texts[0][:400]
     finally:
         engine.shutdown()
+
+
+def test_recovered_bytes_are_kept_even_when_the_durable_copy_cannot_be_written(tmp_path, monkeypatch):
+    """verify-4 #18: when the payload write failed, ingest fell back to the host's marker and
+    the recovered bytes — already in hand — were discarded. The host then deletes its file."""
+    from hermes_lcm import ingest_protection
+    from hermes_lcm.config import LCMConfig
+    from hermes_lcm.engine import LCMEngine
+
+    home = tmp_path / "hermes-home"
+    directory = _spillover(tmp_path)
+    content = "FULL RECOVERED BODY: the rollout was reverted\n" + ("body " * 3000)
+    target = directory / "tool_result_call11.txt"
+    target.write_text(content, encoding="utf-8")
+
+    monkeypatch.setattr(ingest_protection, "maybe_externalize_payload", lambda *a, **k: None)
+    cfg = LCMConfig(database_path=str(home / "lcm.db"))
+    engine = LCMEngine(config=cfg, hermes_home=str(home))
+    try:
+        engine.on_session_start("pf", platform="cli", context_length=200_000)
+        engine._ingest_messages([
+            {"role": "user", "content": "read it"},
+            {"role": "assistant", "content": "reading", "tool_calls": [
+                {"id": "call11", "type": "function",
+                 "function": {"name": "read_file", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "call11", "content": _marker(target, content)},
+        ])
+        target.unlink()
+        stored = "\n".join(str(row.get("content") or "")
+                           for row in engine._store.get_session_messages("pf"))
+        assert "FULL RECOVERED BODY" in stored, "the recovered bytes were thrown away"
+    finally:
+        engine.shutdown()

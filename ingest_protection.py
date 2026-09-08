@@ -1437,12 +1437,31 @@ def protect_message_for_ingest(
                 ),
             )
 
+    # fork: betterlcm — if the durable copy could not be written but the bytes ARE in hand,
+    # keep the bytes. Storing the host's marker instead threw away content that had already
+    # reached the plugin, and the host deletes its spillover file after 24 hours, so the
+    # remaining recovery path was dead (verify-4 #18). The store is the archive: inline is a
+    # perfectly good place for it.
+    recovered_inline_content = None
+    if (
+        recovered_with_stat is not None
+        and recovered_externalized is None
+        and normalized_recovered_content
+    ):
+        recovered_inline_content = normalized_recovered_content
+        logger.warning(
+            "LCM could not write a durable copy of a recovered host output (%d chars); "
+            "storing the recovered bytes inline instead of the expiring marker",
+            len(normalized_recovered_content),
+        )
+
     # A host-side truncation marker without durable recovered storage is not
     # lossless. Keep the marker/preview visible inline instead of hiding it
     # behind an LCM externalized-payload ref that would look recoverable.
     preserve_truncation_marker_inline = (
         role == "tool"
         and recovered_externalized is None
+        and recovered_inline_content is None
         and isinstance(normalized_content, str)
         and (
             _is_hermes_persisted_output_marker(normalized_content)
@@ -1457,6 +1476,8 @@ def protect_message_for_ingest(
     if normalized_content:
         if recovered_externalized:
             msg["content"] = recovered_externalized["placeholder"]
+        elif recovered_inline_content is not None:
+            msg["content"] = recovered_inline_content  # fork: keep the bytes (verify-4 #18)
         elif (
             is_externalized_ingest_placeholder(normalized_content)
             or is_externalized_placeholder(normalized_content)

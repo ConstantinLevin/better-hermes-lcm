@@ -38,6 +38,21 @@ def bypass_omission_marker(dropped_messages: int, dropped_chars: int) -> str:
 
 
 _BYPASS_OMISSION_COUNTS_RE = re.compile(r"(\d+) older message\(s\) \(~(\d+) chars\)")
+_BYPASS_COMPACT_COUNTS_RE = re.compile(r"(\d+) msg / (\d+) chars dropped")
+
+
+def bypass_omission_counts(text: str) -> tuple[int, int]:
+    """The (messages, chars) a receipt records, in either of its two forms.
+
+    fork: betterlcm — reading both forms makes compaction IDEMPOTENT: compacting an already
+    compact receipt used to turn the counted sentence into an uncounted one (verify-4 #17).
+    """
+    value = str(text or "")
+    for pattern in (_BYPASS_OMISSION_COUNTS_RE, _BYPASS_COMPACT_COUNTS_RE):
+        match = pattern.search(value)
+        if match:
+            return int(match.group(1)), int(match.group(2))
+    return 0, 0
 
 
 def compact_bypass_omission_marker(text: str) -> str:
@@ -46,11 +61,11 @@ def compact_bypass_omission_marker(text: str) -> str:
     fork: betterlcm — the receipt is never removed, but when the budget cannot hold it AND the
     live request, the counts are what must survive, not the sentence around them.
     """
-    match = _BYPASS_OMISSION_COUNTS_RE.search(str(text or ""))
-    if not match:
+    messages, chars = bypass_omission_counts(text)
+    if not messages and not chars:
         return f"{BYPASS_OMISSION_PREFIX} older messages dropped by the LCM bypass trim]"
     return (
-        f"{BYPASS_OMISSION_PREFIX} {match.group(1)} msg / {match.group(2)} chars dropped, "
+        f"{BYPASS_OMISSION_PREFIX} {messages} msg / {chars} chars dropped, "
         "host transcript only]"
     )
 

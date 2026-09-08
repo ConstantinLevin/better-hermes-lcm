@@ -935,3 +935,43 @@ def test_an_orphan_tool_result_is_named_not_dropped(tmp_path):
         assert "context summary above" not in stub["content"]
     finally:
         e.shutdown()
+
+
+def test_an_unreadable_source_row_is_reported_not_skipped(tmp_path):
+    """verify-4 #15: expanding a leaf whose only source row was missing returned no messages,
+    remaining_sources=0 and has_more=false — indistinguishable from an exhausted list."""
+    import json
+    from hermes_lcm import tools as lcm_tools
+    e = _engine(tmp_path, "missing.db", incremental_max_depth=0)
+    try:
+        e.on_session_start("ms", platform="cli", context_length=200_000)
+        node_id = e._dag.add_node_with_meta(SummaryNode(
+            session_id="ms", depth=0, summary="a decision\n[Expand for details: it]",
+            token_count=5, source_token_count=50, source_ids=[999999],
+            source_type="messages", created_at=time.time()), level=1)
+        payload = json.loads(lcm_tools.lcm_expand({"node_id": node_id}, engine=e))
+        pagination = payload["pagination"]
+        assert pagination["complete"] is False
+        assert pagination["missing_source_store_ids"] == [999999]
+        assert "could not be read" in pagination["incomplete_reason"]
+    finally:
+        e.shutdown()
+
+
+def test_recent_says_the_database_was_unavailable_instead_of_empty(tmp_path):
+    """verify-4 #13: with the DAG closed, lcm_recent returned zero sections, complete:true and
+    truncated:false — a successful scan of a database it never opened."""
+    import json
+    from hermes_lcm import tools as lcm_tools
+    e = _engine(tmp_path, "closeddag.db")
+    try:
+        e.on_session_start("cd", platform="cli", context_length=200_000)
+        e._dag.close()
+        payload = json.loads(lcm_tools.lcm_recent({"period": "today"}, engine=e))
+        assert payload["complete"] is False
+        assert "not available" in payload["incomplete_reason"]
+    finally:
+        try:
+            e.shutdown()
+        except Exception:
+            pass
