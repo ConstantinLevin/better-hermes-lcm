@@ -9,7 +9,7 @@ a reader can find them, and the message-body marker keeps upstream's literal
 from __future__ import annotations
 
 import re
-from typing import Iterable, List, Sequence
+from typing import Any, Iterable, List, Sequence
 
 # Upstream's head/tail split for a 3000-char cap was 2000 + 800; keep those ratios so the
 # 256k anchor reproduces upstream's serialisation byte for byte apart from the marker.
@@ -21,6 +21,28 @@ TRUNCATED_LITERAL = "...[truncated]..."
 BYPASS_TRIM_SUFFIX = "…[LCM bypass trim: text cut to fit the cap; full text in the host transcript]"
 BYPASS_FINAL_TRIM_SUFFIX = "…[LCM cut]"
 ROTATE_MARKER_PREFIX = "[LCM rotate marker]"
+# fork: betterlcm — the receipt for a bypassed session's dropped messages. It is identified by
+# this prefix so the cap-trimming loop can refuse to remove or shorten the one message that
+# says something was removed (audit p05 BY01).
+BYPASS_OMISSION_PREFIX = "[Context omitted:"
+
+
+def bypass_omission_marker(dropped_messages: int, dropped_chars: int) -> str:
+    """Name what the deterministic bypass trim dropped from a session LCM does not store."""
+    return (
+        f"{BYPASS_OMISSION_PREFIX} this session is ignored/stateless for LCM, and Hermes native "
+        f"compression was unavailable. {dropped_messages} older message(s) (~{dropped_chars} "
+        "chars) were dropped here to keep the request inside the model context window; they "
+        "are not stored by LCM and remain only in the host transcript.]"
+    )
+
+
+def is_bypass_omission_marker(message: Any) -> bool:
+    """fork: betterlcm — is this the receipt above?"""
+    if not isinstance(message, dict):
+        return False
+    content = message.get("content")
+    return isinstance(content, str) and content.lstrip().startswith(BYPASS_OMISSION_PREFIX)
 
 _WS_RE = re.compile(r"\s+")
 

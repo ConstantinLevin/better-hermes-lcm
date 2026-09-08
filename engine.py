@@ -1775,6 +1775,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                         "store_ids": source_store_ids,
                         "message_count": len(attempt_chunk),
                     },
+                    deadline=deadline,  # fork: one end time for L1+L2+fallbacks (p05 CP05)
                 )
                 return attempt_chunk, source_tokens, summary_text, level, attempt_number
             except Exception as exc:
@@ -5912,6 +5913,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                 "node_ids": [node.node_id for node in nodes],
                 "source_depth": depth,
             },
+            deadline=deadline,  # fork: one end time for L1+L2+fallbacks (p05 CP05)
         )
         earliest_at, latest_at = self._dag.get_source_time_window(
             [node.node_id for node in nodes]

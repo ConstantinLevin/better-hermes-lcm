@@ -289,18 +289,25 @@ class BypassMixin:
 
     @staticmethod
     def _truncate_bypass_content_value(content: Any, char_budget: int, *, suffix: str = "") -> Any:
+        """fork: betterlcm — the cut marker is kept even at a zero budget (audit p05 BY01).
+
+        Upstream appended the suffix only while ``char_budget > 0``, so the one case where the
+        whole text disappeared was also the one case that left no trace of it.
+        """
         if char_budget < 0:
             char_budget = 0
         if isinstance(content, str):
             if len(content) <= char_budget:
                 return content
-            return content[:char_budget] + (suffix if char_budget > 0 else "")
+            return content[:char_budget] + suffix
         if isinstance(content, list):
             truncated_parts: list[Any] = []
             changed = False
             for part in content:
                 if isinstance(part, str):
-                    next_part = part if len(part) <= char_budget else part[:char_budget] + (suffix if char_budget > 0 else "")
+                    next_part = (
+                        part if len(part) <= char_budget else part[:char_budget] + suffix
+                    )
                     changed = changed or next_part != part
                     truncated_parts.append(next_part)
                     continue
@@ -309,14 +316,14 @@ class BypassMixin:
                     for key in ("text", "content"):
                         value = next_part.get(key)
                         if isinstance(value, str) and len(value) > char_budget:
-                            next_part[key] = value[:char_budget] + (suffix if char_budget > 0 else "")
+                            next_part[key] = value[:char_budget] + suffix
                             changed = True
                         elif isinstance(value, dict):
                             nested = dict(value)
                             for nested_key in ("value", "content"):
                                 nested_value = nested.get(nested_key)
                                 if isinstance(nested_value, str) and len(nested_value) > char_budget:
-                                    nested[nested_key] = nested_value[:char_budget] + (suffix if char_budget > 0 else "")
+                                    nested[nested_key] = nested_value[:char_budget] + suffix
                                     changed = True
                             next_part[key] = nested
                     truncated_parts.append(next_part)
@@ -326,7 +333,7 @@ class BypassMixin:
                 return truncated_parts
         normalized = normalize_content_value(content)
         if isinstance(normalized, str) and len(normalized) > char_budget:
-            return normalized[:char_budget] + (suffix if char_budget > 0 else "")
+            return normalized[:char_budget] + suffix
         return content
 
     def _trim_bypass_compacted_to_cap(
@@ -342,6 +349,9 @@ class BypassMixin:
             remove_indices: list[int] = []
             for idx, msg in enumerate(compacted):
                 if idx == 0:
+                    continue
+                # fork: betterlcm — never remove the receipt that says messages were removed
+                if marked_loss.is_bypass_omission_marker(msg):
                     continue
                 if msg.get("role") != "assistant" or not msg.get("tool_calls"):
                     continue
@@ -362,6 +372,19 @@ class BypassMixin:
                     and compacted[0].get("tool_calls")
                 ):
                     remove_index = 0
+                if marked_loss.is_bypass_omission_marker(compacted[remove_index]):
+                    # fork: the receipt is not a removal candidate; take the next message
+                    following = next(
+                        (
+                            index
+                            for index in range(remove_index + 1, len(compacted))
+                            if not marked_loss.is_bypass_omission_marker(compacted[index])
+                        ),
+                        None,
+                    )
+                    if following is None:
+                        break
+                    remove_index = following
                 remove_indices = [remove_index]
             before_shape = [
                 (msg.get("role"), msg.get("tool_call_id"), bool(msg.get("tool_calls")))
@@ -388,6 +411,9 @@ class BypassMixin:
         for _ in range(12):
             next_messages: list[Dict[str, Any]] = []
             for msg in compacted:
+                if marked_loss.is_bypass_omission_marker(msg):
+                    next_messages.append(msg)  # fork: the receipt is never shortened
+                    continue
                 next_msg = dict(msg)
                 content = next_msg.get("content")
                 # fork: betterlcm — a cut carries a marker (marked_loss.BYPASS_TRIM_SUFFIX)
@@ -407,6 +433,15 @@ class BypassMixin:
 
         compacted = truncated
         while len(compacted) > 1 and count_messages_tokens(compacted) > target_tokens:
+            # fork: betterlcm — drop from the front, but keep the receipt
+            if marked_loss.is_bypass_omission_marker(compacted[0]) and len(compacted) > 1:
+                remainder = self._sanitize_active_context_messages(compacted[1:])
+                if not remainder:
+                    break
+                compacted = [compacted[0]] + remainder[1:] if len(remainder) > 1 else [compacted[0]]
+                if len(compacted) <= 1:
+                    break
+                continue
             compacted = self._sanitize_active_context_messages(compacted[1:])
 
         char_budget = max(0, min(80, target_tokens * 4))
@@ -415,10 +450,16 @@ class BypassMixin:
             previous_budget = char_budget
             shrunk: list[Dict[str, Any]] = []
             for msg in compacted:
+                if marked_loss.is_bypass_omission_marker(msg):
+                    shrunk.append(msg)  # fork: the receipt survives every stage
+                    continue
                 next_msg = dict(msg)
                 content = next_msg.get("content")
+                # fork: betterlcm — the suffix marker is kept even at a zero char budget.
+                # Upstream dropped it exactly there, so the most destructive trim of all was
+                # the one that said nothing about itself (audit p05 BY01).
                 next_msg["content"] = self._truncate_bypass_content_value(
-                    content, char_budget, suffix=marked_loss.BYPASS_FINAL_TRIM_SUFFIX  # fork: marked
+                    content, char_budget, suffix=marked_loss.BYPASS_FINAL_TRIM_SUFFIX
                 )
                 shrunk.append(next_msg)
             compacted = self._sanitize_active_context_messages(shrunk)
@@ -437,13 +478,16 @@ class BypassMixin:
             return self._trim_bypass_compacted_to_cap(messages, target_tokens)
         head_count = max(1, min(self.protect_first_n, len(messages)))
         tail_count = max(1, min(self.protect_last_n, len(messages) - head_count))
+        # fork: betterlcm — the receipt says HOW MUCH went. Upstream's marker named neither the
+        # number of messages nor their size, so a bypassed session could lose most of its
+        # history behind a sentence that read like boilerplate (audit p05 BY01).
+        dropped = messages[head_count:len(messages) - tail_count]
+        dropped_chars = sum(
+            len(str(normalize_content_value(message.get("content")) or "")) for message in dropped
+        )
         marker = {
             "role": "user",
-            "content": (
-                "[Context omitted: this session is ignored/stateless for LCM, "
-                "and Hermes native compression was unavailable. Older messages "
-                "were dropped to keep the request within the model context window.]"
-            ),
+            "content": marked_loss.bypass_omission_marker(len(dropped), dropped_chars),
         }
         compacted = list(messages[:head_count]) + [marker] + list(messages[-tail_count:])
         return self._trim_bypass_compacted_to_cap(compacted, target_tokens)

@@ -1,10 +1,15 @@
-"""Three-level summarization escalation.
+"""Two-level summarization escalation.
 
-Level 1 (Normal):    LLM summary preserving details
+Level 1 (Normal):     LLM summary preserving details
 Level 2 (Aggressive): LLM bullet-point summary at half the token budget
-Level 3 (Fallback):   Deterministic truncation — no LLM, guaranteed convergence
 
-Each level checks if Tokens(summary) < Tokens(source). If not, escalates.
+Each level checks that the result is an index of the source and smaller than it; if not, the
+next route and then L2 are tried.
+
+fork: betterlcm — there is no Level 3. Upstream converged with deterministic truncation, which
+wrote a cut-down fragment of the source into the DAG as if it were a summary. When every route
+fails this module raises ``SummaryUnavailableError`` instead: the raw messages stay in the
+active context, the engine arms a compression-failure cooldown, and nothing lossy is stored.
 """
 
 from __future__ import annotations
@@ -387,10 +392,23 @@ def _invoke_summary_llm_chain(
     spend_guard: "SummarySpendGuard | None" = None,
     accepts_result: Callable[[str], bool] | None = None,
     route_errors: list[BaseException] | None = None,  # fork: betterlcm — see ES03
+    deadline: float | None = None,  # fork: betterlcm — see CP05
 ) -> Optional[str]:
     chain = _summary_model_chain(model, fallback_models)
     skipped = 0
     for candidate_model in chain:
+        # fork: betterlcm — the caller's deadline is an END TIME for the whole attempt, not a
+        # per-call allowance. Reusing one timeout for every route and level let a nominal
+        # 200-second compaction spend that timeout once per route per level and outlive the
+        # host's wait, leaving background work running (audit p05 CP05).
+        call_timeout = timeout
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                logger.warning("LCM summary deadline reached before route %s",
+                               candidate_model or _DEFAULT_ROUTE_KEY)
+                break
+            call_timeout = remaining if call_timeout is None else min(call_timeout, remaining)
         if circuit_breaker is not None and not circuit_breaker.allows(candidate_model):
             skipped += 1
             logger.warning(
@@ -412,7 +430,7 @@ def _invoke_summary_llm_chain(
                 prompt,
                 max_tokens,
                 model=candidate_model,
-                timeout=timeout,
+                timeout=call_timeout,
             )
         except Exception as exc:
             logger.warning("LLM summarization failed: %s", exc)
@@ -654,11 +672,15 @@ def summarize_with_escalation(
     circuit_breaker: SummaryCircuitBreaker | None = None,
     spend_guard: "SummarySpendGuard | None" = None,
     source_provenance: Mapping[str, Any] | None = None,
+    deadline: float | None = None,  # fork: betterlcm — one END TIME for L1+L2+fallbacks
 ) -> tuple[str, int]:
-    """Run 3-level escalation. Returns (summary, level_used).
+    """Run L1/L2 escalation. Returns (summary, level_used).
 
-    Guarantees convergence: level 3 is deterministic and always produces
-    output shorter than the source.
+    fork: betterlcm — there is no deterministic L3; when every route fails this raises
+    ``SummaryUnavailableError`` and the raw messages stay in context. ``deadline`` is a
+    ``time.monotonic()`` instant that bounds the WHOLE attempt: each route's timeout is
+    recomputed from the time left, so the escalation cannot outlive the caller's clock by a
+    factor of routes × levels (audit p05 CP05).
     """
     # Level 1: detailed summary
     l1_prompt = _build_l1_prompt(
@@ -701,6 +723,7 @@ def summarize_with_escalation(
         spend_guard=spend_guard,
         accepts_result=_accepts,
         route_errors=route_errors,
+        deadline=deadline,
     )
 
     if l1_result:
@@ -728,6 +751,7 @@ def summarize_with_escalation(
         spend_guard=spend_guard,
         accepts_result=_accepts,
         route_errors=route_errors,
+        deadline=deadline,
     )
 
     if l2_result:

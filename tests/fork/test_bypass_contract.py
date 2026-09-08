@@ -78,3 +78,37 @@ def test_an_older_host_signature_drops_only_what_it_cannot_take(tmp_path, monkey
         }
     finally:
         e.shutdown()
+
+
+def test_the_bypass_receipt_survives_every_trimming_stage(tmp_path):
+    """Audit p05 BY01: the deterministic fallback deletes messages from a session LCM does not
+    store, and its omission marker was itself removable, said nothing about how much went, and
+    the zero-budget stage dropped even the per-message cut marker."""
+    from hermes_lcm import marked_loss
+    e = _bypassed_engine(tmp_path, "by01.db")
+    try:
+        messages = [{"role": "system", "content": "system"}]
+        messages += [
+            {"role": "user" if index % 2 == 0 else "assistant", "content": f"turn {index} " + "x" * 300}
+            for index in range(20)
+        ]
+        result = e._fallback_tail_compaction(messages, target_tokens=40)
+
+        rendered = "\n".join(str(m.get("content")) for m in result)
+        assert marked_loss.BYPASS_OMISSION_PREFIX in rendered, "the receipt was trimmed away"
+        assert "older message(s)" in rendered and "chars) were dropped" in rendered
+        marker = next(m for m in result if marked_loss.is_bypass_omission_marker(m))
+        assert "[LCM cut]" not in str(marker["content"]), "the receipt itself was shortened"
+    finally:
+        e.shutdown()
+
+
+def test_a_zero_budget_cut_still_says_it_cut(tmp_path):
+    e = _bypassed_engine(tmp_path, "by01b.db")
+    try:
+        from hermes_lcm import marked_loss
+        cut = e._truncate_bypass_content_value("a decision that matters", 0,
+                                               suffix=marked_loss.BYPASS_FINAL_TRIM_SUFFIX)
+        assert cut == marked_loss.BYPASS_FINAL_TRIM_SUFFIX
+    finally:
+        e.shutdown()

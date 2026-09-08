@@ -975,8 +975,14 @@ class CompactionMixin:
 
                 try:
                     summary_kwargs: dict[str, Any] = {"focus_topic": focus_topic}
+                    # fork: betterlcm — the leaf loop's clock reaches the summariser in every
+                    # mode that has one, not only under the sweep flag. Upstream checked its
+                    # deadline between passes while each pass could still spend one timeout
+                    # per route per level inside escalation (audit p05 CP05).
                     if threshold_full_sweep_active:
                         summary_kwargs["deadline"] = sweep_deadline
+                    elif leaf_deadline is not None:
+                        summary_kwargs["deadline"] = leaf_deadline
                     lookahead_result = self._take_leaf_lookahead(summary_input_chunk)  # fork
                     if lookahead_result is not None:
                         (
