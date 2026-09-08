@@ -178,13 +178,41 @@ DEFAULT_TOKEN_CACHE_SIZE = 2048
 _count_tokens_cached = lru_cache(maxsize=DEFAULT_TOKEN_CACHE_SIZE)(_count_tokens_keyed)
 
 
-def set_token_cache_size(maxsize: int) -> None:
+_token_cache_requests: dict[int, int] = {}
+_token_cache_owner_refs: dict[int, Any] = {}
+
+
+def _forget_token_cache_owner(owner_id: int) -> None:
+    """Drop a dead engine's request and re-apply the remaining maximum."""
+    _token_cache_requests.pop(owner_id, None)
+    _token_cache_owner_refs.pop(owner_id, None)
+    set_token_cache_size(DEFAULT_TOKEN_CACHE_SIZE)
+
+
+def set_token_cache_size(maxsize: int, *, owner: Any = None) -> None:
     """fork: betterlcm — resize the memo (window-weighted: 2048 at 256k, 8192 at 1M).
 
-    Rebuilds the LRU only when the size changes; the cache is emptied on resize.
+    The cache is process-global while engines are not, so the size is the MAXIMUM any live
+    engine asked for: a 256k clone used to shrink the cache a 1M engine had just grown, and
+    the rebuild emptied it — throwing away the other engine's work every time a second engine
+    bound a session (verify-3 O8). ``owner`` identifies the requester so its request can be
+    replaced rather than accumulated.
     """
     global _count_tokens_cached
     size = max(64, int(maxsize or DEFAULT_TOKEN_CACHE_SIZE))
+    if owner is not None:
+        owner_id = id(owner)
+        _token_cache_requests[owner_id] = size
+        if owner_id not in _token_cache_owner_refs:
+            try:
+                import weakref
+                _token_cache_owner_refs[owner_id] = weakref.finalize(
+                    owner, _forget_token_cache_owner, owner_id
+                )
+            except TypeError:  # pragma: no cover - not weak-referenceable
+                _token_cache_owner_refs[owner_id] = None
+    if _token_cache_requests:
+        size = max([DEFAULT_TOKEN_CACHE_SIZE, *_token_cache_requests.values()])
     if _count_tokens_cached.cache_info().maxsize == size:
         return
     _count_tokens_cached = lru_cache(maxsize=size)(_count_tokens_keyed)

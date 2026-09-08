@@ -136,3 +136,29 @@ def test_node_decoding_does_not_depend_on_physical_column_order(tmp_path):
         assert dag.get_session_nodes("s")[0].summary == "THE SUMMARY"
     finally:
         dag.close()
+
+
+def test_a_second_engine_cannot_shrink_the_shared_token_cache():
+    """verify-3 O8: the memo is process-global while engines are not, so a 256k clone shrank
+    (and emptied) the cache a 1M engine had just grown."""
+    from hermes_lcm import tokens as tokens_module
+
+    original = tokens_module._count_tokens_cached
+    requests = dict(tokens_module._token_cache_requests)
+    try:
+        tokens_module._token_cache_requests.clear()
+        class _Owner:
+            pass
+
+        big, small = _Owner(), _Owner()
+        tokens_module.set_token_cache_size(8192, owner=big)
+        assert tokens_module._count_tokens_cached.cache_info().maxsize == 8192
+        tokens_module.set_token_cache_size(2048, owner=small)
+        assert tokens_module._count_tokens_cached.cache_info().maxsize == 8192, \
+            "the smaller request must not shrink the shared cache"
+        tokens_module.set_token_cache_size(2048, owner=big)  # the big engine rebound smaller
+        assert tokens_module._count_tokens_cached.cache_info().maxsize == 2048
+    finally:
+        tokens_module._token_cache_requests.clear()
+        tokens_module._token_cache_requests.update(requests)
+        tokens_module._count_tokens_cached = original

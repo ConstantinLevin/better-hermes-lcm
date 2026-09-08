@@ -163,7 +163,9 @@ class WindowScaledSettingsMixin:
         except ImportError:  # pragma: no cover
             from tokens import set_token_cache_size  # type: ignore
         try:
-            set_token_cache_size(int(self._effective("token_cache_size") or 0))
+            # fork: the memo is process-global while engines are not; identify the requester
+            # so a second engine's smaller window cannot shrink (and empty) the shared cache
+            set_token_cache_size(int(self._effective("token_cache_size") or 0), owner=self)
         except Exception:  # pragma: no cover
             pass
 

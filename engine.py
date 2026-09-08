@@ -6468,15 +6468,47 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         if summary_parts:
             selected_parts = summary_parts
             if summary_budget is not None:
+                # fork: betterlcm — incremental accounting. Rejoining and recounting the whole
+                # accepted prefix for every candidate made assembly quadratic in the number of
+                # rendered summaries, on the per-turn hot path (verify-3 O2). The running total
+                # is an upper bound (the separator is counted for every part after the first),
+                # and the exact envelope is checked once at the end.
                 selected_parts = []
+                separator = "\n\n---\n\n"
+                empty_overhead = count_message_tokens({"role": summary_role, "content": ""})
+
+                def _content_cost(text: str) -> int:
+                    # the same counter the final check uses, so a caller that swaps the
+                    # counter (tests do) sees one consistent accounting
+                    return max(
+                        0,
+                        count_message_tokens({"role": summary_role, "content": text})
+                        - empty_overhead,
+                    )
+
+                separator_tokens = _content_cost(separator)
+                running = empty_overhead
                 for part, part_node_id in zip(summary_parts, summary_part_node_ids):
-                    candidate = "\n\n---\n\n".join(selected_parts + [part])
-                    candidate_msg = {"role": summary_role, "content": candidate}
-                    if count_message_tokens(candidate_msg) > summary_budget:
+                    cost = _content_cost(part) + (separator_tokens if selected_parts else 0)
+                    if running + cost > summary_budget:
                         if part_node_id is not None:
                             omitted_node_ids.append(part_node_id)
                         continue
                     selected_parts.append(part)
+                    running += cost
+                while selected_parts and count_message_tokens(
+                    {"role": summary_role, "content": separator.join(selected_parts)}
+                ) > summary_budget:
+                    dropped_part = selected_parts.pop()
+                    dropped_node_id = next(
+                        (
+                            node_id for part, node_id in zip(summary_parts, summary_part_node_ids)
+                            if part is dropped_part and node_id is not None
+                        ),
+                        None,
+                    )
+                    if dropped_node_id is not None:
+                        omitted_node_ids.append(dropped_node_id)
         # fork: betterlcm — whatever was left out is named, so absence from the prefix
         # never reads as absence from history. That includes the assistant turns the
         # active-context cleanup below is about to drop for holding only internal content.

@@ -226,14 +226,32 @@ def _temporary_sqlite_busy_timeout(
     """Temporarily bound SQLite lock waits for gateway-critical paths."""
     bounded_timeout = max(0, int(timeout_ms))
     originals: list[tuple[sqlite3.Connection, int]] = []
-    for conn in connections:
-        if conn is None:
-            continue
-        original = _sqlite_busy_timeout_ms(conn)
-        conn.execute(f"PRAGMA busy_timeout={bounded_timeout}")
-        originals.append((conn, original))
+    # fork: betterlcm — if SETUP fails partway, the connections already changed keep the short
+    # timeout for the rest of the process (a probe left one at 5 ms), and one failing restore
+    # used to skip the rest. Every changed connection is restored independently, whether setup
+    # or teardown raised (verify-3 #30).
+    try:
+        for conn in connections:
+            if conn is None:
+                continue
+            original = _sqlite_busy_timeout_ms(conn)
+            conn.execute(f"PRAGMA busy_timeout={bounded_timeout}")
+            originals.append((conn, original))
+    except Exception:
+        _restore_sqlite_busy_timeouts(originals)
+        raise
     try:
         yield
     finally:
-        for conn, original in reversed(originals):
+        _restore_sqlite_busy_timeouts(originals)
+
+
+def _restore_sqlite_busy_timeouts(
+    originals: "list[tuple[sqlite3.Connection, int]]",
+) -> None:
+    """fork: betterlcm — restore every connection, even if one of them refuses."""
+    for conn, original in reversed(originals):
+        try:
             conn.execute(f"PRAGMA busy_timeout={original}")
+        except Exception:  # pragma: no cover - a dead connection cannot be restored
+            logger.warning("LCM could not restore a SQLite busy_timeout", exc_info=True)
