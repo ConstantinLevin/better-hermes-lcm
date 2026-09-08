@@ -1,0 +1,18 @@
+You are verifying a second pass of fixes in "betterlcm", a fork of the hermes-lcm plugin (Python, for Hermes Agent) at /home/agent/projects/agentimprovement/betterlcm.
+
+Purpose of the fork (the yardstick for every judgement): NO LOSS whatsoever. Loss means provenance gone, content unreachable, or a bounded/failed operation reported as a complete one. Summaries are acceptable ONLY because they are clearly marked, carry provenance, and act as an index. A 1,000,000-token context window must work well: every tuning value is weighted smoothly between a 256k window (where upstream hermes-lcm behaviour is kept exactly) and 1M, with no band switches.
+
+The fork just closed a large batch of audit findings. The claims are listed in docs/TASKS.md under "Second pass — audit findings closed", one row per audit id (p05 AX01, CP01..CP08, ES01/ES03/ES05/ES06, PB01, EX01..EX08, SA01, BY01..BY03, SQ01/SQ02/SQ03/SQ05, RS01, AX03, MT01-03, OT01-03, p03 C01, p04 DG1, p02 T04/T16, p06 I2). The original findings are in docs/claw-comparison/*.md (p01..p11, audit-a..audit-e) with citations and reproductions. The changes are in git commits cfcbb9f..HEAD (`git log -p cfcbb9f~1..HEAD`).
+
+YOUR JOB — verify, do not re-audit the whole plugin:
+For EVERY row of that table, read the actual code (not the commit message) and decide:
+  VERIFIED — the defect the report described can no longer occur, and the fix is coherent with the rest of the code;
+  PARTIAL — the fix addresses the symptom in the reported path but the same defect survives in another path (name it, with file:line);
+  COSMETIC — nothing that mattered actually changed (marker text, comment, test-only);
+  BROKEN — the change introduces a new defect or contradicts the fork's doctrine.
+Probe the real functions where you can (fault injection, small SQLite fixtures, direct calls). Cite file:line for every claim. Read the corresponding fork test in tests/fork/ and say whether it would actually fail without the change (if not, say so — a test that passes either way is not evidence).
+
+Also answer explicitly, at the end:
+1. Which rows are NOT actually done, ranked by how much they matter for the no-loss purpose.
+2. Anything in the fixes that is worse than what it replaced, at 256k or at 1M.
+Do not modify any files. Write the final report as Markdown.

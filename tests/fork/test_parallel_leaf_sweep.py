@@ -2,7 +2,6 @@
 failure, tool-group boundaries, compaction lock, per-worker progress hook."""
 import sys
 import threading
-from concurrent.futures import ThreadPoolExecutor
 import time
 import types
 
@@ -351,11 +350,33 @@ def test_worker_wait_is_bounded_by_the_shared_deadline(tmp_path):
 
 
 def test_lookahead_workers_do_not_block_process_exit():
+    """The pool is the fork's OWN, not a ThreadPoolExecutor subclass: the previous version
+    overrode CPython's private `_adjust_thread_count`, and on Python 3.14 — the deployed
+    interpreter — the first submission raised AttributeError('_initializer') and every parallel
+    leaf pass died with it. An end-to-end 1M run found that; no unit test did."""
     from hermes_lcm import leaf_pipeline as lp
-    assert issubclass(lp.DaemonThreadPoolExecutor, ThreadPoolExecutor)
-    pool = lp.DaemonThreadPoolExecutor(max_workers=1, thread_name_prefix="lcm-probe")
+    pool = lp.DaemonThreadPoolExecutor(max_workers=2, thread_name_prefix="lcm-probe")
     try:
-        pool.submit(lambda: None).result(timeout=5)
-        assert all(t.daemon for t in pool._threads)
+        assert pool.submit(lambda value: value * 2, 21).result(timeout=5) == 42
+        with pytest.raises(ValueError):
+            pool.submit(lambda: (_ for _ in ()).throw(ValueError("boom"))).result(timeout=5)
+        # a second worker really is created, and every thread is a daemon
+        futures = [pool.submit(lambda: time.sleep(0.05)) for _ in range(4)]
+        for future in futures:
+            future.result(timeout=5)
+        assert pool._threads and all(t.daemon for t in pool._threads)
+        assert len(pool._threads) <= 2
     finally:
         pool.shutdown(wait=False)
+
+
+def test_the_pool_survives_this_interpreter_creating_real_worker_threads():
+    """Regression guard for the crash above: submitting more work than workers must not touch
+    any private CPython pool API."""
+    from hermes_lcm import leaf_pipeline as lp
+    pool = lp.DaemonThreadPoolExecutor(max_workers=3, thread_name_prefix="lcm-probe")
+    try:
+        results = [pool.submit(lambda index=index: index) for index in range(12)]
+        assert sorted(future.result(timeout=5) for future in results) == list(range(12))
+    finally:
+        pool.shutdown(wait=True)

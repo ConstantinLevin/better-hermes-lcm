@@ -22,8 +22,9 @@ import contextvars
 import logging
 import time
 import math
+import queue
 import threading
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
@@ -97,34 +98,83 @@ class HostExecutionScope:
         return self.context.copy().run(_inner)
 
 
-class DaemonThreadPoolExecutor(ThreadPoolExecutor):
-    """fork: betterlcm — workers that do not block process exit.
+class DaemonThreadPoolExecutor:
+    """fork: betterlcm — a small pool of DAEMON workers that cannot block process exit.
 
     The stdlib pool joins its threads at interpreter exit, so a summariser call the host has
-    already abandoned would hold up shutdown. The host solves this the same way for its own
-    auxiliary work (tools/daemon_pool.py).
+    already abandoned would hold up shutdown; the host solves the same problem the same way for
+    its own auxiliary work (tools/daemon_pool.py).
+
+    This is deliberately its OWN pool rather than a ``ThreadPoolExecutor`` subclass. The
+    previous version overrode CPython's private ``_adjust_thread_count`` to pass ``daemon=True``
+    — and CPython 3.14 changed both that method and the ``_worker`` signature, so on the
+    deployed interpreter the first lookahead submission raised
+    ``AttributeError: '_initializer'`` and every parallel leaf pass at 1M died with it. Only
+    ``submit`` and ``shutdown`` are needed here, and neither needs a private API.
     """
 
-    def _adjust_thread_count(self) -> None:  # pragma: no cover - mirrors CPython with daemon=True
-        if self._idle_semaphore.acquire(timeout=0):
+    def __init__(self, max_workers: int = 1, thread_name_prefix: str = "") -> None:
+        self._max_workers = max(1, int(max_workers))
+        self._thread_name_prefix = thread_name_prefix or "lcm-worker"
+        self._queue: "queue.SimpleQueue[Optional[tuple[Future, Callable[..., Any], tuple, dict]]]" = (
+            queue.SimpleQueue()
+        )
+        self._threads: list[threading.Thread] = []
+        self._lock = threading.Lock()
+        self._shutdown = False
+
+    def _ensure_worker(self) -> None:
+        if len(self._threads) >= self._max_workers:
             return
+        thread = threading.Thread(
+            target=self._work,
+            name=f"{self._thread_name_prefix}-{len(self._threads)}",
+            daemon=True,
+        )
+        thread.start()
+        self._threads.append(thread)
 
-        def weakref_cb(_, work_queue=self._work_queue):
-            work_queue.put(None)
+    def _work(self) -> None:
+        while True:
+            item = self._queue.get()
+            if item is None:
+                return
+            future, fn, args, kwargs = item
+            if not future.set_running_or_notify_cancel():
+                continue
+            try:
+                future.set_result(fn(*args, **kwargs))
+            except BaseException as exc:  # noqa: BLE001 - mirrors Future semantics
+                future.set_exception(exc)
 
-        num_threads = len(self._threads)
-        if num_threads < self._max_workers:
-            import weakref
-            from concurrent.futures.thread import _worker
-            thread = threading.Thread(
-                name=f"{self._thread_name_prefix or self.__class__.__name__}_{num_threads}",
-                target=_worker,
-                args=(weakref.ref(self, weakref_cb), self._work_queue,
-                      self._initializer, self._initargs),
-                daemon=True,
-            )
-            thread.start()
-            self._threads.add(thread)
+    def submit(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Future:
+        future: Future = Future()
+        with self._lock:
+            if self._shutdown:
+                raise RuntimeError("cannot schedule new futures after shutdown")
+            self._queue.put((future, fn, args, kwargs))
+            self._ensure_worker()
+        return future
+
+    def shutdown(self, wait: bool = True, *, cancel_futures: bool = False) -> None:
+        with self._lock:
+            if self._shutdown:
+                return
+            self._shutdown = True
+            if cancel_futures:
+                while True:
+                    try:
+                        item = self._queue.get_nowait()
+                    except queue.Empty:
+                        break
+                    if item is not None:
+                        item[0].cancel()
+            for _ in self._threads:
+                self._queue.put(None)
+            threads = list(self._threads)
+        if wait:
+            for thread in threads:
+                thread.join()
 
 
 def plan_chunks(

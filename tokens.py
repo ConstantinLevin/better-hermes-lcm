@@ -90,26 +90,52 @@ def _get_encoder():
     return _encoder if _encoder_ready else None
 
 
+# fork: betterlcm — per-character cost for the fallback estimate, in tokens per character.
+# Upstream picked ONE divisor from the proportion of non-ASCII characters, which both
+# undercounted dense scripts (100 CJK characters ≈ 150 tokens in practice, estimated as 67)
+# and stepped discontinuously at the ratio boundaries: 49 CJK + 51 ASCII estimated 41 tokens,
+# 50 + 50 estimated 67 (audit E, E19). Weights are additive, so composition is monotone and
+# the estimate moves smoothly. This path only runs when the real tokenizer is unavailable; it
+# is an estimate for budget decisions, not a claim about any particular model's tokenizer.
+_TOKEN_COST_ASCII = 1.0 / _CHARS_PER_TOKEN
+_TOKEN_COST_LATIN_EXT = 0.5      # accented Latin, Greek, Cyrillic, punctuation
+_TOKEN_COST_DENSE_SCRIPT = 1.5   # CJK, kana, hangul — roughly one token per character or more
+_TOKEN_COST_SYMBOL = 2.0         # emoji and other astral symbols, usually multi-token
+_TOKEN_COST_OTHER = 1.0
+
+
+def _character_token_cost(code_point: int) -> float:
+    if code_point < 128:
+        return _TOKEN_COST_ASCII
+    if code_point < 0x0900:
+        return _TOKEN_COST_LATIN_EXT
+    if 0x2E80 <= code_point <= 0x9FFF or 0xA960 <= code_point <= 0xD7FF:
+        return _TOKEN_COST_DENSE_SCRIPT
+    if 0xF900 <= code_point <= 0xFAFF or 0xFE30 <= code_point <= 0xFE4F:
+        return _TOKEN_COST_DENSE_SCRIPT
+    if 0xFF00 <= code_point <= 0xFFEF:
+        return _TOKEN_COST_DENSE_SCRIPT
+    if 0x20000 <= code_point <= 0x3FFFF:
+        return _TOKEN_COST_DENSE_SCRIPT
+    if 0x1F000 <= code_point <= 0x1FBFF or 0x2600 <= code_point <= 0x27BF:
+        return _TOKEN_COST_SYMBOL
+    return _TOKEN_COST_OTHER
+
+
 def _fallback_token_estimate(text: str) -> int:
-    # Latin text is ~4 chars/token, but CJK and other non-Latin scripts
-    # tokenize far denser (~1-2 tokens/char). A flat len//4 undercounts them
-    # ~3-4x, so preflight under-triggers and assembly can overflow the real
-    # budget. ASCII-only text is overwhelmingly common and can use the cheap
-    # legacy estimate without scanning every character.
+    # Latin text is ~4 chars/token, but CJK and other non-Latin scripts tokenize far denser
+    # (~1-2 tokens/char) and emoji denser still. A flat len//4 undercounts them ~3-4x, so
+    # preflight under-triggers and assembly can overflow the real budget. ASCII-only text is
+    # overwhelmingly common and keeps the cheap legacy estimate, byte for byte.
     length = len(text)
     if length == 0:
         return 0
     if text.isascii():
         return length // _CHARS_PER_TOKEN + 1
-    non_ascii = sum(1 for ch in text if ord(ch) > 127)
-    ratio = non_ascii / length
-    if ratio >= 0.5:
-        divisor = 1.5
-    elif ratio >= 0.2:
-        divisor = 2.5
-    else:
-        divisor = _CHARS_PER_TOKEN
-    return int(length / divisor) + 1
+    total = 0.0
+    for character in text:
+        total += _character_token_cost(ord(character))
+    return int(total) + 1
 
 
 def _serialize_for_count(value) -> str:

@@ -1,0 +1,14 @@
+You are deciding whether "betterlcm" (a fork of the hermes-lcm plugin, Python, at /home/agent/projects/agentimprovement/betterlcm) is FINISHED on a specific criterion.
+
+Purpose of the fork (the yardstick): NO LOSS whatsoever — loss means provenance gone, content unreachable, or a bounded/failed operation reported as complete. Summaries are acceptable only because they are marked, carry provenance and act as an index. A 1,000,000-token window must work well, with every tuning value weighted smoothly between 256k (upstream behaviour kept) and 1M.
+
+The criterion is: **every DEFECT and every CLEAR, DEFINITE OPTIMIZATION is done.** A "clear definite optimization" is a change whose correctness and value are not a matter of taste or design debate — e.g. an unbounded scan that should be bounded, a query that should be an index lookup, duplicated model work, a wrong-order SQL, a value recomputed per message. It is NOT: new capabilities, new subsystems, prompt design, evaluation harnesses, schema redesign, or anything that needs a product decision.
+
+Inputs: fourteen audit reports in docs/claw-comparison/ (p01..p11 partitions covering all 70 modules, plus audit-a whole-plugin, audit-b plan critique, audit-c/e lossless-claw sweeps, audit-d regressions). docs/TASKS.md records what has been fixed (two tables) and four items deliberately deferred with reasons. The code is the source of truth — the reports may be stale where fixes landed.
+
+YOUR JOB:
+1. Go through the reports' findings AND scan the code yourself for anything they missed. For each finding still open, verify against the CURRENT code whether it is still real (several were fixed since the reports were written).
+2. Classify every still-real item: DEFECT (something is wrong or lossy today) / DEFINITE OPTIMIZATION (as defined above) / DESIGN DECISION (out of scope for this criterion).
+3. Rank the DEFECT and DEFINITE OPTIMIZATION items by value for the fork's purpose, with a concrete fix direction and effort for each. Cite file:line.
+4. Answer the question directly: **is the plugin finished on this criterion, or not?** If not, name the shortest list of remaining items that would make it finished. If yes, say so plainly.
+Do not modify any files. Write the final report as Markdown.

@@ -1,0 +1,14 @@
+You are hunting regressions in "betterlcm", a fork of the hermes-lcm plugin (Python, for Hermes Agent) at /home/agent/projects/agentimprovement/betterlcm. Upstream hermes-lcm (the base) is at commit 8d1b1e6d3d63f5fc7b209e8d7ec1dc9b814f2e54 — read it with `git show 8d1b1e6:<file>`; .upstream-base records the base.
+
+Purpose of the fork (the yardstick): NO LOSS whatsoever — loss means provenance gone, content unreachable, or a bounded/failed operation reported as complete. Summaries are acceptable only because they are marked, carry provenance and act as an index. Every tuning value is weighted smoothly between a 256k window (upstream behaviour kept exactly) and 1M; at 256k the fork must behave like upstream except where a defect was fixed.
+
+A large batch of changes just landed: `git log -p cfcbb9f~1..HEAD` (six commits). docs/TASKS.md lists what they claim to do.
+
+YOUR JOB: find anything these changes made WORSE — against upstream, or against the fork's own previous state. Look specifically for:
+ - behaviour that now differs at W=262,144 from upstream 8d1b1e6 without a defect justifying it (structural equivalence is a fork requirement at the low anchor);
+ - new deadlocks, unbounded waits, lock-ordering problems, thread/context leaks, or work that now runs where it did not (or no longer runs where it must);
+ - anything that now drops, shortens, delays or hides content that used to survive — including markers that displace real content, and honesty fields that make a caller treat a good result as bad;
+ - a guard that now refuses something legitimate (false positives): the leaf-lineage refusal, the clean-provenance refusal, the summariser acceptance gate (index-shape / finish_reason), the auxiliary classification, the persisted-output recovery allowlist;
+ - performance regressions on hot paths (per-turn assembly, ingest, search) — new SQL per message, new file reads, new regex over large text;
+ - anything that only works because a test happens to be shaped a certain way.
+Probe real functions with fault injection and small fixtures; cite file:line on both sides for every claim. Rank findings by severity and give a concrete fix direction for each. Do not modify any files. Write the final report as Markdown.

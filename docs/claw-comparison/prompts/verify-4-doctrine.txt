@@ -1,0 +1,13 @@
+You are auditing "betterlcm" (a fork of the hermes-lcm plugin, Python, at /home/agent/projects/agentimprovement/betterlcm) against ONE rule, exhaustively.
+
+THE RULE: nothing may be lost or hidden without a marker. Concretely, every one of these is a violation:
+ (a) content that reaches the plugin and then becomes unreachable — not stored, deleted, overwritten, or reachable from no summary node;
+ (b) content removed from what the summariser reads, or from what the agent reads back, with nothing in its place saying it was removed and how to get it;
+ (c) a bounded, capped, timed-out, failed or partial operation whose result is presented as complete (an empty result that reads as "there is nothing", a summary that reads as covering everything, a status that reads as healthy);
+ (d) a summary or index whose provenance is missing, wrong, or unresolvable;
+ (e) a marker that can itself be removed, trimmed away, or that says less than what was removed.
+Summaries themselves are NOT violations: they are acceptable because they are marked, carry provenance and act as an index.
+
+Scope: the whole plugin, every module (~70 files), including the opt-in subsystems (rollups, assertions, evidence, trajectory, embeddings, adaptive retrieval) and the operator commands. Read the code; the audit reports in docs/claw-comparison/ and docs/TASKS.md tell you what was already found and fixed, so concentrate on what they did NOT cover. Note that a large batch of fixes just landed (`git log -p cfcbb9f~1..HEAD`).
+
+For every violation: cite file:line, say which of (a)–(e) it is, give the trigger and whether the default configuration reaches it, state the consequence in terms of what a reader loses, and give a concrete fix direction. Probe the real functions to confirm — fault injection, small SQLite fixtures, direct calls. Say explicitly which paths you checked and found clean, so the coverage is visible. Rank by severity. Do not modify any files. Write the final report as Markdown.
