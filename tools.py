@@ -6893,15 +6893,33 @@ def lcm_doctor(args: Dict[str, Any], **kwargs) -> str:
             "detail": f"{usage_pct}% used, compaction triggers at {threshold_pct}%",
         })
 
+    # fork: betterlcm — index coverage (opt-in: it reads every node's sources)
+    coverage_report = None
+    if args.get("coverage"):
+        from .coverage_doctor import coverage_check, session_coverage
+        try:
+            coverage_report = session_coverage(
+                engine,
+                session_id,
+                limit=int(args.get("coverage_limit", 200) or 200),
+                floor=float(args.get("coverage_floor", 0.6) or 0.6),
+            )
+            checks.append(coverage_check(coverage_report))
+        except Exception as exc:  # pragma: no cover - defensive
+            checks.append({"check": "index_coverage", "status": "fail", "detail": str(exc)})
+
     overall = "healthy"
     if any(ch["status"] == "fail" for ch in checks):
         overall = "unhealthy"
     elif any(ch["status"] == "warn" for ch in checks):
         overall = "warnings"
 
-    return json.dumps({
+    payload = {
         "overall": overall,
         "runtime_identity": engine.get_runtime_identity(),
         "checks": checks,
         "guidance": doctor_guidance_for_checks(checks),
-    })
+    }
+    if coverage_report is not None:
+        payload["coverage"] = coverage_report
+    return json.dumps(payload)

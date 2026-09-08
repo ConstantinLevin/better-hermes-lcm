@@ -15,6 +15,11 @@ class LCMPreset:
 
     Presets are deliberately metadata and dry-run suggestions for now. They do
     not mutate live config and do not override explicit operator settings.
+
+    fork: betterlcm — presets are documentation of the two curve anchors: every window-
+    weighted setting equals upstream's value at ``scale_low_window`` (256k) and the
+    large-window design at ``scale_high_window`` (1M); see ``window_scaling.py``. From 512k
+    up ``suggest_preset_for_engine`` recommends no preset so the curve stays in charge.
     """
 
     name: str
@@ -411,6 +416,19 @@ def suggest_preset_for_engine(engine: Any) -> tuple[LCMPreset | None, str]:
     """Return the safest shipped preset suggestion for the current engine state."""
 
     context_length = int(getattr(engine, "context_length", 0) or 0)
+    # fork: betterlcm — from 512k up the window-scaled defaults (window_scaling.py) are the
+    # tuning; a fixed preset would override the curve. Below that the shipped presets apply.
+    if context_length >= 512_000:
+        try:
+            from .window_scaling import curve_t
+        except ImportError:  # pragma: no cover
+            from window_scaling import curve_t  # type: ignore
+        t = curve_t(
+            context_length,
+            int(getattr(getattr(engine, "_config", None), "scale_low_window", 0) or 262_144),
+            int(getattr(getattr(engine, "_config", None), "scale_high_window", 0) or 1_000_000),
+        )
+        return None, f"window-scaled defaults active (t={t:.2f}); see lcm_status window_scaling"
     if context_length >= 200_000:
         return (
             _CODEX_GPT_LONG_CONTEXT,

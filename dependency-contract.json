@@ -43,6 +43,8 @@
       "imported_api": [
         "agent.context_engine.ContextEngine",
         "agent.auxiliary_client.call_llm",
+        "agent.auxiliary_client._aux_progress",
+        "agent.auxiliary_client.aux_progress_hook",
         "agent.context_compressor"
       ]
     },

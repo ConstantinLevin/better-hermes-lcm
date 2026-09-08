@@ -446,6 +446,7 @@ def _help_text(error: str | None = None) -> str:
         "LCM command help",
         "- /lcm or /lcm status: show current LCM runtime/session status",
         "- /lcm doctor: run read-only LCM health checks",
+        "- /lcm doctor coverage: score how much of each summary's sources is still discoverable from the summary (fork)",
         "- /lcm doctor clean: best-effort scan of obvious junk/noise session candidates without deleting anything",
         "- /lcm doctor clean apply: backup-first cleanup for safe pattern-matched candidates only",
         "- /lcm doctor clean lifecycle: read-only scan for lifecycle rows with zero messages/nodes",
@@ -1271,6 +1272,30 @@ def _doctor_source_apply_text(engine) -> str:
         f"unknown_after: {after['normalized_unknown_messages']}",
         "note: backup created before source normalization apply",
     ])
+
+
+def _doctor_coverage_text(engine) -> str:
+    """fork: betterlcm — `/lcm doctor coverage`."""
+    from .coverage_doctor import coverage_check, session_coverage
+
+    report = session_coverage(engine, engine.current_session_id)
+    check = coverage_check(report)
+    lines = [
+        "LCM index coverage (fork: betterlcm)",
+        f"- session: {report['session_id']}",
+        f"- nodes scored: {report['scored_nodes']} of {report['nodes']}",
+        f"- aggregate: {report['aggregate_fraction']:.0%} of index-bearing entities discoverable (floor {report['floor']:.0%})",
+        f"- status: {check['status']} — {check['detail']}",
+    ]
+    for node in report["nodes_below_floor"]:
+        sample = ", ".join(node["missing_sample"][:6]) or "-"
+        lines.append(
+            f"  - node {node['node_id']} (d{node['depth']}, L{node['level']}): {node['fraction']:.0%} "
+            f"of {node['entities']} — missing e.g. {sample}"
+        )
+    if not report["nodes_below_floor"]:
+        lines.append("- no node under the floor")
+    return "\n".join(lines)
 
 
 def _doctor_text(engine) -> str:
@@ -5015,6 +5040,8 @@ def handle_lcm_command(raw_args: str | None, engine) -> str:
             return _doctor_source_text(engine)
         if len(rest) == 1 and rest[0].lower() == "retention":
             return _doctor_retention_text(engine)
+        if len(rest) == 1 and rest[0].lower() == "coverage":  # fork: betterlcm
+            return _doctor_coverage_text(engine)
         if len(rest) == 2 and rest[0].lower() == "clean" and rest[1].lower() == "apply":
             return _doctor_clean_apply_text(engine)
         if len(rest) == 2 and rest[0].lower() == "clean" and rest[1].lower() == "lifecycle":
@@ -5034,7 +5061,7 @@ def handle_lcm_command(raw_args: str | None, engine) -> str:
             return _doctor_repair_schema_stamp_apply_text(engine)
         if len(rest) == 2 and rest[0].lower() == "source" and rest[1].lower() == "apply":
             return _doctor_source_apply_text(engine)
-        return _help_text("`/lcm doctor` currently supports `clean`, `clean apply`, `clean lifecycle`, `clean lifecycle apply`, `repair`, `repair apply`, `repair schema-stamp`, `repair schema-stamp apply`, `source`, `source apply`, and `retention` as extra subcommands.")
+        return _help_text("`/lcm doctor` currently supports `clean`, `clean apply`, `clean lifecycle`, `clean lifecycle apply`, `repair`, `repair apply`, `repair schema-stamp`, `repair schema-stamp apply`, `source`, `source apply`, and `retention` as extra subcommands (fork: also `coverage`).")
 
     if head == "backup":
         if rest:

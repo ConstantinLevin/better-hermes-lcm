@@ -370,6 +370,70 @@ class CompactionMixin:
             working = min(ceiling, working * 2)
         return working
 
+    def _start_leaf_lookahead(
+        self,
+        candidate_raw: List[Dict[str, Any]],
+        chunk_tokens: int,
+        *,
+        dependent_reply_message_ids: set[int],
+        focus_topic: Optional[str],
+        deadline: Optional[float],
+        estimated_active_tokens: int,
+        remaining_passes: int,
+    ):
+        """fork: betterlcm — plan the chunks this compress() will take and start summarising
+        them ahead; None when concurrency is 1 or nothing beyond the first chunk is planned."""
+        concurrency = int(self.effective_summary_concurrency or 1)
+        if concurrency <= 1 or remaining_passes <= 1:
+            return None
+        from .leaf_pipeline import LeafLookahead, chunks_needed, plan_chunks
+        needed = chunks_needed(
+            estimated_active_tokens,
+            self._non_sweep_drain_stop_tokens(),
+            chunk_tokens,
+            float(getattr(self._config, "leaf_summary_ratio", 0.20) or 0.20),
+            extra=concurrency - 1,
+        )
+        chunks = plan_chunks(
+            candidate_raw,
+            chunk_tokens,
+            self._select_oldest_leaf_chunk_aligned,
+            max_chunks=max(1, min(remaining_passes, needed)),
+        )
+        if len(chunks) <= 1:
+            return None
+        lookahead = LeafLookahead(
+            self._summarize_leaf_chunk_with_rescue,
+            chunks,
+            concurrency=concurrency,
+            focus_topic=focus_topic,
+            deadline=deadline,
+            input_filter=lambda chunk: [m for m in chunk if id(m) not in dependent_reply_message_ids],
+        )
+        logger.info(
+            "LCM leaf lookahead: %d chunk(s) planned, concurrency %d", lookahead.planned, concurrency
+        )
+        return lookahead
+
+    def _take_leaf_lookahead(self, summary_input_chunk: List[Dict[str, Any]]):
+        """fork: betterlcm — the planned result for this chunk, or None to summarise inline."""
+        lookahead = getattr(self, "_leaf_lookahead", None)
+        if lookahead is None:
+            return None
+        if not lookahead.matches_next(summary_input_chunk):
+            self._close_leaf_lookahead()
+            return None
+        result = lookahead.take(summary_input_chunk)
+        if lookahead.remaining == 0:
+            self._close_leaf_lookahead()
+        return result
+
+    def _close_leaf_lookahead(self) -> None:
+        lookahead = getattr(self, "_leaf_lookahead", None)
+        if lookahead is not None:
+            self._leaf_lookahead = None
+            lookahead.close()
+
     def _non_sweep_drain_stop_tokens(self) -> int:
         """fork: betterlcm — where the non-sweep loop stops draining (wire units).
 
@@ -814,6 +878,18 @@ class CompactionMixin:
                     to_compact = candidate_raw
                 else:
                     to_compact = self._select_oldest_leaf_chunk_aligned(candidate_raw, curved_chunk_tokens)
+                    # fork: betterlcm — with concurrency > 1, summarise the NEXT chunks on
+                    # workers while this one is persisted (leaf_pipeline.LeafLookahead).
+                    if getattr(self, "_leaf_lookahead", None) is None and not deferred_maintenance_active:
+                        self._leaf_lookahead = self._start_leaf_lookahead(
+                            candidate_raw,
+                            curved_chunk_tokens,
+                            dependent_reply_message_ids=dependent_reply_message_ids,
+                            focus_topic=focus_topic,
+                            deadline=leaf_deadline,
+                            estimated_active_tokens=estimated_active_tokens,
+                            remaining_passes=max_leaf_passes - leaf_passes,
+                        )
 
             if not to_compact:
                 noop_reason = "no eligible leaf chunk selected"
@@ -860,16 +936,29 @@ class CompactionMixin:
                     summary_kwargs: dict[str, Any] = {"focus_topic": focus_topic}
                     if threshold_full_sweep_active:
                         summary_kwargs["deadline"] = sweep_deadline
-                    (
-                        compacted_chunk,
-                        source_tokens,
-                        summary_text,
-                        _level,
-                        _rescue_attempts,
-                    ) = self._summarize_leaf_chunk_with_rescue(
-                        summary_input_chunk,
-                        **summary_kwargs,
-                    )
+                    lookahead_result = self._take_leaf_lookahead(summary_input_chunk)  # fork
+                    if lookahead_result is not None:
+                        (
+                            compacted_chunk,
+                            source_tokens,
+                            summary_text,
+                            _level,
+                            _rescue_attempts,
+                        ) = lookahead_result
+                    else:
+                        (
+                            compacted_chunk,
+                            source_tokens,
+                            summary_text,
+                            _level,
+                            _rescue_attempts,
+                        ) = self._summarize_leaf_chunk_with_rescue(
+                            summary_input_chunk,
+                            **summary_kwargs,
+                        )
+                    if len(compacted_chunk) != len(summary_input_chunk):
+                        # a rescue shrank the chunk: the plan no longer matches the residual
+                        self._close_leaf_lookahead()
                 except Exception as exc:
                     # fork: betterlcm — an unavailable summariser never discards what this
                     # call already did: passes persisted so far stay, the cleanup preamble's

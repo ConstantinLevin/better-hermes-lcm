@@ -50,3 +50,10 @@ Format: `file` — what the hook does — why — how to re-apply on a conflict.
 | `tokens.py` | `_count_tokens_cached` built from `_count_tokens_keyed` with `set_token_cache_size` (resizable LRU; default 2048 = upstream) | weighted LRU | keep ours; `cache_clear()`/`cache_info()` callers unchanged |
 | `window_scaled_mixin.py` (fork) | `_apply_runtime_caches`: `PRAGMA cache_size=-<kib>` on the store/DAG connections + token LRU size on every resolve | weighted caches | fork file |
 | `config.py` | `leaf_summary_ratio/min/max`, `condensation_ratio/min` + env specs | ratios | additive |
+| `compaction.py` | non-dynamic curved branch starts `_start_leaf_lookahead` (concurrency > 1); the summarise call first tries `_take_leaf_lookahead`; a rescue-shrunk chunk closes the lookahead; `TimeoutError` tolerated like `SummaryUnavailableError` | concurrent summarisation with sequential persist (leaf_pipeline.py) | keep ours; the serial call stays as the fallback |
+| `host_cooldown.py` (fork) | `compress()` takes the per-engine `CompactionLock` (non-blocking; busy → input returned, noop reason) and closes any lookahead in `finally` | orphaned worker after a host abort never writes concurrently | fork file |
+| `engine.py` | `self._leaf_lookahead = None` in `__init__` | attribute init | one line |
+| `tools.py` | `lcm_doctor`: opt-in `coverage` (+ `coverage_limit`, `coverage_floor`) adds an `index_coverage` check and a `coverage` report (coverage_doctor.py) | executable "no loss" check | keep ours (block before `overall`) |
+| `command.py` | `/lcm doctor coverage` route + `_doctor_coverage_text` + help line | CLI surface | keep ours |
+| `presets.py` | `suggest_preset_for_engine`: first branch `>= 512k -> (None, "window-scaled defaults active (t=…)")`; class docstring notes the two anchors | the curve, not a preset, tunes large windows | keep ours; branches below 512k untouched |
+| `dependency-contract.json` | `agent.auxiliary_client._aux_progress` / `aux_progress_hook` declared as imported host APIs (leaf_pipeline.py) | the validator lists every host symbol a module imports | keep ours (two array entries) |

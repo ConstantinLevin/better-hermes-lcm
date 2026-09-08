@@ -32,6 +32,6 @@ change upstream also made (reconcile). Every fork-only test lives under `tests/f
 - `errors.py`             — `SummaryUnavailableError` (replaces upstream's silent L3 truncation)
 - `marked_loss.py`        — every marker text the fork leaves where upstream cut or dropped silently
 - `node_meta.py`          — sidecar table `lcm_node_meta` (escalation level + index block)
-- `leaf_pipeline.py`      — three-phase leaf loop: preamble / concurrent summarise / persist
-- `coverage_doctor.py`    — `lcm_doctor coverage`: index-adequacy check
+- `leaf_pipeline.py`      — concurrent leaf summarisation as a lookahead over the serial loop; compaction lock
+- `coverage_doctor.py`    — `lcm_doctor coverage` / `/lcm doctor coverage`: index-adequacy check
 - `tests/fork/`           — fork tests, organised by the step that introduced them

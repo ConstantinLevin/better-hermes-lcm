@@ -580,6 +580,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         # cleanup during boundary cooldown without running summary work.
         self._preflight_cleanup_only_due_to_boundary_cooldown = False
         self._preflight_cleanup_only_below_threshold = False  # fork: betterlcm
+        self._leaf_lookahead = None  # fork: betterlcm (leaf_pipeline.LeafLookahead)
         # Temporary source window used only while compress() assembles context.
         # _assemble_context also serves tests and recovery paths directly, so
         # keep anchoring opt-in rather than changing its public behavior.

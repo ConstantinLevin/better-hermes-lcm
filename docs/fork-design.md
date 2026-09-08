@@ -477,3 +477,17 @@ sweep's fallback pair-condensation on the pressure ratio; leave the fork checkou
   gate is practically always open.
 - `journal_size_limit` stays upstream's 64 MiB (not a bottleneck); `cache_size` and the
   token LRU are weighted.
+### Steps 10-11 — concurrency
+- Implemented as a **lookahead** over upstream's serial loop instead of a three-phase
+  rewrite: the loop's shape (preamble → select → summarise → persist) is untouched; when
+  concurrency > 1 the chunks this compress() will take are planned up front with the same
+  aligned slicing and their summariser calls start on workers while the loop persists in
+  order. Identity with the serial loop is checked per chunk (message identity); any
+  divergence (a rescue shrank a chunk) closes the lookahead and the loop continues inline.
+- Applies to the non-sweep, non-dynamic (curved) branch. The sweep flag path and
+  `dynamic_leaf_chunk_enabled` keep upstream's serial behaviour (their chunk size depends on
+  the remaining raw after each pass).
+- The "compaction lease" is a process-local per-engine lock: the host's abort-and-retry
+  happens inside one process, and cross-process writers are already serialised by SQLite.
+- Focus topic is derived once from the tail (stable across passes); prompt provenance ids
+  come from the map snapshot at submission (same rows in the normal case).

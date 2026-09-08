@@ -126,6 +126,14 @@ class HostCooldownMixin:
             if guard is not None and hasattr(guard, "clear"):
                 guard.clear()
         self._last_leaf_summary_error = ""
+        lock = self._compaction_lock_object()
+        if not lock.try_acquire():
+            # A compaction the host abandoned is still running on its worker thread: never
+            # let two writers into the same session. The host retries on its next turn.
+            self._last_compression_status = "noop"
+            self._last_compression_noop_reason = "compaction already in progress on another worker"
+            logger.warning("LCM compress() skipped: %s", self._last_compression_noop_reason)
+            return messages
         try:
             result = super().compress(  # type: ignore[misc]
                 messages, current_tokens=current_tokens, focus_topic=focus_topic, force=force,
@@ -135,6 +143,9 @@ class HostCooldownMixin:
             self._last_compression_status = "cooldown"
             self._last_compression_noop_reason = f"summariser unavailable: {exc}"
             return messages
+        finally:
+            self._close_leaf_lookahead()
+            lock.release()
         # A run whose leaf loop hit an unavailable summariser publishes whatever it did
         # (persisted passes, cleanup drops) but still arms the cooldown so the host stops
         # re-trying every turn.
@@ -150,6 +161,23 @@ class HostCooldownMixin:
         if result is not messages and isinstance(result, list) and result == messages:
             return messages
         return result
+
+    def _compaction_lock_object(self):
+        lock = getattr(self, "_compaction_lock", None)
+        if lock is None:
+            from .leaf_pipeline import CompactionLock
+            lock = CompactionLock()
+            self._compaction_lock = lock
+        return lock
+
+    def _close_leaf_lookahead(self) -> None:
+        lookahead = getattr(self, "_leaf_lookahead", None)
+        if lookahead is not None:
+            self._leaf_lookahead = None
+            try:
+                lookahead.close()
+            except Exception:  # pragma: no cover
+                logger.debug("LCM leaf lookahead close failed", exc_info=True)
 
     # -- status ------------------------------------------------------------------------
 
