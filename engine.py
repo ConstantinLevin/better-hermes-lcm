@@ -131,6 +131,7 @@ from .bypass import BypassMixin
 from .window_scaled_mixin import WindowScaledSettingsMixin  # fork: betterlcm
 from .host_cooldown import HostCooldownMixin  # fork: betterlcm
 from .errors import SummaryUnavailableError  # fork: betterlcm
+from . import marked_loss  # fork: betterlcm
 from .lifecycle_state import LifecycleStateStore
 from .message_content import (
     normalize_content_value,
@@ -577,6 +578,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         # One-shot handoff from preflight: adopt an already-durable replay
         # cleanup during boundary cooldown without running summary work.
         self._preflight_cleanup_only_due_to_boundary_cooldown = False
+        self._preflight_cleanup_only_below_threshold = False  # fork: betterlcm
         # Temporary source window used only while compress() assembles context.
         # _assemble_context also serves tests and recovery paths directly, so
         # keep anchoring opt-in rather than changing its public behavior.
@@ -2339,7 +2341,8 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
             )
 
         def _has_summary_nodes(candidate_session_id: str | None) -> bool:
-            return bool(candidate_session_id and self._dag.get_session_nodes(candidate_session_id))
+            # fork: betterlcm — "has nodes" meant "has nodes a /new reset left behind"
+            return bool(candidate_session_id and self._carry_over_candidate_nodes(candidate_session_id))
 
         def _host_source_from_conversation_state(state: Any) -> tuple[str, Any]:
             if not _state_conversation_matches(state):
@@ -2419,7 +2422,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                     and bound_state.current_session_id is None
                     and bound_state.last_finalized_session_id == previous_session_id
                 )
-                bound_has_summary_nodes = bool(self._dag.get_session_nodes(previous_session_id))
+                bound_has_summary_nodes = bool(self._carry_over_candidate_nodes(previous_session_id))  # fork
                 if (
                     bound_conversation_matches
                     and (bound_is_active_source or bound_is_finalized_source)
@@ -2446,7 +2449,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                         and bound_state.last_finalized_session_id == old_session_id
                     )
                     host_has_no_dag = not bool(
-                        self._dag.get_session_nodes(old_session_id)
+                        self._carry_over_candidate_nodes(old_session_id)  # fork
                     )
                     if (
                         bound_shares_parent_with_host
@@ -2561,7 +2564,11 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
             # raw rows here makes session-scoped transcript recovery report the
             # old/child session as missing even though its payload was only
             # reassigned to the next compression segment.
-            moved_nodes = self._dag.reassign_session_nodes(source_session_id, session_id)
+            moved_nodes = self._dag.reassign_session_nodes(
+                source_session_id,
+                session_id,
+                min_depth=self._reset_retained_min_depth(source_session_id),  # fork
+            )
             logger.debug(
                 "LCM compression boundary continued %s -> %s: carried %d DAG nodes; preserved raw message ownership",
                 source_session_id,
@@ -3574,23 +3581,27 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         self._lifecycle.record_reset(self._conversation_id)
         self._reset_session_scoped_runtime_state()
 
-        # Retain DAG nodes across sessions based on config.
-        #   -1  → keep all nodes
-        #    0  → delete everything
-        #    N  → keep nodes at depth >= N (e.g. 2 keeps d2+)
-        retain = self._config.new_session_retain_depth
-        if self._session_id and retain != -1:
-            if retain == 0:
-                self._dag.delete_session_nodes(
-                    self._session_id,
-                    on_deleted_batch=self._purge_embeddings_for_nodes,
-                )
-            else:
-                self._dag.delete_below_depth(
-                    self._session_id,
-                    retain,
-                    on_deleted_batch=self._purge_embeddings_for_nodes,
-                )
+        # fork: betterlcm — upstream DELETED the nodes below ``new_session_retain_depth``
+        # here (retain 0 = everything). Index nodes are never deleted in the fork: the
+        # retain depth only decides which nodes ``carry_over_new_session_context`` moves
+        # into the new session; the rest stay with the old session, reachable through
+        # ``lcm_grep``/``lcm_expand`` with session_scope='all'.
+
+    @staticmethod
+    def _assembly_omission_marker(
+        *,
+        omitted_node_ids: list[int],
+        depth_cap_hits: list[int],
+        omitted_tail_messages: int,
+    ) -> str:
+        """fork: betterlcm — see marked_loss.assembly_omission_marker."""
+        if not omitted_node_ids and not depth_cap_hits and not omitted_tail_messages:
+            return ""
+        return marked_loss.assembly_omission_marker(
+            omitted_node_ids=omitted_node_ids,
+            depth_cap_hits=depth_cap_hits,
+            omitted_tail_messages=omitted_tail_messages,
+        )
 
     def _purge_embeddings_for_nodes(
         self,
@@ -3662,6 +3673,34 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                 "LCM chunk archive for purged messages failed", exc_info=True
             )
 
+    def _reset_retained_min_depth(self, session_id: str | None) -> int | None:
+        """fork: betterlcm — the depth filter that stands in for upstream's reset-time prune.
+
+        Upstream deleted every node below ``new_session_retain_depth`` when ``/new`` reset
+        a session, so "the session has nodes" doubled as "the session has nodes to carry".
+        The fork deletes nothing; for the session whose reset is still pending, the same
+        decisions are made by looking only at the nodes the prune would have kept.
+        Returns ``None`` (all nodes) for any other session.
+        """
+        if not session_id or session_id != self._pending_reset_session_id:
+            return None
+        retain = int(self._config.new_session_retain_depth)
+        if retain < 0:
+            return None
+        if retain == 0:
+            return 1 << 30  # upstream deleted everything: nothing would carry
+        return retain
+
+    def _carry_over_candidate_nodes(self, session_id: str | None) -> list:
+        """fork: betterlcm — nodes upstream would still have had for ``session_id``."""
+        if not session_id:
+            return []
+        nodes = self._dag.get_session_nodes(session_id)
+        min_depth = self._reset_retained_min_depth(session_id)
+        if min_depth is None:
+            return nodes
+        return [node for node in nodes if node.depth >= min_depth]
+
     def carry_over_new_session_context(self, old_session_id: str, new_session_id: str) -> int:
         """Move retained summaries from the old session into the new one.
 
@@ -3687,7 +3726,16 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                 new_session_id,
             )
             return 0
-        return self._dag.reassign_session_nodes(old_session_id, new_session_id)
+        # fork: betterlcm — retain depth is applied here as a carry-over filter
+        # (-1 all, 0 nothing, N depth >= N) instead of as a delete on reset.
+        retain = int(self._config.new_session_retain_depth)
+        if retain == 0:
+            return 0
+        return self._dag.reassign_session_nodes(
+            old_session_id,
+            new_session_id,
+            min_depth=None if retain < 0 else retain,
+        )
 
     def rollover_session(
         self,
@@ -5166,6 +5214,10 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         """Serialize messages into labeled text for the summarizer."""
         parts = []
         matched_tool_ids = _matched_tool_call_ids(messages)
+        # fork: betterlcm — per-message cap is window-weighted (3000 chars at 256k, the whole
+        # message at 1M) and every cut is marked with its size (marked_loss.elide_text).
+        serialize_cap = max(64, int(self.effective_serialize_message_max_chars or 0))
+        args_cap = max(16, serialize_cap // 6)
         for msg in messages:
             role = msg.get("role", "unknown")
             content = redact_sensitive_value(
@@ -5183,11 +5235,14 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                     hermes_home=self._hermes_home,
                 )
                 if externalized:
-                    content = externalized["placeholder"]
+                    # fork: the placeholder alone does not hint at what was externalized; the
+                    # head comes from the same sanitised text an inline result would show
+                    content = externalized["placeholder"] + marked_loss.externalized_head_note(
+                        sanitize_pre_compaction_content(content)
+                    )
                 else:
                     content = sanitize_pre_compaction_content(content)
-                    if len(content) > 3000:
-                        content = content[:2000] + "\n...[truncated]...\n" + content[-800:]
+                    content = marked_loss.elide_text(content, serialize_cap)  # fork: marked
                 parts.append(f"[TOOL RESULT {tool_id}]: {content}")
                 continue
 
@@ -5199,34 +5254,36 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                     tc for tc in tool_calls
                     if not _tool_call_id(tc) or _tool_call_id(tc) in matched_tool_ids
                 ]
+                # fork: betterlcm — a call whose result is not in this chunk is still something
+                # the agent did; upstream dropped it silently. Serialize it, marked.
+                serialized_tool_calls = [
+                    (tc, tc in matched_tool_calls) for tc in tool_calls if isinstance(tc, dict)
+                ]
                 if _is_synthetic_assistant_noise(content):
-                    if not matched_tool_calls:
+                    if not serialized_tool_calls:
                         continue
                     content = ""
-                if len(content) > 3000:
-                    content = content[:2000] + "\n...[truncated]...\n" + content[-800:]
-                if matched_tool_calls:
+                content = marked_loss.elide_text(content, serialize_cap)  # fork: marked
+                if serialized_tool_calls:
                     tc_parts = []
-                    for tc in matched_tool_calls:
-                        if isinstance(tc, dict):
-                            fn = tc.get("function", {})
-                            name = fn.get("name", "?")
-                            args = fn.get("arguments", "")
-                            args = redact_sensitive_value(
-                                args,
-                                self._config,
-                                parse_json_strings=True,
-                            )
-                            args = sanitize_pre_compaction_tool_arguments(args)
-                            if len(args) > 500:
-                                args = args[:400] + "..."
-                            tc_parts.append(f"  {name}({args})")
+                    for tc, is_matched in serialized_tool_calls:
+                        fn = tc.get("function", {})
+                        name = fn.get("name", "?")
+                        args = fn.get("arguments", "")
+                        args = redact_sensitive_value(
+                            args,
+                            self._config,
+                            parse_json_strings=True,
+                        )
+                        args = sanitize_pre_compaction_tool_arguments(args)
+                        args = marked_loss.elide_args(args, args_cap)  # fork: marked
+                        suffix = "" if is_matched else " " + marked_loss.unmatched_tool_call_note()
+                        tc_parts.append(f"  {name}({args}){suffix}")
                     content += "\n[Tool calls:\n" + "\n".join(tc_parts) + "\n]"
                 parts.append(f"[ASSISTANT]: {content}")
                 continue
 
-            if len(content) > 3000:
-                content = content[:2000] + "\n...[truncated]...\n" + content[-800:]
+            content = marked_loss.elide_text(content, serialize_cap)  # fork: marked
             parts.append(f"[{role.upper()}]: {content}")
 
         return "\n\n".join(parts)
@@ -5405,7 +5462,8 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         replacement = dict(message)
         replacement["content"] = self._active_tool_stub_content(
             content,
-            externalized["placeholder"],
+            # fork: betterlcm — the stub hints at what it replaced
+            externalized["placeholder"] + marked_loss.externalized_head_note(normalized_content),
         )
         return replacement
 
@@ -6056,6 +6114,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
             anchor_source = tail_messages
         anchor_part: Optional[str] = None
         summary_budget = None
+        omitted_tail_messages = 0  # fork: betterlcm
         if assembly_cap is not None:
             used = count_message_tokens(leading_msg) if leading_msg is not None else 0
             kept_tail_reversed: list[Dict[str, Any]] = []
@@ -6070,6 +6129,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                 if used + tail_token_total + msg_tokens > assembly_cap:
                     if self._is_budget_droppable_tail_message(msg):
                         skipped_tail_gap = True
+                        omitted_tail_messages += 1  # fork: counted for the omission marker
                         continue
                     break
                 if skipped_tail_gap:
@@ -6083,6 +6143,8 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
 
         # Collect DAG summaries — highest depth first for context hierarchy
         summary_parts: list[str] = []
+        summary_part_node_ids: list[int | None] = []  # fork: parallel to summary_parts
+        depth_cap_hits: list[int] = []  # fork: depths with more nodes than rendered
         last_role = result[-1].get("role", "system") if result else "system"
         if not result or result[-1].get("role") == "system":
             # The summary becomes the first provider-visible message: either no
@@ -6098,20 +6160,30 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
             anchor_msg = {"role": summary_role, "content": anchor_part}
             if summary_budget is None or count_message_tokens(anchor_msg) <= summary_budget:
                 summary_parts.append(anchor_part)
+                summary_part_node_ids.append(None)
 
         # Node ids placed in the summary prefix — used to dedupe proactive-recall
         # injection against summaries already visible in the active context.
         active_summary_node_ids: set = set()
-        all_nodes = self._dag.get_session_nodes(self._session_id)
-        if all_nodes:
+        # fork: betterlcm — depths via DISTINCT (upstream loaded up to 1000 nodes to find
+        # them) and every uncondensed node per depth up to a marked cap (upstream: 100,
+        # silently).
+        depths = sorted(self._dag.get_session_depths(self._session_id), reverse=True)
+        per_depth_limit = max(1, int(getattr(self._config, "assembly_max_nodes_per_depth", 100_000) or 100_000))
+        if depths:
             # Group by depth, take the most recent uncondensed at each level
             # For active context, we want the highest-level summaries
             # that haven't been condensed into even higher levels
-            depths = sorted(set(n.depth for n in all_nodes), reverse=True)
             for d in depths:
-                uncondensed = self._dag.get_uncondensed_at_depth(self._session_id, d)
+                uncondensed = self._dag.get_uncondensed_at_depth(
+                    self._session_id, d, limit=per_depth_limit + 1
+                )
+                if len(uncondensed) > per_depth_limit:
+                    depth_cap_hits.append(d)
+                    uncondensed = uncondensed[:per_depth_limit]
                 for node in uncondensed:
                     active_summary_node_ids.add(node.node_id)
+                    summary_part_node_ids.append(node.node_id)
                     depth_label = {
                         0: "Recent",
                         1: "Session Arc",
@@ -6123,18 +6195,34 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                         f"[Expand for details: {node.expand_hint}]"
                     )
 
+        omitted_node_ids: list[int] = []  # fork: nodes that did not fit the budget
         if summary_parts:
             selected_parts = summary_parts
             if summary_budget is not None:
                 selected_parts = []
-                for part in summary_parts:
+                for part, part_node_id in zip(summary_parts, summary_part_node_ids):
                     candidate = "\n\n---\n\n".join(selected_parts + [part])
                     candidate_msg = {"role": summary_role, "content": candidate}
                     if count_message_tokens(candidate_msg) > summary_budget:
-                        if part == anchor_part:
-                            continue
+                        if part_node_id is not None:
+                            omitted_node_ids.append(part_node_id)
                         continue
                     selected_parts.append(part)
+        # fork: betterlcm — whatever was left out is named, so absence from the prefix
+        # never reads as absence from history.
+        omission_marker = self._assembly_omission_marker(
+            omitted_node_ids=omitted_node_ids,
+            depth_cap_hits=depth_cap_hits,
+            omitted_tail_messages=omitted_tail_messages,
+        )
+        if omission_marker:
+            selected_parts = (selected_parts if summary_parts else []) + [omission_marker]
+            if summary_budget is not None:
+                candidate_msg = {"role": summary_role, "content": "\n\n---\n\n".join(selected_parts)}
+                if count_message_tokens(candidate_msg) > summary_budget:
+                    selected_parts = selected_parts[:-1]
+                    logger.warning("LCM assembly omission marker did not fit the summary budget: %s", omission_marker)
+        if summary_parts or omission_marker:
             if selected_parts:
                 combined = "\n\n---\n\n".join(selected_parts)
                 result.append({"role": summary_role, "content": combined})
@@ -6651,7 +6739,57 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         # where _bind_lifecycle_state will read it into the marker
         # against a freshly-built active context.
         result["applied_frontier_store_id"] = persisted_frontier
+        # fork: betterlcm — raw rows the frontier now skips that no DAG node covers get a
+        # marker node, so the rotated span stays hinted in the summary prefix.
+        marker_node_id = self._write_rotate_marker_node(session_id, new_frontier)
+        if marker_node_id is not None:
+            result["marker_node_id"] = marker_node_id
         return result
+
+    def _write_rotate_marker_node(self, session_id: str, new_frontier: int) -> int | None:
+        """fork: betterlcm — d0 node over rotated rows with no summary coverage (or None)."""
+        start_id = int(self._last_compacted_store_id or 0) + 1
+        if new_frontier < start_id:
+            return None
+        try:
+            rows = self._store.get_range(session_id, start_id=start_id, end_id=new_frontier, limit=1_000_000)
+        except Exception:
+            logger.warning("LCM rotate marker: could not load rotated rows", exc_info=True)
+            return None
+        rows = [row for row in rows if isinstance(row, dict) and row.get("store_id") is not None]
+        if not rows:
+            return None
+        store_ids = [int(row["store_id"]) for row in rows]
+        messages = [self._store.to_openai_msg(row) for row in rows]
+        source_tokens = count_messages_tokens(messages)
+        summary = marked_loss.rotate_marker_summary(
+            session_id=session_id,
+            store_ids=store_ids,
+            message_count=len(rows),
+            token_count=source_tokens,
+            roles=[str(message.get("role") or "?") for message in messages],
+            first_head=marked_loss.content_head(normalize_content_value(messages[0].get("content")) or "", 160),
+            last_head=marked_loss.content_head(normalize_content_value(messages[-1].get("content")) or "", 160),
+        )
+        earliest_at, latest_at = self._store.get_time_bounds(store_ids)
+        node = SummaryNode(
+            session_id=session_id,
+            depth=0,
+            summary=summary,
+            token_count=count_tokens(summary),
+            source_token_count=source_tokens,
+            source_ids=store_ids,
+            source_type="messages",
+            created_at=time.time(),
+            earliest_at=earliest_at,
+            latest_at=latest_at,
+            expand_hint=f"raw messages {min(store_ids)}..{max(store_ids)} rotated without a summary",
+        )
+        try:
+            return int(self._dag.add_node(node))
+        except Exception:
+            logger.warning("LCM rotate marker node write failed", exc_info=True)
+            return None
 
     # -- Lifecycle ---------------------------------------------------------
 

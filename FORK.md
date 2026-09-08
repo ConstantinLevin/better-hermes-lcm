@@ -29,6 +29,8 @@ change upstream also made (reconcile). Every fork-only test lives under `tests/f
 ## Layout of fork-only code
 - `window_scaling.py`     — the anchor table and the curve; `resolve_window_scaled(config, W)`
 - `host_cooldown.py`      — the host's compression-failure cooldown protocol for a plugin engine
+- `errors.py`             — `SummaryUnavailableError` (replaces upstream's silent L3 truncation)
+- `marked_loss.py`        — every marker text the fork leaves where upstream cut or dropped silently
 - `node_meta.py`          — sidecar table `lcm_node_meta` (escalation level + index block)
 - `leaf_pipeline.py`      — three-phase leaf loop: preamble / concurrent summarise / persist
 - `coverage_doctor.py`    — `lcm_doctor coverage`: index-adequacy check

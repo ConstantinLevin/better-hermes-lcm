@@ -410,3 +410,37 @@ injected failure: turn survives, warning printed), 10/11 (DAG identity, watchdog
 Enable deferred maintenance; set either assembly cap; set `incremental_max_depth=0`; enable
 sensitive-pattern redaction (explicitly not lossless); curve `protect_last_n`; gate the
 sweep's fallback pair-condensation on the pressure ratio; leave the fork checkout dirty.
+
+## Implementation notes (deviations from the plan text, by step)
+### Step 5 — no unmarked loss
+- Serialize elision markers do not carry a `store_id` (the map is not available inside
+  `_serialize_messages`); they carry sizes and point at the node's own sources (`lcm_expand`
+  on the node), which is the provenance path anyway.
+- The externalized stub keeps upstream's placeholder string byte-for-byte (the
+  `_EXTERNALIZED_REF_RE.fullmatch` guard and ~45 tests depend on it); the head is a separate
+  `[LCM head of externalized output: …]` line appended after the placeholder in summariser
+  input and in active-replay stubs.
+- Assembly per-depth limit is a config cap (`assembly_max_nodes_per_depth`, 100000, marked
+  when hit) rather than a budget-derived number: with the interpolated condensation trigger
+  the frontier is bounded by condensation, so any budget-derived limit would only ever be a
+  second, weaker bound.
+- `/new`: the retain depth is a **carry-over filter** (`carry_over_new_session_context`
+  moves depth >= retain; -1 all; 0 nothing) — the shallow nodes stay with the old session
+  (visible via `session_scope='all'`). Upstream's boundary-mismatch logic used "session has
+  nodes" as its carry-over signal, which only worked because the reset had pruned; the fork
+  reproduces those decisions with `_carry_over_candidate_nodes` (same filter applied to the
+  pending-reset session only).
+- Rotate writes a marker node only over rotated rows that no node covers yet
+  (`store_id > _last_compacted_store_id`). Residual: a `compress()` later in the same process
+  can summarise the same rows again (upstream's in-process marker rule), giving two nodes
+  over one span — double coverage, not loss.
+- Bypass (sessions the operator excluded from LCM): content trims are marked; whole-message
+  drops in `_trim_bypass_compacted_to_cap` are not — those sessions are outside LCM's store and
+  their transcript lives with the host.
+- Cleanup-only is gated on the **preflight's replay-diff request** under the threshold
+  (`_preflight_cleanup_only_below_threshold`, consumed by the next `compress()`), not on
+  "any compress() below the threshold": direct `compress()` calls (the host decided, or tests)
+  keep upstream semantics.
+- New: a summariser failure with zero persisted passes no longer returns the input untouched
+  — the cleanup preamble's drops (ignored-message placeholders etc.) are still published; the
+  cooldown is armed either way and an unchanged context is returned as the same object.

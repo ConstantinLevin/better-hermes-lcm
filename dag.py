@@ -388,20 +388,46 @@ class SummaryDAG:
             on_deleted_batch=on_deleted_batch,
         )
 
-    def reassign_session_nodes(self, old_session_id: str, new_session_id: str) -> int:
-        """Move all nodes from one session_id to another.
+    def reassign_session_nodes(
+        self,
+        old_session_id: str,
+        new_session_id: str,
+        *,
+        min_depth: int | None = None,
+    ) -> int:
+        """Move nodes from one session_id to another.
 
         Used for /new carry-over where retained summaries should become part of
         the fresh session while preserving node IDs and node-to-node links.
+
+        fork: betterlcm — ``min_depth`` moves only nodes at that depth or deeper; the
+        shallower ones stay in the old session instead of being deleted.
         """
         with self._db_lock:
-            cur = self._conn.execute(
-                "UPDATE summary_nodes SET session_id = ? WHERE session_id = ?",
-                (new_session_id, old_session_id),
-            )
+            if min_depth is None:
+                cur = self._conn.execute(
+                    "UPDATE summary_nodes SET session_id = ? WHERE session_id = ?",
+                    (new_session_id, old_session_id),
+                )
+            else:
+                cur = self._conn.execute(
+                    "UPDATE summary_nodes SET session_id = ? WHERE session_id = ? AND depth >= ?",
+                    (new_session_id, old_session_id, int(min_depth)),
+                )
             moved = cur.rowcount
             self._conn.commit()
         return moved
+
+    def get_session_depths(self, session_id: str) -> List[int]:
+        """fork: betterlcm — the distinct depths present for a session, ascending."""
+        with self._db_lock:
+            rows = self._conn.execute(
+                """SELECT DISTINCT depth FROM summary_nodes
+                   WHERE session_id = ?
+                   ORDER BY depth""",
+                (session_id,),
+            ).fetchall()
+        return [int(row[0]) for row in rows]
 
     # -- Read ---------------------------------------------------------------
 

@@ -16,6 +16,7 @@ from .message_analysis import _assistant_tool_call_ids
 from .message_content import normalize_content_value
 from .session_patterns import build_session_match_keys, matches_session_pattern
 from .tokens import count_messages_tokens
+from . import marked_loss  # fork: betterlcm
 
 logger = logging.getLogger(__name__)
 
@@ -358,7 +359,10 @@ class BypassMixin:
             for msg in compacted:
                 next_msg = dict(msg)
                 content = next_msg.get("content")
-                next_msg["content"] = self._truncate_bypass_content_value(content, char_budget, suffix="…")
+                # fork: betterlcm — a cut carries a marker (marked_loss.BYPASS_TRIM_SUFFIX)
+                next_msg["content"] = self._truncate_bypass_content_value(
+                    content, char_budget, suffix=marked_loss.BYPASS_TRIM_SUFFIX
+                )
                 next_messages.append(next_msg)
             truncated = self._sanitize_active_context_messages(next_messages)
             token_count = count_messages_tokens(truncated)
@@ -382,7 +386,9 @@ class BypassMixin:
             for msg in compacted:
                 next_msg = dict(msg)
                 content = next_msg.get("content")
-                next_msg["content"] = self._truncate_bypass_content_value(content, char_budget)
+                next_msg["content"] = self._truncate_bypass_content_value(
+                    content, char_budget, suffix=marked_loss.BYPASS_FINAL_TRIM_SUFFIX  # fork: marked
+                )
                 shrunk.append(next_msg)
             compacted = self._sanitize_active_context_messages(shrunk)
             char_budget = max(0, char_budget // 2)

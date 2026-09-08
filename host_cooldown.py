@@ -135,10 +135,20 @@ class HostCooldownMixin:
             self._last_compression_status = "cooldown"
             self._last_compression_noop_reason = f"summariser unavailable: {exc}"
             return messages
-        # A partial run (some passes persisted, a later one failed) publishes its progress
-        # but still arms the cooldown so the host stops re-trying every turn.
+        # A run whose leaf loop hit an unavailable summariser publishes whatever it did
+        # (persisted passes, cleanup drops) but still arms the cooldown so the host stops
+        # re-trying every turn.
         if getattr(self, "_last_leaf_summary_error", ""):
             self._record_compression_failure(self._last_leaf_summary_error)
+            if self._last_compression_status == "noop":
+                self._last_compression_status = "cooldown"
+                self._last_compression_noop_reason = (
+                    f"summariser unavailable: {self._last_leaf_summary_error}"
+                )
+        # Identity contract: a context the engine did not change is returned as the very
+        # object the host passed in (the host treats a *new* list as "compressed").
+        if result is not messages and isinstance(result, list) and result == messages:
+            return messages
         return result
 
     # -- status ------------------------------------------------------------------------

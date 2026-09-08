@@ -23,6 +23,7 @@ from .dag import SummaryNode
 from .message_content import text_content_for_pattern_matching
 from .sanitize import _contains_sensitive_redaction
 from .tokens import count_message_tokens, count_messages_tokens, count_tokens
+from .errors import SummaryUnavailableError  # fork: betterlcm
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +70,7 @@ class CompactionMixin:
     def should_compress_preflight(self, messages):
         """Pre-flight check — also ingests messages into the store."""
         self._preflight_cleanup_only_due_to_boundary_cooldown = False
+        self._preflight_cleanup_only_below_threshold = False  # fork: betterlcm
         self._maybe_reclassify_late_auxiliary_before_compaction_write()
         if self._bypasses_lcm_context_management():
             self._remember_lcm_bypass_message_prefix(self._bypass_lcm_session_id(), messages)
@@ -134,6 +136,15 @@ class CompactionMixin:
                     and self._compression_boundary_cooldown_active()
                 ):
                     self._preflight_cleanup_only_due_to_boundary_cooldown = True
+                # fork: betterlcm — a replay-diff cleanup under the threshold asks
+                # compress() for the cleanup preamble only (no leaf pass); see
+                # _compress_is_cleanup_only.
+                if (
+                    not force_overflow_requested
+                    and self.threshold_tokens > 0
+                    and replay_rough < self.threshold_tokens
+                ):
+                    self._preflight_cleanup_only_below_threshold = True
                 return self._mark_preflight_compression_requested()
             if force_overflow_requested:
                 return self._mark_preflight_compression_requested()
@@ -200,6 +211,30 @@ class CompactionMixin:
         if self._should_run_deferred_maintenance(messages, observed_tokens=rough):
             return self._mark_preflight_compression_requested()
         return False
+
+    def _compress_is_cleanup_only(
+        self,
+        *,
+        force: bool,
+        force_overflow: bool,
+        estimated_active_tokens: int,
+        deferred_maintenance_active: bool,
+        critical_budget_pressure: bool,
+        working_messages: List[Dict[str, Any]],
+    ) -> bool:
+        """fork: betterlcm — True when this compress() must not spend a leaf pass."""
+        requested = bool(getattr(self, "_preflight_cleanup_only_below_threshold", False))
+        self._preflight_cleanup_only_below_threshold = False
+        if not requested:
+            return False
+        if force or force_overflow or deferred_maintenance_active or critical_budget_pressure:
+            return False
+        threshold = int(self.threshold_tokens or 0)
+        if threshold <= 0 or int(estimated_active_tokens or 0) >= threshold:
+            return False
+        if self._has_ignored_backlog_outside_fresh_tail(working_messages):
+            return False
+        return True
 
     def _replay_diff_requests_ingest_cleanup(
         self,
@@ -508,6 +543,20 @@ class CompactionMixin:
         )
         if deferred_maintenance_active:
             self._lifecycle.record_maintenance_attempt(self._conversation_id)
+        # fork: betterlcm — when the preflight's replay-diff branch requested this
+        # compress() under the threshold and nothing else forces summarising (manual
+        # /compress, overflow, deferred maintenance, critical pressure, ignored backlog to
+        # consume), run the cleanup preamble (scaffold / ignored / dependent-reply drops)
+        # and publish, but spend no summariser calls and shrink nothing. Default configs
+        # never take this path (replay == messages, so preflight never requests a cleanup).
+        cleanup_only = self._compress_is_cleanup_only(
+            force=force,
+            force_overflow=force_overflow,
+            estimated_active_tokens=estimated_active_tokens,
+            deferred_maintenance_active=deferred_maintenance_active,
+            critical_budget_pressure=critical_budget_pressure,
+            working_messages=working_messages,
+        )
         base_max_leaf_passes = 4 if self._config.dynamic_leaf_chunk_enabled else 1
         max_leaf_passes = base_max_leaf_passes
         if threshold_full_sweep_active:
@@ -726,6 +775,9 @@ class CompactionMixin:
                 ):
                     self._schedule_pre_compaction_assertions(summary_input_chunk)
 
+                if cleanup_only:  # fork: betterlcm — preamble ran; no leaf pass below threshold
+                    noop_reason = "below threshold: cleanup only, no leaf pass"
+                    break
                 try:
                     summary_kwargs: dict[str, Any] = {"focus_topic": focus_topic}
                     if threshold_full_sweep_active:
@@ -741,20 +793,23 @@ class CompactionMixin:
                         **summary_kwargs,
                     )
                 except Exception as exc:
-                    # fork: betterlcm — a later pass failing must not discard passes already
-                    # persisted (upstream only tolerated this under the sweep flag; its
-                    # ``raise`` was unreachable while L3 guaranteed convergence).
-                    if leaf_compacted_this_turn:
-                        self._last_leaf_summary_error = str(exc)
-                        if threshold_full_sweep_active:
-                            sweep_stop_reason = "leaf_summary_error"
-                        logger.warning(
-                            "LCM leaf compaction stopped after %d persisted leaf pass(es): %s",
-                            leaf_passes,
-                            exc,
-                        )
-                        break
-                    raise
+                    # fork: betterlcm — an unavailable summariser never discards what this
+                    # call already did: passes persisted so far stay, the cleanup preamble's
+                    # drops are published, and the error is recorded so HostCooldownMixin
+                    # arms the cooldown. (Upstream tolerated failures only under the sweep
+                    # flag; its ``raise`` was unreachable while L3 guaranteed convergence.)
+                    tolerated = isinstance(exc, SummaryUnavailableError) or threshold_full_sweep_active
+                    if not tolerated:
+                        raise
+                    self._last_leaf_summary_error = str(exc)
+                    if threshold_full_sweep_active:
+                        sweep_stop_reason = "leaf_summary_error"
+                    logger.warning(
+                        "LCM leaf compaction stopped after %d persisted leaf pass(es): %s",
+                        leaf_passes,
+                        exc,
+                    )
+                    break
             compacted_summary_ids = {id(message) for message in compacted_chunk}
             compacted_positions = [
                 idx for idx, message in enumerate(selected_raw_chunk) if id(message) in compacted_summary_ids

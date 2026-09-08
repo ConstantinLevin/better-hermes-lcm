@@ -424,6 +424,7 @@ ENV_FIELD_SPECS: tuple[_EnvFieldSpec, ...] = (
     _EnvFieldSpec("sqlite_cache_kib", "LCM_SQLITE_CACHE_KIB", int),
     _EnvFieldSpec("token_cache_size", "LCM_TOKEN_CACHE_SIZE", int),
     _EnvFieldSpec("summary_failure_cooldown_seconds", "LCM_SUMMARY_FAILURE_COOLDOWN_SECONDS", float),
+    _EnvFieldSpec("assembly_max_nodes_per_depth", "LCM_ASSEMBLY_MAX_NODES_PER_DEPTH", int),
 )
 
 _PARSER_BY_TYPE = {
@@ -812,6 +813,9 @@ class LCMConfig:
     # Cooldown armed when every summariser route fails (replaces upstream's silent L3
     # truncation). Mirrors the host's built-in summary-failure cooldown (600 s).
     summary_failure_cooldown_seconds: float = 600.0
+    # Assembly renders every uncondensed node per depth up to this cap (upstream: 100,
+    # silently). A cap hit is marked in the prefix (marked_loss.py).
+    assembly_max_nodes_per_depth: int = 100_000
 
     @classmethod
     def from_env(cls) -> "LCMConfig":

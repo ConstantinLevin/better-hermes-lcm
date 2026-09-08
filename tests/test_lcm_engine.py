@@ -10517,8 +10517,10 @@ class TestEngineCompress:
         serialized = engine._serialize_messages(messages)
 
         assert "I can still explain the plan" in serialized
-        assert "terminal(" not in serialized
-        assert "noisy-orphan" not in serialized
+        # fork: betterlcm — an unmatched call is serialized and marked, not dropped
+        assert "terminal(" in serialized
+        assert "noisy-orphan" in serialized
+        assert "[no tool result in this chunk]" in serialized
 
     def test_compression_serialization_keeps_matched_tool_pairs_and_drops_orphaned_results(self, engine):
         messages = [
@@ -10547,7 +10549,10 @@ class TestEngineCompress:
         assert "read_file(" in serialized
         assert "README says hello" in serialized
         assert "standalone legacy payload" in serialized
-        assert "stale orphan args" not in serialized
+        # fork: betterlcm — the unmatched call stays, marked; the matched one is unmarked
+        assert "stale orphan args" in serialized
+        assert 'terminal({"command": "stale orphan args"}) [no tool result in this chunk]' in serialized
+        assert 'read_file({"path": "README.md"}) [no' not in serialized
 
     def test_compress_short_conversation_noop(self, engine):
         """Short conversations should pass through unchanged with an explicit reason."""
@@ -12285,7 +12290,10 @@ class TestSessionRetainDepth:
             ))
         assert len(engine._dag.get_session_nodes("test-session")) == 3
         engine.on_session_reset()
-        assert len(engine._dag.get_session_nodes("test-session")) == 0
+        # fork: betterlcm — nodes are never deleted; retain 0 just carries nothing
+        assert len(engine._dag.get_session_nodes("test-session")) == 3
+        assert engine.carry_over_new_session_context("test-session", "next-session") == 0
+        assert engine._dag.get_session_nodes("next-session") == []
 
     def test_retain_depth_keeps_high_nodes(self, engine):
         """retain_depth=2 should keep d2+ and delete d0, d1."""
@@ -12300,9 +12308,12 @@ class TestSessionRetainDepth:
                 source_type="messages", created_at=time.time(),
             ))
         engine.on_session_reset()
+        # fork: betterlcm — nothing deleted; d2+ carry over, d0/d1 stay with the old session
         remaining = engine._dag.get_session_nodes("test-session")
-        assert len(remaining) == 2
-        assert all(n.depth >= 2 for n in remaining)
+        assert len(remaining) == 4
+        assert engine.carry_over_new_session_context("test-session", "next-session") == 2
+        assert all(n.depth >= 2 for n in engine._dag.get_session_nodes("next-session"))
+        assert all(n.depth < 2 for n in engine._dag.get_session_nodes("test-session"))
 
     def test_retain_depth_minus_one_keeps_all(self, engine):
         """retain_depth=-1 should keep all nodes."""
@@ -12335,7 +12346,8 @@ class TestSessionRetainDepth:
         moved = engine.carry_over_new_session_context("old-session", "new-session")
 
         assert moved == 2
-        assert engine._dag.get_session_nodes("old-session") == []
+        # fork: betterlcm — the d0/d1 nodes stay with the old session instead of being deleted
+        assert sorted(n.depth for n in engine._dag.get_session_nodes("old-session")) == [0, 1]
         new_nodes = engine._dag.get_session_nodes("new-session")
         assert len(new_nodes) == 2
         assert all(node.depth >= 2 for node in new_nodes)
@@ -12580,7 +12592,8 @@ class TestSessionRollover:
         assert engine._session_id == "new-session"
         assert engine._session_platform == "cli"
         assert engine._store.get_session_count("old-session") == 3
-        assert engine._dag.get_session_nodes("old-session") == []
+        # fork: betterlcm — d0/d1 stay with the old session instead of being deleted
+        assert sorted(n.depth for n in engine._dag.get_session_nodes("old-session")) == [0, 1]
         new_nodes = engine._dag.get_session_nodes("new-session")
         assert len(new_nodes) == 2
         assert all(node.depth >= 2 for node in new_nodes)
@@ -12621,7 +12634,8 @@ class TestSessionRollover:
         s3_nodes = engine._dag.get_session_nodes("s3")
         assert len(s3_nodes) == 3
         assert sorted(node.summary for node in s3_nodes) == ["fresh d2", "seed d2", "seed d3"]
-        assert engine._dag.get_session_nodes("s2") == []
+        # fork: betterlcm — the shallow node stays with s2 instead of being deleted
+        assert [node.summary for node in engine._dag.get_session_nodes("s2")] == ["fresh d0"]
         assert engine._session_id == "s3"
 
     def test_rollover_session_current_session_retrieval_uses_new_session_after_carry_over(self, engine):
@@ -12683,7 +12697,9 @@ class TestSessionRollover:
                 "from_current_session": True,
             }
         ]
-        assert engine._dag.get_node(pruned_node_id) is None
+        # fork: betterlcm — the shallow node is kept with the old session, out of current scope
+        pruned_node = engine._dag.get_node(pruned_node_id)
+        assert pruned_node is not None and pruned_node.session_id == "old-retrieval"
         assert engine._store.get_session_count("old-retrieval") == 1
         assert engine._store.get_session_count("new-retrieval") == 0
 
