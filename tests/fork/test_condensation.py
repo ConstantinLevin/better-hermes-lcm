@@ -95,17 +95,24 @@ def test_condense_at_1m_over_budget_condenses_oldest_first_until_under(tmp_path,
         e.shutdown()
 
 
-def test_condense_budget_regime_keeps_condensing_while_over(tmp_path, mock_summariser):
+def test_condense_over_budget_uses_upstreams_loop_not_a_drain(tmp_path, mock_summariser):
+    """The budget is a GATE in front of upstream's loop, not a replacement for it.
+
+    An earlier version drained the frontier until it was under budget; with the tiny budget the
+    curve yields just above 256k that condensed everything on every compaction. Upstream's loop
+    does one group per depth per call, and that is what must happen once the gate opens.
+    """
     e = _engine(tmp_path, W1M)
     try:
         base = time.time()
         for i in range(12):
             _leaf(e, 60_000, earliest=base + i, created=base + i)
-        # 720k over a 200k budget: the mock summaries are tiny, so each group removes ~240k
         e._maybe_condense()
         d1 = [n for n in e._dag.get_session_nodes(e._session_id) if n.depth == 1]
-        assert len(d1) == 3
-        assert e._summary_frontier_tokens() <= 200_000
+        assert len(d1) == 1
+        assert sorted(d1[0].source_ids) == sorted(n.node_id for n in
+                                                  sorted(e._dag.get_session_nodes(e._session_id),
+                                                         key=lambda n: n.node_id)[:4])
     finally:
         e.shutdown()
 
@@ -122,7 +129,6 @@ def test_condense_budget_regime_skips_depths_at_the_cap(tmp_path, mock_summarise
             ))
         e._maybe_condense()
         assert all(n.depth == 1 for n in e._dag.get_session_nodes(e._session_id))
-        assert e._last_condensation_suppressed_reason == "no_same_depth_condensation_group"
     finally:
         e.shutdown()
 

@@ -62,9 +62,22 @@ class HostCooldownMixin:
             value = DEFAULT_SUMMARY_FAILURE_COOLDOWN_SECONDS
         return max(0.0, value)
 
+    def _cooldown_applies_to_current_session(self) -> bool:
+        """fork: betterlcm — a failure cools down the session that suffered it.
+
+        The deadline lives on the engine, and the engine outlives a session: after `/new` or a
+        foreground rebind the next session inherited a block it never earned. Backoff for
+        retries of the SAME session is the point; punishing an unrelated one is not.
+        """
+        armed_for = getattr(self, "_lcm_failure_session", None)
+        if armed_for is None:
+            return True
+        return str(armed_for) == str(getattr(self, "_session_id", "") or "")
+
     def _record_compression_failure(self, error: str) -> None:
         seconds = self._cooldown_seconds()
         self._lcm_failure_cooldown_until = time.monotonic() + seconds
+        self._lcm_failure_session = str(getattr(self, "_session_id", "") or "")  # fork: scope
         self._lcm_failure_error = str(error or "")[:500]
         self._lcm_failure_count = int(getattr(self, "_lcm_failure_count", 0)) + 1
         logger.warning(
@@ -72,9 +85,19 @@ class HostCooldownMixin:
             seconds, self._lcm_failure_count, self._lcm_failure_error,
         )
 
+    def on_session_reset(self) -> None:  # type: ignore[override]
+        """fork: betterlcm — a reset ends the session the cooldown was armed for."""
+        self.clear_compression_failure_cooldown()
+        parent = getattr(super(), "on_session_reset", None)
+        if callable(parent):
+            parent()
+
     def clear_compression_failure_cooldown(self) -> None:
         self._lcm_failure_cooldown_until = 0.0
         self._lcm_failure_error = ""
+
+    def _cooldown_remaining_for_current_session(self) -> float:
+        return self._cooldown_remaining() if self._cooldown_applies_to_current_session() else 0.0
 
     def _cooldown_remaining(self) -> float:
         return max(0.0, float(getattr(self, "_lcm_failure_cooldown_until", 0.0)) - time.monotonic())
@@ -83,7 +106,7 @@ class HostCooldownMixin:
 
     def get_active_compression_failure_cooldown(self, *, refresh: bool = False) -> Optional[Dict[str, Any]]:
         del refresh  # nothing durable to refresh: the cooldown is process-local
-        remaining = self._cooldown_remaining()
+        remaining = self._cooldown_remaining_for_current_session()
         if remaining <= 0:
             return None
         return {
@@ -95,7 +118,7 @@ class HostCooldownMixin:
     def _automatic_compression_blocked(self, *, ignore_cooldown: bool = False) -> bool:
         if ignore_cooldown:
             return False
-        return self._cooldown_remaining() > 0
+        return self._cooldown_remaining_for_current_session() > 0
 
     def should_compress(self, prompt_tokens: int = None) -> bool:  # type: ignore[override]
         if self._automatic_compression_blocked():
@@ -111,7 +134,7 @@ class HostCooldownMixin:
         return wants
 
     def should_compress_info(self, prompt_tokens: int = None):  # type: ignore[override]
-        remaining = self._cooldown_remaining()
+        remaining = self._cooldown_remaining_for_current_session()
         if remaining > 0:
             return False, f"cooldown:{remaining:.0f}"
         return self.should_compress(prompt_tokens), None
@@ -182,7 +205,7 @@ class HostCooldownMixin:
     # -- status ------------------------------------------------------------------------
 
     def compression_failure_status(self) -> Dict[str, Any]:
-        remaining = self._cooldown_remaining()
+        remaining = self._cooldown_remaining_for_current_session()
         return {
             "cooldown_active": remaining > 0,
             "cooldown_remaining_seconds": round(remaining, 1),

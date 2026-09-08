@@ -75,6 +75,26 @@ class WindowScaledSettingsMixin:
     # -- lookup ----------------------------------------------------------------------------
 
     def _effective(self, name: str) -> Any:
+        value = self._effective_raw(name)
+        if name == "fresh_tail_max_tokens" and self._is_curved(name):
+            # fork: betterlcm — the curve interpolates this cap from "the whole window" (which
+            # cannot bind, i.e. upstream's `0 = disabled`) down to 0.15*W at 1M. While it still
+            # cannot bind, report upstream's literal 0. A curved cap must also never *add* a
+            # message to a tail the count limit excluded. An OPERATOR's explicit cap is never
+            # normalised away — it applies exactly as configured.
+            window = int(getattr(self, "context_length", 0) or 0)
+            if window <= 0 or int(value or 0) >= window:
+                return 0
+            if int(self._effective_raw("fresh_tail_count") or 0) <= 0:
+                return 0
+        return value
+
+    def _is_curved(self, name: str) -> bool:
+        """True when this setting's value came from the curve rather than an operator."""
+        entry = (getattr(self, "_window_scaled", None) or {}).get(name)
+        return bool(entry is not None and str(entry.source).startswith("curve@"))
+
+    def _effective_raw(self, name: str) -> Any:
         anchor = ANCHORS_BY_NAME[name]
         config = self._config
         explicit, _source = explicit_override(config, anchor)
@@ -106,11 +126,17 @@ class WindowScaledSettingsMixin:
         entry = resolved.get("context_threshold")
         if entry is None:
             return
-        source = getattr(self, "_context_threshold_source", _DEFAULT_THRESHOLD_SOURCE)
-        if source != _DEFAULT_THRESHOLD_SOURCE:
-            return
+        # fork: betterlcm — the RESOLVER is the single authority on "did anything configure
+        # this?". An earlier version also required the engine's own
+        # ``_context_threshold_source`` to equal "manual_or_default", but ``LCMConfig.from_env``
+        # records "default" for an unconfigured threshold — so on a clean install the guard
+        # rejected the curve, the engine compacted at 0.35 (350k on a 1M model) while
+        # ``lcm_status`` reported the curve's 0.80. Two predicates for one question is how that
+        # happened; there is now one.
         if not entry.source.startswith("curve@"):
             return
+        if getattr(self, "_context_threshold_autoraised", None):
+            return  # a route-specific autoraise is a deliberate runtime decision, not a default
         self.context_threshold = float(entry.value)
         self.threshold_percent = self.context_threshold
         self._context_threshold_source = entry.source

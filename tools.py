@@ -164,10 +164,52 @@ def _node_index_block_payload(engine: Any, node: Any) -> Dict[str, Any]:
 
 
 def _get_session_node(engine: "LCMEngine", node_id: int):
+    """A node the caller may expand.
+
+    fork: betterlcm — authorization is REACHABILITY from the current session, not session
+    equality. `/new` carries the retained depths into the new session and leaves their children
+    with the old one, so a node the caller legitimately reached through
+    ``lcm_expand(node_id=parent)`` would otherwise be unexpandable one hop later: the tool hands
+    back a child id it then refuses. Nodes of unrelated sessions stay refused, because reaching
+    them would require an ancestor in the current session.
+    """
     node = engine._dag.get_node(node_id)
-    if node is None or node.session_id != engine.current_session_id:
+    if node is None:
         return None
-    return node
+    if node.session_id == engine.current_session_id:
+        return node
+    return node if _is_reachable_from_current_session(engine, node) else None
+
+
+def _is_reachable_from_current_session(engine: "LCMEngine", node: Any, *,
+                                       max_hops: int = 16, max_nodes: int = 512) -> bool:
+    """True when some ancestor of ``node`` belongs to the caller's current session."""
+    current = engine.current_session_id
+    if not current:
+        return False
+    seen: set[int] = {int(node.node_id)}
+    frontier = [int(node.node_id)]
+    for _hop in range(max_hops):
+        if not frontier or len(seen) > max_nodes:
+            return False
+        parents: list[int] = []
+        for child_id in frontier:
+            try:
+                parent_ids = engine._dag.get_parent_node_ids(child_id)
+            except Exception:
+                return False
+            for parent_id in parent_ids:
+                if parent_id in seen:
+                    continue
+                seen.add(parent_id)
+                parent = engine._dag.get_node(parent_id)
+                if parent is None:
+                    continue
+                if parent.session_id == current:
+                    return True
+                parents.append(parent_id)
+        frontier = parents
+    return False
 
 
 def _get_externalized_payload(
@@ -1369,6 +1411,21 @@ def _expand_message_sources(
     return messages, pagination
 
 
+def _authorized_child_node(engine: Any, child_id: Any) -> Any:
+    """fork: betterlcm — a recorded child of an already-authorized node.
+
+    Upstream required every descendant to belong to the *current* session. That was true while
+    `/new` DELETED the shallower nodes; the fork keeps them with the old session and carries
+    only the retained depths forward, so a carried-over parent's own children legitimately live
+    in the previous session. Requiring session equality at every hop made the retained node
+    expand to "no children, has_more=false" — an index that reads as complete and is empty.
+
+    The id comes from the parent's stored ``source_ids``, and the parent was authorized by the
+    caller, so following it does not widen access to unrelated sessions.
+    """
+    return engine._dag.get_node(child_id)
+
+
 def _expand_child_nodes(
     engine: "LCMEngine",
     node,
@@ -1388,9 +1445,11 @@ def _expand_child_nodes(
         source_limit = min(max(0, source_limit), remaining_source_count)
     selected_source_ids = node.source_ids[source_offset:source_offset + source_limit]
     children: list[tuple[int, Any]] = []
+    missing_child_ids: list[int] = []  # fork: recorded but no longer present
     for relative_index, child_id in enumerate(selected_source_ids):
-        child = engine._dag.get_node(child_id)
-        if child is None or child.session_id != engine.current_session_id:
+        child = _authorized_child_node(engine, child_id)  # fork: follows retained lineage
+        if child is None:
+            missing_child_ids.append(int(child_id))
             continue
         children.append((source_offset + relative_index, child))
 
@@ -1431,7 +1490,7 @@ def _expand_child_nodes(
     if has_more and next_source_offset is None:
         next_source_offset = source_offset + source_limit
 
-    return expanded, _pagination_payload(
+    pagination = _pagination_payload(
         total_sources=total_sources,
         source_offset=source_offset,
         content_offset=0,
@@ -1441,6 +1500,13 @@ def _expand_child_nodes(
         next_content_offset=0,
         has_more=has_more,
     )
+    if missing_child_ids:
+        # fork: betterlcm — a recorded child that is no longer in the DAG is reported, never
+        # silently skipped: an expansion that returns fewer sources than the node records must
+        # say so, or it reads as a complete answer.
+        pagination["missing_source_node_ids"] = missing_child_ids
+        pagination["incomplete"] = True
+    return expanded, pagination
 
 
 def _bounded_source_path_payload(source_path: list[dict[str, int]]) -> dict[str, Any]:
@@ -1493,8 +1559,8 @@ def _collect_descendant_evidence_blocks(
 
         stack.append((current, current_path, current_visited, source_index + 1))
         child_id = current.source_ids[source_index]
-        child = engine._dag.get_node(child_id)
-        if child is None or child.session_id != engine.current_session_id:
+        child = _authorized_child_node(engine, child_id)  # fork: follows retained lineage
+        if child is None:
             continue
         child_node_id = int(child.node_id)
         if child_node_id in current_visited:
@@ -2538,6 +2604,7 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
     current_session_id = engine.current_session_id
     has_current_session = bool(current_session_id)
     results: list[Dict[str, Any]] = []
+    search_failures: list[Dict[str, str]] = []  # fork: betterlcm — see the except blocks below
 
     if content_scope in {"history", "both"}:
         try:
@@ -2561,7 +2628,11 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
                     )
                 )
         except Exception as exc:
+            # fork: betterlcm — a search that FAILED is not a search that found nothing. The
+            # agent cannot tell "not in history" from "history was unreadable", so an empty
+            # result here becomes false negative evidence over fully retained data.
             logger.warning("Message search failed: %s", exc)
+            search_failures.append({"source": "messages", "error": str(exc)[:300]})
 
     # Summary-node search is intentionally current-session only. Cross-session
     # DAG expansion is deferred; returning summary hits without an expansion
@@ -2581,6 +2652,7 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
                 results.append(_shape_summary_hit(node))
         except Exception as exc:
             logger.warning("Node search failed: %s", exc)
+            search_failures.append({"source": "summaries", "error": str(exc)[:300]})  # fork
 
     externalized_scan: dict[str, Any] | None = None
     externalized_results_omitted = False
@@ -2820,6 +2892,18 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
         response["externalized_refs"] = externalized_refs
     if externalized_scan is not None:
         response["externalized_scan"] = externalized_scan
+    if search_failures:
+        # fork: betterlcm — a partial or failed search must never look like an exhaustive
+        # negative. The hits that did succeed are kept; the caller is told what did not run.
+        response["search_failures"] = search_failures
+        response["complete"] = False
+        response["search_note"] = (
+            "Part of this search did not run (see search_failures); absence from these results "
+            "is not evidence of absence from history. Retry, or use lcm_load_session / "
+            "lcm_expand on a known session or store_id."
+        )
+    else:
+        response["complete"] = True
     return json.dumps(response)
 
 

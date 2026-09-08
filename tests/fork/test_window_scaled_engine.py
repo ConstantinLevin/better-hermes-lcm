@@ -47,7 +47,7 @@ def test_set_context_length_at_1m_resolves_design(engine):
 def test_set_context_length_at_256k_is_upstream(engine):
     engine._set_context_length(W256, source="test")
     assert engine.effective_fresh_tail_count == 32
-    assert engine.effective_fresh_tail_max_tokens == 0
+    assert engine.effective_fresh_tail_max_tokens == 0  # cap cannot bind at the low anchor
     assert engine.effective_condense_budget_tokens == 0
     assert engine.effective_leaf_chunk_tokens == W256
     assert engine.context_threshold == pytest.approx(0.35)
@@ -74,10 +74,10 @@ def test_configured_threshold_is_never_curved(tmp_path):
     assert e.context_threshold == 0.5
     assert e._context_threshold_source == "config_yaml:lcm.context_threshold"
     assert e.threshold_tokens == 500_000
-    # drain stop at t=1 is still the design value; at t=0 it equals the explicit threshold
+    # drain stop has fixed anchors and is clamped to the resolved threshold
     assert e.effective_drain_stop_fraction == pytest.approx(0.30)
     e._set_context_length(W256, source="test")
-    assert e.effective_drain_stop_fraction == pytest.approx(0.5)
+    assert e.effective_drain_stop_fraction == pytest.approx(0.35)
 
 
 def test_uses_capped_window(engine, monkeypatch):
@@ -114,3 +114,40 @@ def test_status_payload_lists_every_anchor(engine):
     assert payload["context_length"] == W1M and payload["t"] == 1.0
     assert payload["settings"]["fresh_tail_count"]["value"] == 400
     assert payload["settings"]["fresh_tail_count"]["source"].startswith("curve@")
+
+
+def test_unconfigured_threshold_uses_the_curve_on_a_clean_install(tmp_path, monkeypatch):
+    """Audit p03: `LCMConfig.from_env()` records source "default" for an unconfigured
+    threshold, which is exactly the case the curve exists for. The engine must actually use
+    the curved value, and `lcm_status` must not report a value the engine is not using."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    for key in [k for k in list(__import__("os").environ) if k.startswith("LCM_")]:
+        monkeypatch.delenv(key, raising=False)
+    cfg = LCMConfig.from_env()
+    cfg.database_path = str(tmp_path / "clean.db")
+    assert cfg.config_sources.get("context_threshold") == "default"
+    e = LCMEngine(config=cfg, hermes_home=str(tmp_path))
+    try:
+        e.on_session_start("clean", platform="cli", context_length=W1M)
+        assert e.context_threshold == pytest.approx(0.80)
+        assert e.threshold_tokens == 800_000
+        status = e.window_scaling_status()["settings"]["context_threshold"]
+        assert status["value"] == pytest.approx(e.context_threshold)  # status never lies
+        e._set_context_length(W256, source="test")
+        assert e.context_threshold == pytest.approx(0.35)
+    finally:
+        e.shutdown()
+
+
+def test_explicit_threshold_still_wins_on_a_clean_install(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("LCM_CONTEXT_THRESHOLD", "0.42")
+    cfg = LCMConfig.from_env()
+    cfg.database_path = str(tmp_path / "explicit.db")
+    e = LCMEngine(config=cfg, hermes_home=str(tmp_path))
+    try:
+        e.on_session_start("explicit", platform="cli", context_length=W1M)
+        assert e.context_threshold == pytest.approx(0.42)
+        assert e.window_scaling_status()["settings"]["context_threshold"]["value"] == pytest.approx(0.42)
+    finally:
+        e.shutdown()

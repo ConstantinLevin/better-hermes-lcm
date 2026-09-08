@@ -23,7 +23,8 @@ def test_fresh_tail_uses_curved_caps(tmp_path):
     msgs = _msgs(600)
     e._set_context_length(W256, source="test")
     b256 = e._fresh_tail_boundary(msgs)
-    assert b256.count == 32 and b256.token_limit == 0
+    # at the low anchor the cap cannot bind and is reported as upstream's 0
+    assert b256.count == 32 and b256.token_limit == 0 and b256.token_limited is False
     e._set_context_length(W1M, source="test")
     b1m = e._fresh_tail_boundary(msgs)
     assert b1m.count_limit == 400 and b1m.token_limit == 150_000
@@ -115,3 +116,15 @@ def test_tool_response_caps_scale_with_the_window(tmp_path):
         assert lcm_tools._scaled_cap(64_000) == 64_000  # nothing bound -> upstream's cap
     finally:
         pass
+
+
+def test_fresh_tail_cap_never_adds_messages_the_count_limit_excluded(tmp_path):
+    """Upstream: `fresh_tail_count=0` means no protected tail. A curved token cap must not
+    turn that into one (audit A W1 fallout: the cap is only ever a shrinking bound)."""
+    e = _engine(tmp_path, fresh_tail_count=0)
+    try:
+        for window in (W256, W256 + 10, 400_000, W1M):
+            e._set_context_length(window, source="test")
+            assert e._fresh_tail_boundary(_msgs(20)).count == 0, window
+    finally:
+        e.shutdown()

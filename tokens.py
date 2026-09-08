@@ -5,6 +5,7 @@ Uses tiktoken when available, falls back to char-based estimate.
 
 import logging
 import threading
+import json
 from functools import lru_cache
 from typing import Any, Dict, List
 
@@ -111,16 +112,32 @@ def _fallback_token_estimate(text: str) -> int:
     return int(length / divisor) + 1
 
 
+def _serialize_for_count(value) -> str:
+    """fork: betterlcm — render a non-string value the way a provider would receive it.
+
+    ``len(value) // 4`` on a dict counts its KEYS: a tool call whose ``arguments`` arrive as a
+    dict of one 50,000-character command was estimated at ~1 token, and the whole message at
+    11 tokens. Every downstream decision — compaction pressure, the fresh-tail token cap, chunk
+    sizing, the assembly budget — is derived from these counts, so the undercount silently
+    breaks the bounded-prompt guarantee. Serialise instead, and fall back to ``str`` for values
+    JSON cannot represent.
+    """
+    try:
+        return json.dumps(value, ensure_ascii=False, default=str, sort_keys=True)
+    except Exception:
+        return str(value)
+
+
 def _count_tokens_core(text) -> int:
+    if not isinstance(text, str):
+        text = _serialize_for_count(text)  # fork: betterlcm
     enc = _get_encoder()
     if enc is not None:
         try:
             return len(enc.encode(text))
         except Exception:
             pass
-    if isinstance(text, str):
-        return _fallback_token_estimate(text)
-    return len(text) // _CHARS_PER_TOKEN + 1
+    return _fallback_token_estimate(text)
 
 
 def _count_tokens_keyed(text: str, generation: int) -> int:

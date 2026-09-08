@@ -59,7 +59,12 @@ WINDOW_SCALED_DEFAULTS: tuple[Anchor, ...] = (
     Anchor("context_threshold", "context_threshold", 0.35, 0.80, cast=float),
     # Non-sweep drain stop: upstream stops the instant it is under the threshold; at 1M drain
     # to 0.30*W. Expressed as a fraction of W.
-    Anchor("drain_stop_fraction", "drain_stop_fraction", THRESHOLD, 0.30, cast=float, unset=0.0),
+    # Non-sweep drain stop. Fixed anchors: upstream stops as soon as it is under its own
+    # threshold (0.35 default) -> 0.30 of the window at 1M. The resolver additionally clamps the
+    # result to the resolved threshold, so an operator who lowers the threshold below the curve
+    # still gets a stop point that is reachable. (Was: the *curved* threshold as a moving low
+    # anchor, which made the drain stop rise to 0.44 mid-range before falling.)
+    Anchor("drain_stop_fraction", "drain_stop_fraction", 0.35, 0.30, cast=float, unset=0.0),
     # Leaf chunk size: upstream (non-dynamic) summarises the WHOLE backlog outside the tail in
     # one node -> anchor 1.0*W; at 1M 40k chunks. Explicit dynamic_leaf_chunk_enabled keeps
     # upstream's doubling behaviour instead (handled by the consumer).
@@ -70,7 +75,13 @@ WINDOW_SCALED_DEFAULTS: tuple[Anchor, ...] = (
     Anchor("summary_timeout_ms", "summary_timeout_ms", 60_000, 200_000, cast=int),
     Anchor("expansion_timeout_ms", "expansion_timeout_ms", 120_000, 200_000, cast=int),
     Anchor("fresh_tail_count", "fresh_tail_count", 32, 400, cast=int),
-    Anchor("fresh_tail_max_tokens", "fresh_tail_max_tokens", 0, 0.15, high_is_fraction=True, cast=int),
+    # Fresh-tail token cap. Upstream's literal default is 0, but 0 is a SENTINEL meaning "no
+    # cap", not a quantity: interpolating from it made the cap 1 token just above 256k, which
+    # collapsed the protected tail from 32 messages to 1. The low anchor is therefore the
+    # window itself — a cap that can never bind, which is exactly what "disabled" means — and it
+    # slides down to 0.15*W_high at 1M.
+    Anchor("fresh_tail_max_tokens", "fresh_tail_max_tokens", 1.0, 0.15,
+           low_is_fraction=True, high_is_fraction=True, cast=int),
     # Condensation trigger budget: upstream has no token gate (0); at 1M condense only once
     # the summary pile exceeds 0.20*W.
     Anchor("condense_budget_tokens", "summary_budget_fraction", 0, 0.20,
@@ -123,14 +134,31 @@ def curve_t(context_length: int, low_window: int = DEFAULT_SCALE_LOW_WINDOW,
     return (w - lo) / float(hi - lo)
 
 
-def _anchor_value(raw: Any, is_fraction: bool, context_length: int) -> float:
-    return float(raw) * context_length if is_fraction else float(raw)
+def _anchor_value(raw: Any, is_fraction: bool, anchor_window: int) -> float:
+    """Resolve one endpoint.
+
+    fork: betterlcm — a fraction endpoint is resolved against **its own** anchor window
+    (``scale_low_window`` for ``low``, ``scale_high_window`` for ``high``), never against the
+    current window. Resolving both endpoints against the current window made the curve
+    non-monotonic: ``leaf_chunk`` (1.0*W -> 0.04*W) produced 262k tokens/call at 256k, 345k at
+    512k and 40k at 1M, i.e. intermediate windows sent larger summariser requests than either
+    endpoint. Fixed endpoints keep the interpolation linear and monotone, which is what
+    "slides smoothly from the 256k value to the 1M value" means.
+    """
+    return float(raw) * anchor_window if is_fraction else float(raw)
 
 
 def interpolate(anchor: Anchor, context_length: int, t: float, *,
                 threshold_value: Optional[float] = None,
-                leaf_chunk_tokens: Optional[int] = None) -> Any:
-    """Curve value for ``anchor`` at ``t``. ``threshold_value`` resolves the THRESHOLD sentinel."""
+                leaf_chunk_tokens: Optional[int] = None,
+                low_window: int = DEFAULT_SCALE_LOW_WINDOW,
+                high_window: int = DEFAULT_SCALE_HIGH_WINDOW) -> Any:
+    """Curve value for ``anchor`` at ``t``, from fixed endpoints.
+
+    ``context_length`` is no longer used to resolve the endpoints; it is kept in the signature
+    because callers pass it and because a future anchor may legitimately need it.
+    """
+    del context_length
     low = anchor.low
     if low is THRESHOLD:
         low = threshold_value if threshold_value is not None else 0.0
@@ -138,8 +166,8 @@ def interpolate(anchor: Anchor, context_length: int, t: float, *,
     elif low is LEAF_CHUNK:
         low_val = float(leaf_chunk_tokens if leaf_chunk_tokens is not None else 20_000)
     else:
-        low_val = _anchor_value(low, anchor.low_is_fraction, context_length)
-    high_val = _anchor_value(anchor.high, anchor.high_is_fraction, context_length)
+        low_val = _anchor_value(low, anchor.low_is_fraction, low_window)
+    high_val = _anchor_value(anchor.high, anchor.high_is_fraction, high_window)
     value = low_val + t * (high_val - low_val)
     if anchor.cast is int:
         return int(round(value))
@@ -157,6 +185,25 @@ def _env_key_for(field: str) -> Optional[str]:
     return None
 
 
+_NO_DEFAULT = object()
+
+
+def _field_default(config: Any, field_name: str) -> Any:
+    """The dataclass default for ``field_name``, or ``_NO_DEFAULT``."""
+    try:
+        import dataclasses
+        for field in dataclasses.fields(type(config)):
+            if field.name == field_name:
+                if field.default is not dataclasses.MISSING:
+                    return field.default
+                if field.default_factory is not dataclasses.MISSING:  # type: ignore[misc]
+                    return field.default_factory()  # type: ignore[misc]
+                return _NO_DEFAULT
+    except Exception:
+        pass
+    return _NO_DEFAULT
+
+
 def explicit_override(config: Any, anchor: Anchor,
                       env: Optional[Mapping[str, str]] = None) -> tuple[bool, str]:
     """Return ``(is_explicit, source)`` for the anchor's config field."""
@@ -172,10 +219,14 @@ def explicit_override(config: Any, anchor: Anchor,
     if key and key in environ:
         return True, "env"
     # A config built directly (LCMConfig(context_threshold=0.9), presets, tests) carries no
-    # tracked source. If its value differs from upstream's default it was set on purpose.
-    if anchor.low is not THRESHOLD and anchor.low is not LEAF_CHUNK and not anchor.low_is_fraction and value is not None:
+    # tracked source. If its value differs from the FIELD'S OWN DEFAULT it was set on purpose.
+    # (This must compare against the dataclass default, not against ``anchor.low``: the two
+    # differ wherever upstream's default is a sentinel — ``fresh_tail_max_tokens`` defaults to
+    # 0 meaning "no cap" while the curve's low endpoint is a cap that cannot bind.)
+    default = _field_default(config, anchor.field)
+    if default is not _NO_DEFAULT and value is not None:
         try:
-            if anchor.cast(value) != anchor.cast(anchor.low):
+            if anchor.cast(value) != anchor.cast(default):
                 return True, "manual"
         except (TypeError, ValueError):
             pass
@@ -229,13 +280,22 @@ def resolve_window_scaled(config: Any, context_length: int,
             elif anchor.low is LEAF_CHUNK:
                 value = int(getattr(config, "leaf_chunk_tokens", 20_000) or 20_000)
             elif anchor.low_is_fraction:
-                value = 0
+                # No window known: upstream behaviour verbatim, which for a sentinel field is
+                # its dataclass default (``fresh_tail_max_tokens = 0`` = no cap), not the
+                # curve's low endpoint.
+                default = _field_default(config, anchor.field)
+                value = (anchor.cast(default) if default is not _NO_DEFAULT
+                         else anchor.cast(round(float(anchor.low) * low_w)))
             else:
                 value = anchor.cast(anchor.low)
             out[anchor.name] = Resolved(anchor.name, value, "upstream(no window)", 0.0)
             continue
         value = interpolate(anchor, W, t, threshold_value=threshold,
-                            leaf_chunk_tokens=int(getattr(config, "leaf_chunk_tokens", 20_000) or 20_000))
+                            leaf_chunk_tokens=int(getattr(config, "leaf_chunk_tokens", 20_000) or 20_000),
+                            low_window=low_w, high_window=high_w)
+        if anchor.name == "drain_stop_fraction":
+            # never ask the loop to drain past a point the threshold would not have reached
+            value = min(float(value), float(threshold))
         out[anchor.name] = Resolved(anchor.name, value, f"curve@t={t:.2f}", t)
     return out
 

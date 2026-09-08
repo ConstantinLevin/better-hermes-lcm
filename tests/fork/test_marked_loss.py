@@ -401,3 +401,143 @@ def test_summariser_failure_with_zero_passes_still_publishes_cleanup(tmp_path, m
         assert e.should_compress(5_000) is False
     finally:
         e.shutdown()
+
+
+# ── audit A1 / p02 / p11: a carried-over node must expand through its own lineage ───────────
+
+def test_carried_over_node_expands_through_children_in_the_old_session(tmp_path):
+    """`/new` carries depth >= retain into the new session and leaves the shallower nodes with
+    the old one. Expansion must follow the recorded lineage across that boundary; requiring
+    every descendant to belong to the current session made a retained parent report
+    "no children, has_more=false" — an index that reads complete and is empty.
+    """
+    import json
+    from hermes_lcm import tools as lcm_tools
+    e = _engine(tmp_path, "carry.db", new_session_retain_depth=2)
+    try:
+        e._session_id = "old"
+        store_id = e._store.append("old", {"role": "user", "content": "the original decision"}, source="test")
+        e._store._conn.commit()
+        leaf = e._dag.add_node(SummaryNode(session_id="old", depth=0, summary="d0 leaf",
+                                           token_count=5, source_token_count=9, source_ids=[store_id],
+                                           source_type="messages", created_at=time.time()))
+        mid = e._dag.add_node(SummaryNode(session_id="old", depth=1, summary="d1 mid",
+                                          token_count=5, source_token_count=9, source_ids=[leaf],
+                                          source_type="nodes", created_at=time.time()))
+        top = e._dag.add_node(SummaryNode(session_id="old", depth=2, summary="d2 top",
+                                          token_count=5, source_token_count=9, source_ids=[mid],
+                                          source_type="nodes", created_at=time.time()))
+        e.on_session_reset()
+        assert e.carry_over_new_session_context("old", "new") == 1
+        e._session_id = "new"
+
+        expanded = json.loads(lcm_tools.lcm_expand({"node_id": top}, engine=e))
+        assert [c["node_id"] for c in expanded["expanded"]] == [mid], expanded
+        assert expanded["pagination"]["returned_sources"] == 1
+
+        deeper = json.loads(lcm_tools.lcm_expand({"node_id": mid}, engine=e))
+        assert [c["node_id"] for c in deeper["expanded"]] == [leaf]
+
+        raw = json.loads(lcm_tools.lcm_expand({"node_id": leaf}, engine=e))
+        assert "the original decision" in json.dumps(raw["expanded"])
+    finally:
+        e.shutdown()
+
+
+def test_expansion_reports_a_recorded_child_that_no_longer_exists(tmp_path):
+    import json
+    from hermes_lcm import tools as lcm_tools
+    e = _engine(tmp_path, "missing.db")
+    try:
+        e._session_id = "s"
+        parent = e._dag.add_node(SummaryNode(session_id="s", depth=1, summary="parent",
+                                             token_count=5, source_token_count=9,
+                                             source_ids=[999_999], source_type="nodes",
+                                             created_at=time.time()))
+        result = json.loads(lcm_tools.lcm_expand({"node_id": parent}, engine=e))
+        assert result["expanded"] == []
+        assert result["pagination"]["incomplete"] is True
+        assert result["pagination"]["missing_source_node_ids"] == [999_999]
+    finally:
+        e.shutdown()
+
+
+def test_unrelated_sessions_are_still_refused(tmp_path):
+    """Reachability, not a free-for-all: a node with no ancestor in the current session stays
+    unexpandable through the current-session tools."""
+    import json
+    from hermes_lcm import tools as lcm_tools
+    e = _engine(tmp_path, "unrelated.db")
+    try:
+        e._session_id = "mine"
+        stranger = e._dag.add_node(SummaryNode(session_id="someone-else", depth=0, summary="private",
+                                               token_count=5, source_token_count=9, source_ids=[],
+                                               source_type="messages", created_at=time.time()))
+        result = json.loads(lcm_tools.lcm_expand({"node_id": stranger}, engine=e))
+        assert "error" in result and "not found in current session" in result["error"]
+        assert "private" not in json.dumps(result)
+    finally:
+        e.shutdown()
+
+
+def test_rotate_refuses_to_advance_when_its_marker_cannot_be_written(tmp_path, monkeypatch):
+    """Audit A2: rotate advanced the frontier first and only logged a failed marker write, so
+    the next bootstrap skipped raw rows with nothing pointing at them — and a retry was a
+    no-op because the frontier was already ahead."""
+    cfg = LCMConfig()
+    cfg.database_path = str(tmp_path / "rotate-fail.db")
+    cfg.fresh_tail_count = 2
+    e = LCMEngine(config=cfg, hermes_home=str(tmp_path / "home"))
+    try:
+        e._session_id = e._conversation_id = "live"
+        e._session_platform = "cli"
+        e._lifecycle.bind_session("live", conversation_id="live")
+        e.context_length = 200_000
+        for i in range(8):
+            e._store.append("live", {"role": "user", "content": f"m{i} " + "x" * 80}, source="test")
+        e._store._conn.commit()
+        before = e._lifecycle.get_by_conversation("live").current_frontier_store_id
+
+        monkeypatch.setattr(e, "_write_rotate_marker_node", lambda *a, **k: None)
+        result = e.rotate_active_session(apply=True)
+
+        assert result["ok"] is False and result["reason"] == "marker_write_failed"
+        after = e._lifecycle.get_by_conversation("live").current_frontier_store_id
+        assert after == before, "the frontier must not move without its marker"
+
+        # and with the marker working, the retry succeeds and does advance
+        monkeypatch.undo()
+        retry = e.rotate_active_session(apply=True)
+        assert retry["ok"] is True and retry["noop"] is False and "marker_node_id" in retry
+        assert e._lifecycle.get_by_conversation("live").current_frontier_store_id > before
+    finally:
+        e.shutdown()
+
+
+# ── audit B9 / p02 / p05: a failed search is not an empty one ───────────────────────────────
+
+def test_search_failure_is_reported_not_returned_as_no_matches(tmp_path, monkeypatch):
+    import json
+    import sqlite3
+    from hermes_lcm import tools as lcm_tools
+    e = _engine(tmp_path, "searchfail.db")
+    try:
+        e.on_session_start("sf", platform="cli", context_length=200_000)
+        e._store.append("sf", {"role": "user", "content": "the decision about redis"}, source="cli")
+        e._store._conn.commit()
+
+        ok = json.loads(lcm_tools.lcm_grep({"query": "redis"}, engine=e))
+        assert ok["complete"] is True and "search_failures" not in ok
+
+        def boom(*a, **k):
+            raise sqlite3.OperationalError("database is locked")
+
+        monkeypatch.setattr(e._store, "search", boom)
+        monkeypatch.setattr(e._dag, "search", boom)
+        degraded = json.loads(lcm_tools.lcm_grep({"query": "redis"}, engine=e))
+        assert degraded["results"] == [] and degraded["total_results"] == 0
+        assert degraded["complete"] is False
+        assert {f["source"] for f in degraded["search_failures"]} == {"messages", "summaries"}
+        assert "not evidence of absence" in degraded["search_note"]
+    finally:
+        e.shutdown()

@@ -30,7 +30,7 @@ from .db_bootstrap import mark_migration_step_complete
 NODE_META_TABLE = "lcm_node_meta"
 MIGRATION_STEP = "betterlcm_node_meta_v1"
 INDEX_BLOCK_MARKER = "Expand for details about:"
-INDEX_BLOCK_MAX_CHARS = 1600  # ~400 tokens
+INDEX_BLOCK_MAX_CHARS = 1600  # historical: the cut this fork removed (see extract_index_block)
 
 LEVEL_MARKER = 0
 LEVEL_L1 = 1
@@ -58,9 +58,16 @@ def ensure_node_meta_table(conn: sqlite3.Connection) -> None:
     mark_migration_step_complete(conn, MIGRATION_STEP)
 
 
-def extract_index_block(summary: str, *, max_chars: int = INDEX_BLOCK_MAX_CHARS) -> str:
+def extract_index_block(summary: str) -> str:
     """Everything after the LAST ``Expand for details about:`` marker, whitespace-normalised
-    per line, bounded to ``max_chars``. Empty when the summary carries no marker."""
+    per line. Empty when the summary carries no marker.
+
+    fork: betterlcm — this used to be cut at 1,600 characters, which sliced the index in the
+    middle of a topic: a 200-topic block ended partway through topic 84, and the tools that
+    surface the sidecar showed the cut copy with no continuation. Cutting the index is exactly
+    the loss this fork exists to remove, and the block is bounded by the summary that contains
+    it, so it is stored whole.
+    """
     text = str(summary or "")
     idx = text.rfind(INDEX_BLOCK_MARKER)
     if idx < 0:
@@ -68,10 +75,7 @@ def extract_index_block(summary: str, *, max_chars: int = INDEX_BLOCK_MAX_CHARS)
     block = text[idx + len(INDEX_BLOCK_MARKER):]
     lines = [" ".join(line.split()) for line in block.splitlines()]
     lines = [line for line in lines if line]
-    block = "\n".join(lines).strip()
-    if len(block) > max_chars:
-        block = block[: max_chars - 1].rstrip() + "…"
-    return block
+    return "\n".join(lines).strip()
 
 
 class NodeMetaStore:

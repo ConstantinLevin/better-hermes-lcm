@@ -161,3 +161,23 @@ def test_sweep_budgets_come_from_config_and_curve(tmp_path):
         assert '"threshold_full_sweep_max_seconds": 120.0' in blob
     finally:
         e.shutdown()
+
+
+def test_rescue_fallback_never_splits_a_tool_group(tmp_path):
+    """Audit A #9: after the aligned shrink attempts, the last resort was `chunk[:-1]`, which
+    strips a result from its call — the summariser sees an unanswered call, the result stays
+    outside the node, and assembly's orphan guard then removes it."""
+    e = _engine(tmp_path, W1M)
+    try:
+        call = {"role": "assistant", "content": "calling", "tool_calls": [
+            {"id": "c1", "type": "function", "function": {"name": "t", "arguments": "{}"}}]}
+        result = {"role": "tool", "tool_call_id": "c1", "content": "r " * 50}
+        chunk = [{"role": "user", "content": "q " * 50}, call, result]
+        # the floor forces both aligned attempts to be rejected, so the fallback runs
+        e._config.leaf_chunk_tokens = 10 ** 9
+        shrunk = e._next_leaf_rescue_chunk(chunk, current_source_tokens=999)
+        assert [m.get("role") for m in shrunk] == ["user"]
+        # one indivisible group: give up rather than split it
+        assert e._next_leaf_rescue_chunk([call, result], current_source_tokens=999) == []
+    finally:
+        e.shutdown()

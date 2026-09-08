@@ -158,3 +158,23 @@ def test_expand_default_page_is_window_weighted(tmp_path, monkeypatch):
             assert seen["max_tokens"] == 123
     finally:
         e.shutdown()
+
+
+def test_focus_guidance_sets_emphasis_and_never_permits_omission():
+    """Audit A3: upstream's focus block contradicted the coverage contract.
+
+    A focus topic is derived automatically from the recent user turns on every normal
+    compaction, so this block is present in nearly every real summarisation call. It must not
+    be able to decide what stays discoverable.
+    """
+    for build in (lambda: escalation._build_l1_prompt("src", 500, depth=0, focus_topic="db migration"),
+                  lambda: escalation._build_l2_prompt("src", 500, focus_topic="db migration")):
+        system = " ".join(_system(build()).split())
+        assert "or drop" not in system
+        assert "60-70%" not in system
+        assert "EMPHASIS and ORDER" in system
+        assert "never omit" in system
+        # upstream's useful half is kept: stale work is demoted, not deleted
+        assert "STALE" in system and "Historical" in system
+    # with no focus topic the block is absent entirely
+    assert "EMPHASIS and ORDER" not in _system(escalation._build_l1_prompt("src", 500, depth=0))

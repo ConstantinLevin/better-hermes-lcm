@@ -198,3 +198,39 @@ def test_length_rejection_is_named_in_the_error(monkeypatch):
     monkeypatch.setattr(escalation, "_call_llm_for_summary", lambda *a, **k: None)
     with pytest.raises(SummaryUnavailableError, match="summariser unavailable after L1/L2"):
         escalation.summarize_with_escalation(text="short source", source_tokens=20, token_budget=2000, depth=0)
+
+
+def test_cooldown_is_scoped_to_the_session_that_failed(tmp_path, monkeypatch):
+    """Audit A #16: the deadline lives on the engine and the engine outlives a session, so an
+    unrelated next session inherited a block it never earned."""
+    from hermes_lcm import escalation
+    e = _engine(tmp_path)
+    monkeypatch.setattr(escalation, "_call_llm_for_summary", lambda *a, **k: None)
+    try:
+        msgs = _messages()
+        e.compress(msgs, current_tokens=count_messages_tokens(msgs))
+        assert e.get_active_compression_failure_cooldown() is not None
+        assert e.should_compress(10_000) is False
+
+        e._session_id = "a-different-session"          # /new, or a foreground rebind
+        assert e.get_active_compression_failure_cooldown() is None
+        assert e.should_compress(10_000) is not False
+
+        e._session_id = "cooldown-session"             # back to the one that failed
+        assert e.get_active_compression_failure_cooldown() is not None
+    finally:
+        e.shutdown()
+
+
+def test_session_reset_clears_the_cooldown(tmp_path, monkeypatch):
+    from hermes_lcm import escalation
+    e = _engine(tmp_path)
+    monkeypatch.setattr(escalation, "_call_llm_for_summary", lambda *a, **k: None)
+    try:
+        msgs = _messages()
+        e.compress(msgs, current_tokens=count_messages_tokens(msgs))
+        assert e.get_active_compression_failure_cooldown() is not None
+        e.on_session_reset()
+        assert e.get_active_compression_failure_cooldown() is None
+    finally:
+        e.shutdown()

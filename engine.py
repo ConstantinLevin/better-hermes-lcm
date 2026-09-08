@@ -1680,7 +1680,29 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
             if smaller and len(smaller) < len(current_chunk):
                 return smaller
 
-        return current_chunk[:-1]
+        # fork: betterlcm — the last resort used to be ``current_chunk[:-1]``, which strips a
+        # tool result from the assistant call that produced it. The summariser then sees a call
+        # with no result, the result is left outside the new node, and assembly's orphan guard
+        # removes it. Cut on a tool-group boundary instead; if the chunk is one indivisible
+        # group, give up (the caller raises and the raw stays in place) rather than split it.
+        return self._chunk_without_last_tool_group(current_chunk)
+
+    @staticmethod
+    def _chunk_without_last_tool_group(chunk: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """The largest proper prefix of ``chunk`` that ends on a tool-group boundary."""
+
+        def starts_a_group(index: int) -> bool:
+            current, previous = chunk[index], chunk[index - 1]
+            if str(current.get("role") or "") == "tool":
+                return False  # a result belongs with the call above it
+            if previous.get("role") == "assistant" and previous.get("tool_calls"):
+                return False  # never cut between a call and its results
+            return True
+
+        end = len(chunk) - 1
+        while end > 0 and not starts_a_group(end):
+            end -= 1
+        return chunk[:end]
 
     def _summarize_leaf_chunk_with_rescue(
         self,
@@ -5649,21 +5671,19 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         if max_depth == 0:
             return  # condensation disabled
 
-        # fork: betterlcm — interpolated trigger: count >= fanin AND frontier > t*0.20*W.
-        # The budget term is 0 at 256k (upstream's count rule below runs verbatim); once it
-        # is positive the pile is left alone until it exceeds the budget, then the OLDEST
-        # frontier material is condensed first, one group at a time, until back under.
+        # fork: betterlcm — the interpolated trigger is a CONJUNCTION, exactly as designed:
+        # condense when ``len(uncondensed) >= fanin AND frontier > t*0.20*W``. The budget is a
+        # gate in front of upstream's loop, not a replacement for it: at 256k the budget is 0,
+        # the gate is vacuous and the loop below runs verbatim; as the window grows the gate
+        # holds condensation back until the summary pile is genuinely large, and the loop then
+        # condenses the oldest material first.
+        #
+        # (An earlier version of this fork replaced the loop with a "condense until the pile is
+        # under budget" drain. With the budget only a few tokens — which is what the curve
+        # yields just above 256k — that drained the entire frontier on every compaction.)
         frontier_budget = int(self.effective_condense_budget_tokens or 0)
-        if frontier_budget > 0:
-            self._maybe_condense_under_budget(
-                frontier_budget,
-                max_depth=max_depth,
-                focus_topic=focus_topic,
-                leaf_compacted_this_turn=leaf_compacted_this_turn,
-                force_overflow=force_overflow,
-                critical_budget_pressure=critical_budget_pressure,
-                deadline=deadline,
-            )
+        if frontier_budget > 0 and self._summary_frontier_tokens() <= frontier_budget:
+            self._last_condensation_suppressed_reason = "frontier_within_budget"
             return
 
         # When max_depth is -1 (unlimited), derive the upper bound from
@@ -5696,8 +5716,15 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                 suppression_reason = reason or suppression_reason
                 continue
 
-            # Take the first fanin nodes and condense
+            # Take the first fanin nodes and condense. fork: betterlcm — once the budget gate
+            # is active (t > 0) the group is the OLDEST same-depth frontier material by
+            # content age instead of upstream's insertion order; at 256k the budget is 0 and
+            # upstream's selection is used unchanged.
             to_condense = uncondensed[:fanin]
+            if frontier_budget > 0:
+                oldest = self._select_oldest_condensation_group(fanin, max_depth, depth=depth)
+                if oldest:
+                    to_condense = oldest
             source_tokens, summary_tokens, level = self._condense_summary_nodes(
                 to_condense,
                 focus_topic=focus_topic,
@@ -5716,10 +5743,17 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         if not condensed_any and leaf_compacted_this_turn and self._config.cache_friendly_condensation_enabled:
             self._last_condensation_suppressed_reason = suppression_reason
 
-    def _select_oldest_condensation_group(self, fanin: int, max_depth: int) -> List[SummaryNode]:
+    def _select_oldest_condensation_group(
+        self, fanin: int, max_depth: int, *, depth: Optional[int] = None
+    ) -> List[SummaryNode]:
         """fork: betterlcm — the fanin oldest same-depth frontier nodes around the oldest
-        frontier node (by ``earliest_at``, else ``created_at``), skipping depths at the cap."""
+        frontier node (by ``earliest_at``, else ``created_at``), skipping depths at the cap.
+
+        ``depth`` restricts the search to one depth (the caller's loop depth).
+        """
         frontier = self._summary_frontier_nodes()
+        if depth is not None:
+            frontier = [node for node in frontier if node.depth == depth]
         if not frontier:
             return []
 
@@ -5738,58 +5772,6 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
             if len(same_depth) >= fanin:
                 return same_depth[:fanin]
         return []
-
-    def _maybe_condense_under_budget(
-        self,
-        frontier_budget: int,
-        *,
-        max_depth: int,
-        focus_topic: Optional[str],
-        leaf_compacted_this_turn: bool,
-        force_overflow: bool,
-        critical_budget_pressure: bool,
-        deadline: Optional[float],
-    ) -> None:
-        """fork: betterlcm — condense oldest-first while the frontier exceeds its budget."""
-        fanin = max(1, self._config.condensation_fanin)
-        frontier_tokens = self._summary_frontier_tokens()
-        if frontier_tokens <= frontier_budget:
-            self._last_condensation_suppressed_reason = "frontier_within_budget"
-            return
-        condensed_any = False
-        for _ in range(256):  # hard bound; the deadline and the budget stop it long before
-            if deadline is not None and time.monotonic() >= deadline:
-                self._last_condensation_suppressed_reason = "time_budget_exhausted"
-                break
-            group = self._select_oldest_condensation_group(fanin, max_depth)
-            if not group:
-                if not condensed_any:
-                    self._last_condensation_suppressed_reason = "no_same_depth_condensation_group"
-                break
-            allow, reason = self._should_allow_follow_on_condensation(
-                uncondensed_count=len(group),
-                leaf_compacted_this_turn=leaf_compacted_this_turn,
-                force_overflow=force_overflow,
-                critical_budget_pressure=critical_budget_pressure,
-            )
-            if not allow:
-                self._last_condensation_suppressed_reason = reason
-                break
-            depth = group[0].depth
-            source_tokens, summary_tokens, level = self._condense_summary_nodes(
-                group,
-                focus_topic=focus_topic,
-                deadline=deadline,
-            )
-            condensed_any = True
-            frontier_tokens = max(0, frontier_tokens - source_tokens + summary_tokens)
-            logger.info(
-                "LCM condensation (budget %d): d%d × %d → d%d (L%d, %d→%d tokens, frontier now %d)",
-                frontier_budget, depth, len(group), depth + 1, level,
-                source_tokens, summary_tokens, frontier_tokens,
-            )
-            if frontier_tokens <= frontier_budget:
-                break
 
     def _condense_summary_nodes(
         self,
@@ -6838,6 +6820,23 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         if is_noop:
             return result
 
+        # fork: betterlcm — the marker is written BEFORE the frontier advances. Rotating means
+        # "stop replaying these raw rows"; the marker node is the only thing that still says
+        # they exist. Advancing first (as this did) meant a failed marker write left the rows
+        # skipped at the next bootstrap with nothing pointing at them, while rotate still
+        # reported success and a retry was a no-op because the frontier was already ahead.
+        # Marker first: if it cannot be written, the frontier does not move and the caller is
+        # told, so the raw stays replayable and rotate can be retried.
+        marker_node_id = self._write_rotate_marker_node(session_id, new_frontier)
+        if marker_node_id is None and self._rotate_span_needs_marker(session_id, new_frontier):
+            return {
+                **{k: v for k, v in result.items() if k != "ok"},
+                "ok": False,
+                "noop": False,
+                "reason": "marker_write_failed",
+                "applied_frontier_store_id": current_frontier,
+            }
+
         new_state = self._lifecycle.advance_frontier(
             conversation_id,
             session_id,
@@ -6871,12 +6870,21 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         # where _bind_lifecycle_state will read it into the marker
         # against a freshly-built active context.
         result["applied_frontier_store_id"] = persisted_frontier
-        # fork: betterlcm — raw rows the frontier now skips that no DAG node covers get a
-        # marker node, so the rotated span stays hinted in the summary prefix.
-        marker_node_id = self._write_rotate_marker_node(session_id, new_frontier)
         if marker_node_id is not None:
             result["marker_node_id"] = marker_node_id
         return result
+
+    def _rotate_span_needs_marker(self, session_id: str, new_frontier: int) -> bool:
+        """fork: betterlcm — True when the span the frontier would skip holds raw rows that no
+        DAG node covers, i.e. when a missing marker would really lose the index."""
+        start_id = int(self._last_compacted_store_id or 0) + 1
+        if new_frontier < start_id:
+            return False
+        try:
+            rows = self._store.get_range(session_id, start_id=start_id, end_id=new_frontier, limit=1)
+        except Exception:
+            return True  # cannot prove the span is empty: refuse rather than skip silently
+        return bool(rows)
 
     def _write_rotate_marker_node(self, session_id: str, new_frontier: int) -> int | None:
         """fork: betterlcm — d0 node over rotated rows with no summary coverage (or None)."""

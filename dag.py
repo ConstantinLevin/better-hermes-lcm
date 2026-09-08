@@ -441,6 +441,22 @@ class SummaryDAG:
             ).fetchone()
         return int(row[0] or 0) if row else 0
 
+    def get_parent_node_ids(self, node_id: int, limit: int = 256) -> List[int]:
+        """fork: betterlcm — nodes that record ``node_id`` as one of their sources.
+
+        Used to decide whether a node is reachable from the caller's session: after ``/new``
+        carries the retained depths forward, a legitimately expandable child can live in the
+        previous session, so session equality is the wrong authorization test.
+        """
+        with self._db_lock:
+            rows = self._conn.execute(
+                """SELECT DISTINCT p.node_id FROM summary_nodes p, json_each(p.source_ids)
+                   WHERE p.source_type = 'nodes' AND json_each.value = ?
+                   LIMIT ?""",
+                (int(node_id), int(limit)),
+            ).fetchall()
+        return [int(row[0]) for row in rows]
+
     def get_session_depths(self, session_id: str) -> List[int]:
         """fork: betterlcm — the distinct depths present for a session, ascending."""
         with self._db_lock:
@@ -689,6 +705,10 @@ class SummaryDAG:
                 return results[:limit]
             fetch_limit = min(fetch_limit * 2, remaining)
 
+    @staticmethod
+    def _is_recency_sort(sort: str | None) -> bool:
+        return str(sort or "").strip().lower() in {"recency", "recent", "newest", "time"}
+
     def _search_like(self, query: str, session_id: str | None = None,
                      limit: int = 20, sort: str | None = None,
                      source: str | None = None) -> List[SummaryNode]:
@@ -720,10 +740,17 @@ class SummaryDAG:
         nodes: list[SummaryNode] = []
         source_match_cache: dict[int, bool] = {}
         while True:
+            # fork: betterlcm — order in SQL BEFORE the limit. Paging an unordered candidate
+            # set and sorting the page in Python meant "give me the newest match" returned the
+            # newest of an arbitrary page: with 100 matching summaries, sort="recency" limit=1
+            # returned #50. This path is not exotic — CJK and emoji queries are routed here by
+            # design, not only a broken FTS index.
+            order_sql = "ORDER BY created_at DESC, node_id DESC" if self._is_recency_sort(sort) else ""
             with self._db_lock:
                 rows = self._conn.execute(
                     f"""SELECT * FROM summary_nodes
                         WHERE {' AND '.join(where)}
+                        {order_sql}
                         LIMIT ? OFFSET ?""",
                     [*base_args, fetch_limit, offset],
                 ).fetchall()

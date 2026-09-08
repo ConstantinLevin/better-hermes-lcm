@@ -84,6 +84,13 @@ Restart Hermes after updating.
 1. While the old runtime is running, run `/lcm backup`. If Hermes or any other
    SQLite writer may still be running, this is the only supported online backup
    path.
+
+   **`/lcm backup` copies the SQLite database only.** Externalized payloads live
+   in separate files (`lcm-large-outputs/` under the Hermes home by default, or
+   `LCM_LARGE_OUTPUT_EXTERNALIZATION_PATH`), and inline media/base64
+   externalization is always on, so a database restored without that directory
+   keeps references whose content cannot be recovered. Copy the payload
+   directory alongside the database, and restore them together.
 2. Alternatively, stop Hermes and every other process that can write the
    database. After all writers are fully stopped, copy the profile's `lcm.db`
    plus any existing `lcm.db-wal` and `lcm.db-shm` companions together as one
@@ -515,17 +522,23 @@ Common questions:
 
 **Should I leave the default threshold on a 1M-token model?**
 
-Not always. The default `0.35` means compaction starts around `350000` prompt
-tokens on a true 1M effective window. That leaves far more headroom for new
-content but compacts more aggressively, which can shorten recall of older
-details.
+Yes, normally. In this fork the threshold is window-weighted: unset, it resolves
+to `0.35` at a 256k window and `0.80` at 1M (compaction starting around `800000`
+prompt tokens), sliding linearly in between. `lcm_status` → `window_scaling`
+prints the resolved value and where it came from (`curve@t=…`, `env`,
+`config_yaml:…`). Set `LCM_CONTEXT_THRESHOLD` or `lcm.context_threshold` only to
+deviate deliberately — an explicit value always wins over the curve, so setting
+`0.35` on a 1M model reinstates the old, much more aggressive behaviour.
 
 **Should I change leaf chunk settings first?**
 
-Usually no. Start with `LCM_CONTEXT_THRESHOLD`, `LCM_FRESH_TAIL_COUNT`, and large
-output externalization. Only tune leaf chunking after checking `lcm_status` and
-understanding whether your workload is dominated by huge raw backlog passes. If
-you want chunk-sized leaf passes, enable dynamic leaf chunking explicitly.
+No. Chunk size, pass cap, drain stop, fresh tail, condensation budget, timeouts
+and concurrency are all window-weighted in this fork; the values that used to
+need hand-tuning for a large window are derived. Check `lcm_status` first, and
+tune only what it shows you disagreeing with. Enabling
+`LCM_DYNAMIC_LEAF_CHUNK_ENABLED` or `LCM_THRESHOLD_FULL_SWEEP_ENABLED` opts back
+into upstream's own policies for those paths. See `FORK.md` for the full anchor
+table.
 
 **Does compacting earlier hurt recall?**
 

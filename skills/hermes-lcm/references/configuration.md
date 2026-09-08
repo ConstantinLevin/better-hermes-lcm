@@ -31,11 +31,21 @@ It refuses conflicting paths rather than overwriting an existing install.
 
 ## High-impact controls
 
-Use `docs/operator-guide.md` as the complete current source. Start with:
+Use `docs/operator-guide.md` as the complete current source, and `FORK.md` for the
+window-weighted defaults this build resolves.
 
-- `LCM_CONTEXT_THRESHOLD`: when normal context pressure triggers compaction;
-- `LCM_FRESH_TAIL_COUNT`: newest messages kept raw;
-- `LCM_LEAF_CHUNK_TOKENS`: maximum raw material per leaf compaction group;
+**Most sizes are derived, not configured.** Threshold, fresh tail, leaf chunk, pass cap, drain
+stop, condensation budget, depth, timeouts, concurrency and several caps slide with the model's
+context window (upstream's values at 256k, the large-window design at 1M). Read
+`lcm_status` → `window_scaling` before changing any of them: it prints every resolved value and
+whether it came from the curve, an env var or config. An explicit value always wins, which also
+means an unnecessary one silently disables the scaling for that setting.
+
+Start with:
+
+- `LCM_CONTEXT_THRESHOLD`: when normal context pressure triggers compaction (curve: 0.35 → 0.80);
+- `LCM_FRESH_TAIL_COUNT`: newest messages kept raw (curve: 32 → 400);
+- `LCM_LEAF_CHUNK_TOKENS`: floor of raw material before a leaf compaction runs;
 - `LCM_DATABASE_PATH`: profile-local SQLite path when the default is unsuitable;
 - `LCM_IGNORE_SESSION_PATTERNS` and `LCM_STATELESS_SESSION_PATTERNS`: storage ownership boundaries;
 - summary/embedding provider settings only after confirming credentials, cost, and data handling.

@@ -56,3 +56,51 @@ def test_sqlite_cache_and_token_cache_follow_the_curve(tmp_path):
         assert tokens_mod._count_tokens_cached.cache_info().maxsize == 2048
     finally:
         e.shutdown()
+
+
+def test_non_string_values_are_counted_as_serialized(tmp_path):
+    """Audit A W4: `len(value)//4` on a dict counts keys, not content.
+
+    Hosts may hand tool-call arguments through as a dict. Counting them by key count made a
+    50,000-character call cost ~1 token, so every pressure/tail/chunk/assembly decision derived
+    from it was wrong by three orders of magnitude.
+    """
+    import json as _json
+    from hermes_lcm.tokens import count_message_tokens, count_tokens
+    args = {"command": "x" * 50_000}
+    assert count_tokens(args) == count_tokens(_json.dumps(args, ensure_ascii=False, sort_keys=True))
+    assert count_tokens(args) > 10_000
+    msg = {"role": "assistant", "content": "",
+           "tool_calls": [{"id": "c1", "type": "function",
+                           "function": {"name": "terminal", "arguments": args}}]}
+    assert count_message_tokens(msg) > 10_000
+    # a string argument is unchanged, and both shapes now agree
+    string_msg = {"role": "assistant", "content": "",
+                  "tool_calls": [{"id": "c1", "type": "function",
+                                  "function": {"name": "terminal",
+                                               "arguments": _json.dumps(args, ensure_ascii=False, sort_keys=True)}}]}
+    assert count_message_tokens(msg) == count_message_tokens(string_msg)
+    # values JSON cannot represent still get a real estimate rather than a key count
+    assert count_tokens({"o": object()}) > 0
+
+
+def test_like_fallback_orders_before_limiting(tmp_path):
+    """Audit p04/B10: the LIKE path (used for CJK/emoji queries by design, not only a broken
+    FTS index) paged an unordered candidate set and sorted the page, so `sort="recency",
+    limit=1` returned the newest of an arbitrary page rather than the newest match."""
+    import time as _time
+    from hermes_lcm.dag import SummaryDAG, SummaryNode
+    dag = SummaryDAG(tmp_path / "like.db")
+    try:
+        base = _time.time()
+        newest = None
+        for i in range(300):
+            newest = dag.add_node(SummaryNode(
+                session_id="s", depth=0, summary=f"部署 note {i}", token_count=5,
+                source_token_count=9, source_ids=[], source_type="messages", created_at=base + i))
+        top = dag.search("部署", session_id="s", limit=1, sort="recency")
+        assert [n.node_id for n in top] == [newest]
+        top3 = dag.search("部署", session_id="s", limit=3, sort="recency")
+        assert [n.node_id for n in top3] == [newest, newest - 1, newest - 2]
+    finally:
+        dag.close()

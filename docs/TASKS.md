@@ -4,6 +4,59 @@ Status legend: `proposed` · `agreed` · `in progress` · `done (commit)` · `re
 Each task carries an acceptance criterion; a task is not done until that holds and the full
 suite plus the fork tests are green.
 
+## Fixed in this pass (verified by probe, tests added; see git log)
+
+These were all confirmed against the code before changing anything. The first five are defects
+the fork itself introduced.
+
+| # | defect | fix |
+|---|---|---|
+| F1 | **The curve was not monotone and jumped in meaning just above 256k.** `fresh_tail_max_tokens` interpolated out of a `0` *sentinel* ("no cap"), so at W=262,154 the cap was **1 token** and the protected tail collapsed from 32 messages to 1 (6 at 272k, 28 at 300k). `condense_budget_tokens` did the same. `leaf_chunk_tokens` resolved both fraction endpoints against the *current* window, peaking at 336k tokens/call around 600k — larger requests in the middle than at either end. | Fraction endpoints resolve against their own anchor window (fixed endpoints ⇒ linear, monotone); the tail cap's low endpoint is a cap that cannot bind and is reported as upstream's `0` while it cannot; `test_curve_is_monotone_across_the_whole_range` and a per-anchor linearity test now pin the shape, not just the endpoints (audit p11 showed a quadratic passed all 13 old tests). |
+| F2 | **The condensation budget replaced upstream's loop instead of gating it**, so with the tiny budget the curve produced just above 256k it condensed the entire frontier on every compaction. | The budget is now the conjunction the design documented: upstream's loop runs, gated by `frontier > budget`; oldest-first selection only while the gate is active. |
+| F3 | **`lcm_status` reported a threshold the engine was not using.** On a clean install `LCMConfig.from_env()` records source `"default"`, which the mixin's guard rejected while the resolver accepted it: the engine compacted at **350,000** tokens on a 1M model while status said 800,000. | One authority: the resolver's `curve@` source decides, plus an autoraise guard. |
+| F4 | **`/new` produced a dead end.** Carried-over nodes kept their children in the old session, and every traversal required session equality, so a retained parent expanded to "no children, has_more=false". | Authorization is reachability from the current session (`_is_reachable_from_current_session`), not session equality; unrelated sessions stay refused; a recorded child that no longer exists is reported (`missing_source_node_ids`, `incomplete`) instead of skipped. |
+| F5 | **Rotate advanced the frontier before writing its marker**, so a failed marker write left raw rows skipped with nothing pointing at them — and the retry was a no-op. | Marker first; if it cannot be written and the span needs one, the frontier does not move and the caller is told (`marker_write_failed`). |
+| F6 | **The focus-topic prompt contradicted the coverage contract** — "spend 60-70% of the budget on it", "reduce resolved topics to one-liners **or drop**" — and a focus topic is auto-derived on nearly every compaction. | Focus sets emphasis and order only; a resolved or off-focus topic may be one line but must still say what it was and how it ended. |
+| F7 | **Tool arguments arriving as a dict were counted by key count** (`len(dict)//4+1`): a 50,000-character call cost **11 tokens**, corrupting every pressure, tail, chunk and assembly decision. | Non-string values are serialised before counting. |
+| F8 | **The coverage doctor certified on no evidence** (a node pointing at a missing child scored 1.0/pass). | Three outcomes: scored, unscored, structurally broken; unreadable sources fail; a truncated scan can never report a clean bill. |
+| F9 | **The sidecar index block was cut at 1,600 chars**, mid-topic, and surfaced in that state. | Stored whole. |
+| F10 | **A failed search was returned as "no matches"** — false negative evidence over retained data. | `complete: false`, `search_failures`, and a note that absence from the results is not absence from history. |
+| F11 | **The LIKE fallback limited before ordering** (CJK/emoji queries are routed there by design): `sort="recency", limit=1` returned the 50th of 100. | `ORDER BY` in SQL before the limit. |
+| F12 | **The failure cooldown outlived its session**, blocking an unrelated one after `/new`. | Scoped to the session that failed; cleared on reset. |
+| F13 | **The leaf rescue's last resort was `chunk[:-1]`**, stripping a result from its call. | Cuts on a tool-group boundary; gives up rather than splitting an indivisible group. |
+
+## Still open — from the partitioned audits
+
+Fourteen audits ran: four aspect comparisons against lossless-claw, three cross-cutting
+(whole-plugin, plan critique, unplanned claw capabilities), a regression hunt against upstream,
+and eleven exhaustive partitions covering all 70 modules, the non-code assets and the test
+suite. Their reports are in `docs/claw-comparison/`. The findings below are NOT yet fixed; each
+report carries the citations and the reproduction.
+
+- **p01 engine-core** — publication and session ownership not coupled; late work can publish
+  under a different session; indexes that describe only the ends of their sources.
+- **p02 agent-tools** — tools that mistake incomplete work for complete results (eleven items
+  reported as a complete ten; an orphan check passing after 1,000 nodes).
+- **p03 operator-config** — `/lcm clean` can delete sources a retained node still references;
+  its transaction can lose rollback protection under concurrent use.
+- **p04 storage-schema** — the raw store is a projection, not an archive (host fields dropped);
+  reconciliation can discard new occurrences and attach wrong provenance.
+- **p05 compaction-flow** — a failed condensation can leave a published leaf behind and a retry
+  can publish with empty provenance; the envelope fitter still removes middle content.
+- **p06 payloads-embeddings** — Hermes' current spillover directory is not recognised; the
+  always-on ingest guard can canonicalise surrounding JSON; embedding workers can publish
+  offsets against replaced text.
+- **p07 rollups-assertions** — adaptive retrieval can certify incomplete evidence; the assertion
+  sidecar can publish unsupported state and present it as current.
+- **p08/p09 trajectory, evidence** — "grounded"/"verified"/"sufficient" do not reliably mean the
+  evidence supports the answer; limits can change the answer or erase its recovery handles.
+- **p11 tests** — rows are tested far more thoroughly than usable provenance; the suite does not
+  establish that a stored summary is complete or functions as an index.
+- **audit B (plan critique)** — one publication contract (validated state transition) subsumes
+  several planned tasks; the prompt rewrite must come *after* source completeness and the
+  generation contract; the host fabricates `finish_reason`, so B1 needs a host contract.
+- **audit C** — the message envelope and a durable ingest receipt keyed by host event identity.
+
 ## Phase 0 — the summariser prompt, designed this time
 | id | task | acceptance | status |
 |---|---|---|---|

@@ -70,22 +70,30 @@ def coverage_of(summary_text: str, index_block: str, sources_text: str) -> Dict[
     haystack = (str(summary_text or "") + "\n" + str(index_block or "")).lower()
     present = [e for e in entities if _present(e, haystack)]
     missing = [e for e in entities if not _present(e, haystack)]
-    fraction = (len(present) / len(entities)) if entities else 1.0
+    # fork: betterlcm — no evidence is NOT full coverage. A node whose sources are missing,
+    # unreadable or empty yields zero entities; scoring that 1.0 let a broken-provenance node
+    # certify as perfect. Report it as unscored and let the caller decide.
+    fraction = (len(present) / len(entities)) if entities else None
     return {
         "entities": len(entities),
         "present": len(present),
-        "fraction": round(fraction, 3),
+        "fraction": round(fraction, 3) if fraction is not None else None,
+        "scored": fraction is not None,
         "missing_sample": missing[:12],
     }
 
 
-def _source_text_for_node(engine: Any, node: Any, *, max_chars: int = 400_000) -> str:
+def _source_text_for_node(engine: Any, node: Any, *, max_chars: int = 400_000):
+    """Return ``(text, unreadable_source_ids)`` — a source the node records but that cannot be
+    read is reported, never silently treated as empty."""
     parts: List[str] = []
+    unreadable: List[int] = []
     if node.source_type == "messages":
         rows = engine._store.get_batch(list(node.source_ids))
         for store_id in node.source_ids:
             row = rows.get(store_id)
             if not row:
+                unreadable.append(int(store_id))
                 continue
             content = row.get("content")
             if isinstance(content, str):
@@ -96,10 +104,12 @@ def _source_text_for_node(engine: Any, node: Any, *, max_chars: int = 400_000) -
     else:
         for child_id in node.source_ids:
             child = engine._dag.get_node(int(child_id))
-            if child is not None:
-                parts.append(child.summary)
+            if child is None:
+                unreadable.append(int(child_id))
+                continue
+            parts.append(child.summary)
     text = "\n".join(parts)
-    return text[:max_chars]
+    return text[:max_chars], unreadable
 
 
 def node_coverage(engine: Any, node: Any) -> Dict[str, Any]:
@@ -111,12 +121,16 @@ def node_coverage(engine: Any, node: Any) -> Dict[str, Any]:
         except Exception:
             meta = None
     index_block = str((meta or {}).get("index_block") or "")
-    result = coverage_of(node.summary, index_block, _source_text_for_node(engine, node))
+    sources_text, unreadable = _source_text_for_node(engine, node)
+    result = coverage_of(node.summary, index_block, sources_text)
     result.update({
         "node_id": int(node.node_id),
         "depth": int(node.depth),
         "level": int((meta or {}).get("level", 1) or 1),
         "source_count": len(node.source_ids),
+        # fork: a source the node records but the store/DAG cannot produce is a provenance
+        # failure, reported separately from semantic coverage.
+        "unreadable_source_ids": unreadable,
     })
     return result
 
@@ -130,12 +144,24 @@ def session_coverage(engine: Any, session_id: Optional[str] = None, *, limit: in
     below = [n for n in scored if n["fraction"] < floor]
     total_entities = sum(n["entities"] for n in scored)
     total_present = sum(n["present"] for n in scored)
+    # fork: betterlcm — three outcomes, never conflated: scored, unscored (no evidence), and
+    # structurally broken (a recorded source that cannot be read).
+    unscored = [n for n in per_node if n["entities"] == 0]
+    broken = [n for n in per_node if n["unreadable_source_ids"]]
+    truncated_scan = len(nodes) >= max(1, int(limit))
     return {
         "session_id": session_id,
         "floor": floor,
         "nodes": len(per_node),
         "scored_nodes": len(scored),
-        "aggregate_fraction": round(total_present / total_entities, 3) if total_entities else 1.0,
+        "unscored_nodes": [n["node_id"] for n in unscored],
+        "nodes_with_unreadable_sources": [
+            {"node_id": n["node_id"], "unreadable_source_ids": n["unreadable_source_ids"][:12]}
+            for n in broken
+        ],
+        # a paging limit bounds the WORK, never the claim: say when the scan was partial
+        "scan_complete": not truncated_scan,
+        "aggregate_fraction": round(total_present / total_entities, 3) if total_entities else None,
         "nodes_below_floor": [
             {k: n[k] for k in ("node_id", "depth", "level", "fraction", "entities", "missing_sample")}
             for n in sorted(below, key=lambda n: n["fraction"])[:20]
@@ -150,14 +176,26 @@ def session_coverage(engine: Any, session_id: Optional[str] = None, *, limit: in
 def coverage_check(report: Dict[str, Any]) -> Dict[str, Any]:
     """A ``checks`` entry for lcm_doctor."""
     below = report.get("nodes_below_floor") or []
-    aggregate = float(report.get("aggregate_fraction", 1.0))
+    broken = report.get("nodes_with_unreadable_sources") or []
+    unscored = report.get("unscored_nodes") or []
+    aggregate = report.get("aggregate_fraction")
     floor = float(report.get("floor", 0.6))
-    status = "pass" if not below and aggregate >= floor else "warn"
-    return {
-        "check": "index_coverage",
-        "status": status,
-        "detail": (
-            f"{report.get('scored_nodes', 0)} node(s) scored, aggregate {aggregate:.0%} of index-bearing "
-            f"entities still discoverable; {len(below)} node(s) under the {floor:.0%} floor"
-        ),
-    }
+    if broken or not report.get("scan_complete", True):
+        status = "fail" if broken else "warn"
+    elif aggregate is None:
+        status = "warn"          # nothing could be scored: not evidence of coverage
+    else:
+        status = "pass" if not below and float(aggregate) >= floor else "warn"
+    aggregate_text = "not scored" if aggregate is None else f"{float(aggregate):.0%}"
+    detail = (
+        f"{report.get('scored_nodes', 0)} of {report.get('nodes', 0)} node(s) scored, aggregate "
+        f"{aggregate_text} of index-bearing entities still discoverable; "
+        f"{len(below)} under the {floor:.0%} floor"
+    )
+    if unscored:
+        detail += f"; {len(unscored)} node(s) yielded no evidence to score"
+    if broken:
+        detail += f"; {len(broken)} node(s) reference sources that cannot be read"
+    if not report.get("scan_complete", True):
+        detail += "; scan was truncated by the node limit"
+    return {"check": "index_coverage", "status": status, "detail": detail}

@@ -21,6 +21,13 @@ def test_extract_index_entities_finds_the_things_a_reader_would_search_for():
         assert expected in ents, expected
 
 
+def test_no_evidence_is_reported_as_unscored_not_as_full_coverage():
+    """Audit A4: a node whose sources yield no index-bearing entities used to score 1.0, so a
+    node pointing at a nonexistent child certified as perfect."""
+    empty = coverage_doctor.coverage_of("a summary", "", "")
+    assert empty["fraction"] is None and empty["scored"] is False
+
+
 def test_coverage_of_scores_presence_in_summary_plus_index_block():
     sources = "decided on sqlite; edited dag.py and node_meta.py; port 3456"
     full = coverage_doctor.coverage_of("decided sqlite; dag.py, node_meta.py; port 3456", "", sources)
@@ -105,3 +112,45 @@ def test_suggester_hands_large_windows_to_the_curve():
     # below 512k upstream's branches are untouched
     preset, _ = presets.suggest_preset_for_engine(_Eng(262_144))
     assert preset is not None and preset.name == presets._CODEX_GPT_LONG_CONTEXT.name
+
+
+def test_broken_provenance_fails_and_never_certifies(tmp_path):
+    """A recorded source that cannot be read is a structural failure, reported separately from
+    semantic coverage — and it must not be able to produce `pass`."""
+    import json
+    from hermes_lcm import tools as lcm_tools
+    e = _engine(tmp_path)
+    try:
+        broken = e._dag.add_node(SummaryNode(
+            session_id="cov", depth=1, summary="a parent with a missing child",
+            token_count=5, source_token_count=9, source_ids=[999_999],
+            source_type="nodes", created_at=time.time()))
+        payload = json.loads(lcm_tools.lcm_doctor({"coverage": True}, engine=e))
+        report = payload["coverage"]
+        assert report["aggregate_fraction"] is None
+        assert broken in report["unscored_nodes"]
+        assert report["nodes_with_unreadable_sources"] == [
+            {"node_id": broken, "unreadable_source_ids": [999_999]}
+        ]
+        check = next(c for c in payload["checks"] if c["check"] == "index_coverage")
+        assert check["status"] == "fail"
+        assert "cannot be read" in check["detail"]
+    finally:
+        e.shutdown()
+
+
+def test_a_truncated_scan_is_never_reported_as_a_clean_bill(tmp_path):
+    """A paging limit bounds the work, never the claim."""
+    from hermes_lcm.coverage_doctor import coverage_check, session_coverage
+    e = _engine(tmp_path)
+    try:
+        for i in range(6):
+            e._dag.add_node(SummaryNode(session_id="cov", depth=0, summary=f"node {i} about dag.py",
+                                        token_count=5, source_token_count=9, source_ids=[],
+                                        source_type="messages", created_at=time.time() + i))
+        report = session_coverage(e, "cov", limit=3)
+        assert report["scan_complete"] is False
+        assert coverage_check(report)["status"] != "pass"
+        assert session_coverage(e, "cov", limit=100)["scan_complete"] is True
+    finally:
+        e.shutdown()

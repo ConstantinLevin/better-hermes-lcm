@@ -1284,7 +1284,9 @@ def _doctor_coverage_text(engine) -> str:
         "LCM index coverage (fork: betterlcm)",
         f"- session: {report['session_id']}",
         f"- nodes scored: {report['scored_nodes']} of {report['nodes']}",
-        f"- aggregate: {report['aggregate_fraction']:.0%} of index-bearing entities discoverable (floor {report['floor']:.0%})",
+        (f"- aggregate: {report['aggregate_fraction']:.0%} of index-bearing entities discoverable "
+         f"(floor {report['floor']:.0%})") if report.get("aggregate_fraction") is not None
+        else "- aggregate: nothing could be scored (no index-bearing evidence in the sources)",
         f"- status: {check['status']} — {check['detail']}",
     ]
     for node in report["nodes_below_floor"]:

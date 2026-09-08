@@ -76,10 +76,15 @@ def test_roundtrip_and_index_block_extraction(tmp_path):
         dag.close()
 
 
-def test_index_block_is_bounded():
-    block = node_meta.extract_index_block("x\nExpand for details about: " + "y " * 5000)
-    assert len(block) <= node_meta.INDEX_BLOCK_MAX_CHARS
-    assert block.endswith("…")
+def test_index_block_is_stored_whole():
+    """The index block used to be cut at 1,600 characters — mid-topic, with no continuation,
+    and surfaced in that state by the tools. Cutting the index is the loss this fork removes.
+    """
+    topics = "\n".join(f"- topic {i}: what happened and where to look" for i in range(200))
+    block = node_meta.extract_index_block("body\nExpand for details about:\n" + topics)
+    assert block.count("\n") == 199
+    assert "topic 199" in block and not block.endswith("…")
+    assert len(block) > node_meta.INDEX_BLOCK_MAX_CHARS  # the historical cut would have hit here
 
 
 def test_cascade_delete_removes_sidecar_rows(tmp_path):
