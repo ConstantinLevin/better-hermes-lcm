@@ -284,6 +284,48 @@ class SummaryDAG:
             node.node_id = cur.lastrowid
             return node.node_id
 
+    def add_node_with_meta(self, node: SummaryNode, *, level: int,
+                           summary: Optional[str] = None) -> int:
+        """fork: betterlcm — publish a node and its sidecar in ONE transaction.
+
+        Upstream inserted the node, committed, then wrote the level/index-block sidecar in a
+        second transaction. A failure in between left a summary in the DAG that assembly
+        renders without its level tag and that the index-block reader cannot answer for
+        (audit p05 CP03). Publication is one state transition or none.
+        """
+        with self._db_lock:
+            cur = self._conn.execute(
+                """INSERT INTO summary_nodes
+                   (session_id, depth, summary, token_count, source_token_count,
+                    source_ids, source_type, created_at, earliest_at, latest_at, expand_hint)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    node.session_id,
+                    node.depth,
+                    node.summary,
+                    node.token_count,
+                    node.source_token_count,
+                    json.dumps(node.source_ids),
+                    node.source_type,
+                    node.created_at or time.time(),
+                    node.earliest_at,
+                    node.latest_at,
+                    node.expand_hint,
+                ),
+            )
+            node_id = cur.lastrowid
+            try:
+                self.node_meta.write_statement(
+                    node_id, level=level,
+                    summary=node.summary if summary is None else summary,
+                )
+            except Exception:
+                self._conn.rollback()
+                raise
+            self._conn.commit()
+            node.node_id = node_id
+            return node_id
+
     @staticmethod
     def stage_delete_session_scope(
         conn: sqlite3.Connection,
@@ -449,6 +491,25 @@ class SummaryDAG:
                        WHERE p.session_id = ? AND p.source_type = 'nodes'
                    )""",
                 (session_id, session_id),
+            ).fetchone()
+        return int(row[0] or 0) if row else 0
+
+    def max_message_source_id(self, session_id: str) -> int:
+        """fork: betterlcm — the highest raw store_id any leaf of this session summarises.
+
+        The DAG is the durable record of what has been compacted; the lifecycle frontier is a
+        second write that can be lost between them. Publication writes the node first, so a
+        crash (or an exception) between the two leaves a session whose summaries cover rows
+        the frontier still calls raw — and the next compaction summarises them a second time,
+        producing a duplicate index and a second node over the same sources (audit p05
+        CP02/CP03). Restoring the frontier as ``max(persisted, this)`` makes that self-healing.
+        """
+        with self._db_lock:
+            row = self._conn.execute(
+                """SELECT COALESCE(MAX(CAST(j.value AS INTEGER)), 0)
+                   FROM summary_nodes n, json_each(n.source_ids) j
+                   WHERE n.session_id = ? AND n.source_type = 'messages'""",
+                (session_id,),
             ).fetchone()
         return int(row[0] or 0) if row else 0
 

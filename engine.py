@@ -1877,7 +1877,9 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         state = self._lifecycle.bind_session(session_id, conversation_id=conversation_id)
         self._conversation_id = state.conversation_id
         self._lcm_session_last_conversation_id[session_id] = state.conversation_id
-        self._last_compacted_store_id = state.current_frontier_store_id
+        self._last_compacted_store_id = self._frontier_with_dag_floor(
+            session_id, state.current_frontier_store_id
+        )
         self._register_active_engine_binding()
         if not self._session_ignored and not self._session_stateless:
             self._remember_foreground_rebind_candidate(session_id)
@@ -1960,6 +1962,30 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
     def _unregister_active_engine_binding(self) -> None:
         with _ACTIVE_ENGINE_REGISTRY_LOCK:
             _remove_registry_entries_for_engine(self)
+
+    def _frontier_with_dag_floor(self, session_id: str, persisted_frontier: int) -> int:
+        """fork: betterlcm — never call a row raw that a published summary already covers.
+
+        See ``SummaryDAG.max_message_source_id``: the node is written before the frontier, so
+        the persisted marker can lag the DAG after a crash or a failure between the two
+        writes, and the lagging rows would be summarised a second time (audit p05 CP02/CP03).
+        """
+        frontier = int(persisted_frontier or 0)
+        try:
+            published = self._dag.max_message_source_id(session_id)
+        except Exception:  # pragma: no cover - a read failure must not block binding
+            logger.debug("LCM could not derive the frontier floor from the DAG", exc_info=True)
+            return frontier
+        if published > frontier:
+            logger.warning(
+                "LCM frontier marker for %s lagged the DAG (%d < %d); "
+                "advancing to what the summaries already cover",
+                session_id,
+                frontier,
+                published,
+            )
+            return published
+        return frontier
 
     def _persist_frontier_marker(self) -> None:
         if not self._session_id or not self._conversation_id:
@@ -5932,8 +5958,8 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
             latest_at=latest_at,
             expand_hint=self._extract_expand_hint(summary_text),
         )
-        self._dag.add_node(condensed_node)
-        self._dag.node_meta.write(condensed_node.node_id, level=int(level), summary=summary_text)  # fork: sidecar
+        # fork: betterlcm — node + sidecar in one transaction (audit p05 CP03)
+        self._dag.add_node_with_meta(condensed_node, level=int(level), summary=summary_text)
         self._invalidate_rollups_for_published_node(condensed_node)
         return source_tokens, summary_tokens, level
 
@@ -7029,8 +7055,9 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
             expand_hint=f"raw messages {min(store_ids)}..{max(store_ids)} rotated without a summary",
         )
         try:
-            node_id = int(self._dag.add_node(node))
-            self._dag.node_meta.write(node_id, level=node_meta.LEVEL_MARKER, summary=summary)
+            node_id = int(self._dag.add_node_with_meta(
+                node, level=node_meta.LEVEL_MARKER, summary=summary
+            ))
             self._invalidate_rollups_for_published_node(node)  # like every other published node
             return node_id
         except Exception:

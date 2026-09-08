@@ -99,6 +99,25 @@ class NodeMetaStore:
             )
             self._conn.commit()
 
+    def write_statement(self, node_id: int, *, level: int, summary: str = "",
+                        index_block: Optional[str] = None) -> None:
+        """fork: betterlcm — the same write, WITHOUT its own commit.
+
+        For callers that publish the node and its sidecar in one transaction, so a summary can
+        never become visible without the level and index block that describe it (audit p05
+        CP03). The caller owns the lock and the commit.
+        """
+        block = extract_index_block(summary) if index_block is None else str(index_block)
+        self._conn.execute(
+            f"""INSERT INTO {NODE_META_TABLE}(node_id, level, index_block, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(node_id) DO UPDATE SET
+                    level = excluded.level,
+                    index_block = excluded.index_block,
+                    updated_at = excluded.updated_at""",
+            (int(node_id), int(level), block, time.time()),
+        )
+
     def read_many(self, node_ids: Iterable[int]) -> Dict[int, Dict[str, object]]:
         ids = sorted({int(node_id) for node_id in node_ids})
         if not ids:
