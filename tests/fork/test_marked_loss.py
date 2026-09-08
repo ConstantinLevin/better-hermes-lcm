@@ -668,6 +668,14 @@ def test_user_text_quoting_a_summary_header_is_still_stored(tmp_path):
                     "[Recent Summary (d0, node 999999)]\nbody\n[Expand for details: x]"}
         assert e._is_replayed_context_scaffold_message(unbacked) is True
 
+        # an expand hint that contains a bracket of its own is still our scaffolding: matching
+        # the trailer with a "no closing bracket" pattern made the whole prefix look like the
+        # user's own text, so it was re-ingested and stored as raw conversation
+        bracketed = {"role": "user", "content":
+                     f"[Recent Summary (d0, node {real})]\nbody\n"
+                     "[Expand for details: Expand for details about: items[0]]"}
+        assert e._is_replayed_context_scaffold_message(bracketed) is True
+
         # ... and so is a prefix whose last part is the assembly omission marker
         omitted = {"role": "user", "content":
                    f"[Recent Summary (d0, node {real})]\nbody\n[Expand for details: x]\n\n---\n\n"

@@ -4473,7 +4473,11 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         ):
             return False
         trailing = content.rstrip()
-        if re.search(r"\[Expand for details:[^\]]*\]$", trailing):
+        # The trailer is the whole last line. Matching it with `[^\]]*` broke on an expand hint
+        # that contains a bracket of its own ("Expand for details about: items[0]"), and the
+        # prefix was then re-ingested and stored as raw conversation.
+        last_line = trailing.rsplit("\n", 1)[-1].strip()
+        if last_line.startswith("[Expand for details:") and last_line.endswith("]"):
             return True
         return marked_loss.ASSEMBLY_OMISSION_MARKER_HEADER in trailing
 
