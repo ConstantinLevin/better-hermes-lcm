@@ -1676,7 +1676,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         for target in shrink_targets:
             if target >= current_source_tokens:
                 continue
-            smaller = self._select_oldest_leaf_chunk(current_chunk, target)
+            smaller = self._select_oldest_leaf_chunk_aligned(current_chunk, target)  # fork: tool-group aligned
             if smaller and len(smaller) < len(current_chunk):
                 return smaller
 

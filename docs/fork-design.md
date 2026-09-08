@@ -491,3 +491,25 @@ sweep's fallback pair-condensation on the pressure ratio; leave the fork checkou
   happens inside one process, and cross-process writers are already serialised by SQLite.
 - Focus topic is derived once from the tail (stable across passes); prompt provenance ids
   come from the map snapshot at submission (same rows in the normal case).
+
+## Audit (2026-09-08, after deployment)
+Found and fixed: `expansion_context_tokens` and `tool_response_char_scale` had no consumer
+(now `lcm_expand_query`'s context default and `_scaled_cap` at the six response caps; the
+scale comes from the engine the tool call was handed, via a thread-local set in
+`_require_engine`); the rescue chunk was not tool-group aligned; the host's exact protocol
+call shapes were not pinned by a test (now `test_host_call_shapes_for_the_cooldown_protocol`);
+FORK.md lacked the redeploy/re-pin steps. Verified: at 256k a fixture session produces the
+same DAG structure (nodes, depths, source ids) under the upstream checkout and the fork
+(`scratchpad/dag_shape.py`; only summary text differs, by design of the prompts).
+
+Known residuals (deliberately not done, or outside the fork):
+- Plan verification 4/7 (a failure injected through the host's real `build_turn_context`; a
+  live session to the trigger) were not run — the protocol is covered at the engine level
+  with the host's call shapes; a live run is the operator's call (it spends summariser calls).
+- Host-side hardcoded cuts (`_INLINE_SHELL_MAX_OUTPUT` 4000, MCP 2 MB) are outside this fork.
+- `engine.py` ingest path still calls `_load_generated_ignored_placeholder_hashes()` per
+  message (only the compaction pass was hoisted); the assembly budget selector still re-joins
+  the candidate per part (only matters with an assembly cap, which is off).
+- `lcm_grep`/`lcm_describe` results carry the single-line `expand_hint`, not the sidecar
+  `index_block`; the rotate marker node is not registered with the (default-off) rollups.
+- The sweep-flag path and `dynamic_leaf_chunk_enabled` keep upstream's serial loop.

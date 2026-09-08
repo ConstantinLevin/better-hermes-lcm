@@ -20,6 +20,21 @@ git fetch upstream
 git merge upstream/main          # or rebase betterlcm onto upstream/main
 scripts/test.sh                  # must be green
 ```
+Then redeploy: `~/.hermes/plugins/hermes-lcm` is a clone of this repo (remote `fork`), pinned in
+`~/.hermes/plugins/.install-metadata.json` so `hermes plugins update` refuses to touch it.
+```
+git -C ~/.hermes/plugins/hermes-lcm pull fork betterlcm
+python3 - <<'PY'   # re-pin the deployed revision
+import json, subprocess, pathlib
+p = pathlib.Path.home()/".hermes/plugins/.install-metadata.json"; d = json.loads(p.read_text())
+d["hermes-lcm"]["revision"] = subprocess.check_output(["git","-C",str(pathlib.Path.home()/".hermes/plugins/hermes-lcm"),"rev-parse","HEAD"],text=True).strip()
+p.write_text(json.dumps(d, indent=2)+"\n")
+PY
+```
+`plugin.yaml` keeps upstream's version string (four upstream tests pin it; the fork is
+identified by this file and `git log`). The live `lcm.db` gains the
+`lcm_node_meta` table on first use; an upstream build classifies such a DB as newer (drop the
+table and the `betterlcm_node_meta_v1` row in `lcm_migration_state` to go back).
 Fork code is kept in NEW modules wherever possible so upstream files receive only small,
 localized hook calls. The complete list of upstream files touched, with the reason for each
 touch, is in `docs/fork-touchpoints.md` — read it before resolving a conflict: it tells you

@@ -75,3 +75,43 @@ def test_timeouts_and_l2_ratio_curve(tmp_path):
     assert (e.effective_summary_timeout_ms, e.effective_expansion_timeout_ms) == (60_000, 120_000)
     assert e.effective_l2_budget_ratio == pytest.approx(0.50)
     assert e.effective_stub_threshold_tokens == 25_000
+
+
+# ── audit additions: the last two anchors get consumers ─────────────────────────────────────
+
+def test_expansion_context_tokens_follows_the_curve(tmp_path):
+    from hermes_lcm.config import LCMConfig
+    from hermes_lcm.engine import LCMEngine
+    cfg = LCMConfig()
+    cfg.database_path = str(tmp_path / "expctx.db")
+    e = LCMEngine(config=cfg, hermes_home=str(tmp_path))
+    try:
+        e.on_session_start("x", platform="cli", context_length=262_144)
+        assert int(e.effective_expansion_context_tokens) == 32_000
+        e._set_context_length(1_000_000, source="test")
+        assert int(e.effective_expansion_context_tokens) == 125_000
+    finally:
+        e.shutdown()
+
+
+def test_tool_response_caps_scale_with_the_window(tmp_path):
+    from hermes_lcm import tools as lcm_tools
+    from hermes_lcm.config import LCMConfig
+    from hermes_lcm.engine import LCMEngine
+    cfg = LCMConfig()
+    cfg.database_path = str(tmp_path / "caps.db")
+    e = LCMEngine(config=cfg, hermes_home=str(tmp_path))
+    try:
+        e.on_session_start("x", platform="cli", context_length=262_144)
+        assert lcm_tools._scaled_cap(64_000, engine=e) == 64_000
+        e._set_context_length(1_000_000, source="test")
+        assert lcm_tools._scaled_cap(64_000, engine=e) == 256_000
+        assert lcm_tools._scaled_cap(20_000, engine=e) == 80_000
+        # the cap sites have no engine parameter: the engine the tool call was handed is used
+        lcm_tools._require_engine({"engine": e})
+        assert lcm_tools._scaled_cap(64_000) == 256_000
+        lcm_tools._require_engine({})
+        e.shutdown()
+        assert lcm_tools._scaled_cap(64_000) == 64_000  # nothing bound -> upstream's cap
+    finally:
+        pass

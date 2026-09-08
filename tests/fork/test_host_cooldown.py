@@ -155,3 +155,35 @@ def test_no_truncation_text_ever_reaches_the_dag(tmp_path, monkeypatch):
         assert e._dag.get_session_nodes("cooldown-session") == []
     finally:
         e.shutdown()
+
+
+def test_host_call_shapes_for_the_cooldown_protocol(tmp_path, monkeypatch):
+    """The exact ways hermes-agent reads a plugin engine's cooldown state
+    (conversation_compression._refresh_persisted_compression_guards /
+    _automatic_compression_gate_blocks, turn_context_compaction._blocked_compress_reason,
+    turn_preflight, _codex_compaction_cooldown_remaining)."""
+    import inspect
+    from hermes_lcm import escalation
+    e = _engine(tmp_path)
+    monkeypatch.setattr(escalation, "_call_llm_for_summary", lambda *a, **k: None)
+    try:
+        # clear: every shape says "not blocked"
+        assert getattr(type(e), "get_active_compression_failure_cooldown")(e, refresh=True) is None
+        assert getattr(e, "get_active_compression_failure_cooldown", lambda: None)() is None
+        blocked = getattr(type(e), "_automatic_compression_blocked")
+        assert "ignore_cooldown" in inspect.signature(blocked).parameters
+        assert blocked(e, ignore_cooldown=True) is False and blocked(e) is False
+        assert e.should_compress_info(10)[0] is True
+        # arm it the way the host would: a compress() whose summariser is dead
+        msgs = _messages()
+        assert e.compress(msgs, current_tokens=count_messages_tokens(msgs)) is msgs
+        state = getattr(type(e), "get_active_compression_failure_cooldown")(e, refresh=True)
+        assert state and float(state["remaining_seconds"]) > 0
+        assert blocked(e) is True
+        assert blocked(e, ignore_cooldown=True) is False  # manual paths bypass the cooldown
+        should, reason = e.should_compress_info(10)
+        assert should is False and reason.startswith("cooldown:")
+        getter = getattr(e, "get_active_compression_failure_cooldown", None)
+        assert float(getter(refresh=True).get("remaining_seconds")) > 0
+    finally:
+        e.shutdown()

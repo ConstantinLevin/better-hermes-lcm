@@ -135,8 +135,14 @@ def _combined_result_sort_key(result: dict[str, Any], sort: str) -> tuple:
         return (rank_tier, -sort_timestamp, type_bias, role_bias, rank_value, 0.0, float("inf"))
     return (rank_tier, -sort_timestamp, type_bias, 0, rank_value, 0.0, role_bias)
 
+# fork: betterlcm — the engine each tool call was handed, visible to helpers that have no
+# engine parameter (see _scaled_cap). Set on the calling thread by _require_engine.
+_CURRENT_TOOL_ENGINE = threading.local()
+
+
 def _require_engine(kwargs: Dict[str, Any]) -> "LCMEngine | None":
     engine = kwargs.get("engine")
+    _CURRENT_TOOL_ENGINE.engine = engine  # fork: betterlcm
     return engine if engine is not None else None
 
 
@@ -312,6 +318,28 @@ _LCM_INSPECT_HARD_LIMIT_CAP = 200
 _LCM_INSPECT_REF_SCAN_MESSAGE_LIMIT = 10_000
 _LCM_INSPECT_PAYLOAD_METADATA_READ_BYTES = 16_384
 _LCM_INSPECT_MAX_RESPONSE_CHARS = 20_000
+
+
+def _scaled_cap(base: int, engine: Any = None) -> int:
+    """fork: betterlcm — tool response char caps scale with the window (x1 at 256k, x4 at 1M).
+
+    The cap sites live in helpers without an engine parameter, so the scale comes from the
+    engine the current tool call was handed (_require_engine), else the engine bound to the
+    active session (engine_registry); no engine -> upstream's cap.
+    """
+    if engine is None:
+        engine = getattr(_CURRENT_TOOL_ENGINE, "engine", None)
+    if engine is None:
+        try:
+            from .engine_registry import resolve_active_lcm_engine
+            engine = resolve_active_lcm_engine(allow_foreground=True)
+        except Exception:
+            engine = None
+    try:
+        scale = float(getattr(engine, "effective_tool_response_char_scale", 1.0) or 1.0)
+    except Exception:
+        scale = 1.0
+    return max(int(base), int(base * max(0.25, scale)))
 _OPERATOR_TEXT_FIELD_MAX_CHARS = 1_000
 
 
@@ -458,7 +486,7 @@ def lcm_query_state(args: Dict[str, Any], **kwargs) -> str:
         "assertions_truncated": result.assertions_truncated,
         "relations_truncated": result.relations_truncated,
         "response_truncated": False,
-        "response_char_cap": _LCM_QUERY_STATE_RESPONSE_CHAR_CAP,
+        "response_char_cap": _scaled_cap(_LCM_QUERY_STATE_RESPONSE_CHAR_CAP),
         "provenance": {
             "store": "same_profile_lcm.db",
             "evidence": "exact_source_spans",
@@ -471,7 +499,7 @@ def lcm_query_state(args: Dict[str, Any], **kwargs) -> str:
     omitted = 0
     while assertions:
         encoded = json.dumps(response, ensure_ascii=False, separators=(",", ":"))
-        if len(encoded) <= _LCM_QUERY_STATE_RESPONSE_CHAR_CAP:
+        if len(encoded) <= _scaled_cap(_LCM_QUERY_STATE_RESPONSE_CHAR_CAP):
             return encoded
         assertions.pop()
         omitted += 1
@@ -536,12 +564,12 @@ def _bounded_inspect_json(response: dict[str, Any]) -> str:
         (payload.get("temporal_rollups") or {}).get("truncated_fields") or []
     )
     total_truncated_fields = truncated_fields + len(rollup_truncated_fields)
-    payload["char_limit"] = _LCM_INSPECT_MAX_RESPONSE_CHARS
+    payload["char_limit"] = _scaled_cap(_LCM_INSPECT_MAX_RESPONSE_CHARS)
     payload["truncated"] = bool(total_truncated_fields)
     if total_truncated_fields:
         payload["truncated_field_count"] = total_truncated_fields
     encoded = json.dumps(payload, ensure_ascii=False)
-    if len(encoded) <= _LCM_INSPECT_MAX_RESPONSE_CHARS:
+    if len(encoded) <= _scaled_cap(_LCM_INSPECT_MAX_RESPONSE_CHARS):
         return encoded
 
     # If cardinality rather than one text field exceeds the cap, keep whole
@@ -564,7 +592,7 @@ def _bounded_inspect_json(response: dict[str, Any]) -> str:
         "limit_clamped_from",
     ]
     compact: dict[str, Any] = {
-        "char_limit": _LCM_INSPECT_MAX_RESPONSE_CHARS,
+        "char_limit": _scaled_cap(_LCM_INSPECT_MAX_RESPONSE_CHARS),
         "truncated": True,
         "truncation": {
             "reason": "response_char_limit",
@@ -582,14 +610,14 @@ def _bounded_inspect_json(response: dict[str, Any]) -> str:
         if key not in payload:
             continue
         compact[key] = payload[key]
-        if len(json.dumps(compact, ensure_ascii=False)) <= _LCM_INSPECT_MAX_RESPONSE_CHARS - 1_000:
+        if len(json.dumps(compact, ensure_ascii=False)) <= _scaled_cap(_LCM_INSPECT_MAX_RESPONSE_CHARS) - 1_000:
             retained.append(key)
         else:
             compact.pop(key)
             omitted.append(key)
     compact["truncation"]["omitted_top_level_sections"] = omitted
     encoded = json.dumps(compact, ensure_ascii=False)
-    while len(encoded) > _LCM_INSPECT_MAX_RESPONSE_CHARS and retained:
+    while len(encoded) > _scaled_cap(_LCM_INSPECT_MAX_RESPONSE_CHARS) and retained:
         key = retained.pop()
         compact.pop(key, None)
         omitted.append(key)
@@ -849,10 +877,10 @@ def lcm_compute(args: Dict[str, Any], **kwargs) -> str:
                 (time.perf_counter() - total_started) * 1_000.0, 3
             ),
         },
-        "response_char_cap": _LCM_COMPUTE_RESPONSE_CHAR_CAP,
+        "response_char_cap": _scaled_cap(_LCM_COMPUTE_RESPONSE_CHAR_CAP),
     }
     encoded = json.dumps(response, ensure_ascii=False)
-    if len(encoded) > _LCM_COMPUTE_RESPONSE_CHAR_CAP:
+    if len(encoded) > _scaled_cap(_LCM_COMPUTE_RESPONSE_CHAR_CAP):
         return json.dumps({
             "status": "fallback",
             "reason": "deterministic response exceeded its bounded response cap",
@@ -1814,7 +1842,7 @@ def lcm_load_session(args: Dict[str, Any], **kwargs) -> str:
     if max_content_chars is None or max_content_chars <= 0:
         return json.dumps({"error": "max_content_chars must be a positive integer"})
     requested_max_content_chars = max_content_chars
-    max_content_chars = min(max_content_chars, _LCM_LOAD_SESSION_HARD_MAX_CONTENT_CHARS)
+    max_content_chars = min(max_content_chars, _scaled_cap(_LCM_LOAD_SESSION_HARD_MAX_CONTENT_CHARS))
 
     after_store_id, cursor_error = _parse_strict_int(args.get("after_store_id", 0), "after_store_id")
     if cursor_error:
@@ -1884,7 +1912,7 @@ def lcm_load_session(args: Dict[str, Any], **kwargs) -> str:
         response["time_to"] = time_to
     if requested_limit > _LCM_LOAD_SESSION_HARD_LIMIT_CAP:
         response["limit_clamped_from"] = requested_limit
-    if requested_max_content_chars > _LCM_LOAD_SESSION_HARD_MAX_CONTENT_CHARS:
+    if requested_max_content_chars > _scaled_cap(_LCM_LOAD_SESSION_HARD_MAX_CONTENT_CHARS):
         response["max_content_chars_clamped_from"] = requested_max_content_chars
     return json.dumps(response)
 
@@ -2267,7 +2295,7 @@ def _bounded_recent_json(response: dict[str, Any], sections: list[dict[str, Any]
     for section in sections:
         response["sections"].append(section)
         response["returned_sections"] = len(response["sections"])
-        if len(encode()) <= _LCM_RECENT_MAX_RESPONSE_CHARS:
+        if len(encode()) <= _scaled_cap(_LCM_RECENT_MAX_RESPONSE_CHARS):
             continue
 
         response["sections"].pop()
@@ -2282,7 +2310,7 @@ def _bounded_recent_json(response: dict[str, Any], sections: list[dict[str, Any]
             candidate["content_truncated"] = midpoint < len(content)
             response["sections"].append(candidate)
             response["returned_sections"] = len(response["sections"])
-            fits = len(encode()) <= _LCM_RECENT_MAX_RESPONSE_CHARS
+            fits = len(encode()) <= _scaled_cap(_LCM_RECENT_MAX_RESPONSE_CHARS)
             response["sections"].pop()
             response["returned_sections"] = len(response["sections"])
             if fits:
@@ -2343,7 +2371,7 @@ def lcm_recent(args: Dict[str, Any], **kwargs) -> str:
             "end": _recent_iso(window.end),
         },
         "limit": limit,
-        "char_limit": _LCM_RECENT_MAX_RESPONSE_CHARS,
+        "char_limit": _scaled_cap(_LCM_RECENT_MAX_RESPONSE_CHARS),
         "mode": "leaf_summary_fallback" if fallback else "rollup",
         # ``provenance.rollups`` is filled by _bounded_recent_json from the
         # sections actually returned (bounded by limit + char cap);
@@ -2709,7 +2737,7 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
         response_chars = 0
         for item in externalized_matches:
             item_chars = len(json.dumps(item, ensure_ascii=False))
-            if response_chars + item_chars > _LCM_GREP_RESPONSE_CHAR_CAP:
+            if response_chars + item_chars > _scaled_cap(_LCM_GREP_RESPONSE_CHAR_CAP):
                 break
             response_chars += item_chars
             results.append(item)
@@ -2718,7 +2746,7 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
             "file_limit": _LCM_GREP_EXTERNALIZED_FILE_CAP,
             "discovery_limit": _LCM_GREP_EXTERNALIZED_DISCOVERY_CAP,
             "content_bytes_per_file": _LCM_GREP_EXTERNALIZED_CONTENT_BYTES,
-            "response_char_limit": _LCM_GREP_RESPONSE_CHAR_CAP,
+            "response_char_limit": _scaled_cap(_LCM_GREP_RESPONSE_CHAR_CAP),
             "active_session_only": True,
         }
 
@@ -5099,7 +5127,7 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
                 continue
             item["content_offset"], item["content_returned_chars"] = span
         item_chars = len(json.dumps(item, ensure_ascii=False))
-        if hits_out and response_chars + item_chars > _LCM_RECALL_RESPONSE_CHAR_CAP:
+        if hits_out and response_chars + item_chars > _scaled_cap(_LCM_RECALL_RESPONSE_CHAR_CAP):
             response_cap_truncated = True
             break
         response_chars += item_chars
@@ -5155,7 +5183,7 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
             "diversity_dropped_count": diversity_dropped,
             "per_hit_char_cap": _LCM_RECALL_ANSWER_READY_CONTENT_CHARS,
             "snippet_char_cap": _LCM_RECALL_SNIPPET_CHARS,
-            "response_char_cap": _LCM_RECALL_RESPONSE_CHAR_CAP,
+            "response_char_cap": _scaled_cap(_LCM_RECALL_RESPONSE_CHAR_CAP),
             "response_policy": (
                 "rank-preserving session diversity, then exact-ref hydration; "
                 "whole hits only when enforcing the response cap"
@@ -5201,12 +5229,12 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
             }
 
         encoded = json.dumps(response, ensure_ascii=False)
-        if len(encoded) > _LCM_RECALL_RESPONSE_CHAR_CAP:
+        if len(encoded) > _scaled_cap(_LCM_RECALL_RESPONSE_CHAR_CAP):
             original_query = response["query"]
             response["query"] = original_query[:4_096]
             expansion["query_truncated"] = len(response["query"]) < len(original_query)
             encoded = json.dumps(response, ensure_ascii=False)
-        while len(encoded) > _LCM_RECALL_RESPONSE_CHAR_CAP and (
+        while len(encoded) > _scaled_cap(_LCM_RECALL_RESPONSE_CHAR_CAP) and (
             response["hits"] or expansion.get("summary_leads")
         ):
             if response["hits"]:
@@ -5537,7 +5565,10 @@ def lcm_expand_query(args: Dict[str, Any], **kwargs) -> str:
     if max_tokens_error:
         return json.dumps({"error": max_tokens_error})
     max_tokens = max(1, max_tokens)
-    context_default = max(max_tokens, int(getattr(engine._config, "expansion_context_tokens", 32_000) or 32_000))
+    context_default = max(  # fork: curved (32k at 256k, 125k at 1M)
+        max_tokens,
+        int(getattr(engine, "effective_expansion_context_tokens", None) or getattr(engine._config, "expansion_context_tokens", 32_000) or 32_000),
+    )
     context_max_tokens, context_max_tokens_error = _parse_int_arg("context_max_tokens", context_default)
     if context_max_tokens_error:
         return json.dumps({"error": context_max_tokens_error})
