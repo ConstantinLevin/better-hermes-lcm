@@ -6,20 +6,40 @@ import re
 import unicodedata
 from typing import Callable, List
 
+# fork: betterlcm — these ranges decide whether a query goes to the LIKE scan instead of the
+# FTS index, and unicode61 indexes neither CJK nor symbols. A range that is missing here does
+# not degrade the search: it silently answers "no matches" for text that is in the store
+# (audit p05 SQ02 — `𠀀` against a stored `𠀀𠀁` returned nothing). Supplementary ideographs and
+# the extension blocks are therefore included, and the symbol ranges cover the whole
+# Miscellaneous-Symbols..Dingbats..Supplemental-Symbols span rather than three islands of it.
 _CJK_RE = re.compile(
     r"["
-    r"\u3400-\u4dbf"
-    r"\u4e00-\u9fff"
-    r"\u3000-\u303f"
-    r"\u3040-\u30ff"
-    r"\uac00-\ud7af"
-    r"\uff00-\uffef"
+    r"\u2e80-\u2fdf"          # CJK radicals / Kangxi
+    r"\u3000-\u303f"          # CJK symbols and punctuation
+    r"\u3040-\u30ff"          # kana
+    r"\u3100-\u312f"          # bopomofo
+    r"\u3190-\u319f"          # kanbun
+    r"\u31c0-\u31ef"          # CJK strokes
+    r"\u3200-\u4dbf"          # enclosed CJK + extension A
+    r"\u4e00-\u9fff"          # unified ideographs
+    r"\ua960-\ua97f"          # hangul jamo extended-A
+    r"\uac00-\ud7ff"          # hangul syllables + jamo extended-B
+    r"\uf900-\ufaff"          # compatibility ideographs
+    r"\ufe30-\ufe4f"          # CJK compatibility forms
+    r"\uff00-\uffef"          # halfwidth and fullwidth forms
+    r"\U00020000-\U0003ffff"  # supplementary ideographs (extensions B..I)
     r"]"
 )
 _EMOJI_RE = re.compile(
     r"["
-    r"\u2600-\u27bf"
-    r"\U0001F300-\U0001FAFF"
+    r"\u2190-\u21ff"          # arrows
+    r"\u2300-\u23ff"          # miscellaneous technical
+    r"\u2460-\u24ff"          # enclosed alphanumerics
+    r"\u25a0-\u27bf"          # geometric shapes, misc symbols, dingbats
+    r"\u2b00-\u2bff"          # miscellaneous symbols and arrows
+    r"\ufe0f"                  # variation selector-16
+    r"\U0001F000-\U0001FAFF"  # emoji planes
+    r"\U0001FB00-\U0001FBFF"  # legacy computing symbols
     r"]"
 )
 _QUOTED_PHRASE_RE = re.compile(r'"([^"]+)"')
@@ -381,11 +401,21 @@ def build_snippet(text: str, terms: List[str], width: int = 80) -> str:
     content = (text or "")
     if not content:
         return ""
-    lowered = content.lower()
+    # fork: betterlcm — match on the ORIGINAL text. Case folding is not length-preserving
+    # (``"İ".lower()`` is two characters), so offsets taken in a lowered copy and applied to
+    # the original drifted: 100 dotted capital I's before the match produced a snippet holding
+    # neither the match nor any source text (audit p05 SQ05).
     for term in terms:
         if not term:
             continue
-        idx = lowered.find(term.lower())
+        match = re.search(re.escape(term), content, re.IGNORECASE)
+        idx = match.start() if match else -1
+        if idx < 0:
+            # Fold-only equality (ß/ss, İ/i̇) still deserves a snippet; accept the lowered
+            # offset only when the original text at that offset really is the term.
+            candidate = content.lower().find(term.lower())
+            if candidate >= 0 and content[candidate:candidate + len(term)].lower() == term.lower():
+                idx = candidate
         if idx >= 0:
             start = max(0, idx - width // 2)
             end = min(len(content), idx + len(term) + width // 2)

@@ -581,6 +581,11 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         self._preflight_cleanup_only_due_to_boundary_cooldown = False
         self._preflight_cleanup_only_below_threshold = False  # fork: betterlcm
         self._leaf_lookahead = None  # fork: betterlcm (leaf_pipeline.LeafLookahead)
+        # fork: betterlcm — construct the compaction mutex here, not on first use. Creating it
+        # lazily inside compress() meant two threads arriving together could each build their
+        # own lock and both enter (audit p01 H01). Cheap to own from the start.
+        from .leaf_pipeline import CompactionLock
+        self._compaction_lock = CompactionLock()
         # Temporary source window used only while compress() assembles context.
         # _assemble_context also serves tests and recovery paths directly, so
         # keep anchoring opt-in rather than changing its public behavior.
@@ -1642,6 +1647,20 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                 self._record_ingest_failure("per-turn ingest()", e)
 
     def _is_retry_worthy_leaf_summary_error(self, exc: Exception) -> bool:
+        # fork: betterlcm — read the whole cause chain. The route's real error ("maximum
+        # context length") now travels as the __cause__ of a SummaryUnavailableError, and
+        # judging only the outermost message would miss it (audit p05 ES03).
+        seen: set[int] = set()
+        current: BaseException | None = exc
+        while current is not None and id(current) not in seen:
+            seen.add(id(current))
+            if self._is_retry_worthy_summary_error_message(current):
+                return True
+            current = current.__cause__ or current.__context__
+        return False
+
+    @staticmethod
+    def _is_retry_worthy_summary_error_message(exc: BaseException) -> bool:
         if isinstance(exc, TimeoutError):
             return True
         message = str(exc).lower()
@@ -4405,12 +4424,24 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
             return True
         if "[Expand for details:" not in content:
             return False
-        return bool(
-            re.search(
-                r"\[(?:Recent|Session Arc|Durable|Depth-\d+) Summary \(d\d+, node \d+\)\]",
-                content,
-            )
-        )
+        # fork: betterlcm — the scaffold must BE the message, not merely contain the header.
+        # This classifier decides whether a message is EXCLUDED FROM STORAGE, and upstream
+        # matched the header anywhere in any message, so a user pasting a summary block to ask
+        # about it ("why did you summarise it this way?") was silently never stored
+        # (audit A #2 / p01 E11). Our assembled prefix always starts with a summary header and
+        # ends either with an expand trailer or with the assembly omission marker; text with
+        # anything of the sender's own before or after it is theirs, and gets stored.
+        # Node ids are deliberately NOT verified: an unbacked marker replayed from a previous
+        # process is still our scaffolding and must be dropped, never re-summarised as raw.
+        if not re.match(
+            r"\s*\[(?:Recent|Session Arc|Durable|Depth-\d+) Summary \(d\d+, node \d+\)\]",
+            content,
+        ):
+            return False
+        trailing = content.rstrip()
+        if re.search(r"\[Expand for details:[^\]]*\]$", trailing):
+            return True
+        return marked_loss.ASSEMBLY_OMISSION_MARKER_HEADER in trailing
 
     def _restore_ingest_payload_placeholders_in_value(self, value: Any, *, session_id: str) -> Any:
         if isinstance(value, dict):
@@ -5224,23 +5255,21 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                     )
                     continue
 
-            lookup_candidates = []
-            sanitized_content = sanitize_pre_compaction_content(content)
-            if sanitized_content and sanitized_content != content:
-                lookup_candidates.append(sanitized_content)
-            lookup_candidates.append(content)
-
-            externalized = None
-            for candidate in lookup_candidates:
-                externalized = find_externalized_payload_for_message(
-                    candidate,
-                    tool_call_id=tool_call_id,
-                    session_id=self._session_id,
-                    config=self._config,
-                    hermes_home=self._hermes_home,
-                )
-                if externalized is not None:
-                    break
+            # fork: betterlcm — the payload must contain the row's ORIGINAL bytes before the
+            # row may be replaced by a reference to it. This used to try a SANITIZED copy of
+            # the row first and accept the first match, so a payload holding only the sanitized
+            # text authorised destroying the original: sanitisation removes whole injected
+            # blocks, and what it removed would then exist nowhere (audit p01 E12 / B21).
+            # ``find_externalized_payload_for_message`` matches on exact content equality, so
+            # the row's own bytes are the only safe candidate. Failing to GC a row is a missed
+            # optimisation; GC'ing it against a partial payload is unrecoverable loss.
+            externalized = find_externalized_payload_for_message(
+                content,
+                tool_call_id=tool_call_id,
+                session_id=self._session_id,
+                config=self._config,
+                hermes_home=self._hermes_home,
+            )
             if externalized is None:
                 continue
 
@@ -5588,26 +5617,48 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                     if call_id
                 ]
 
-                for expected_id in expected_ids:
-                    matched_direct_result = False
-                    while i + 1 < len(messages) and messages[i + 1].get("role") == "tool":
-                        next_msg = messages[i + 1]
-                        next_id = str(next_msg.get("tool_call_id") or "").strip()
-                        if next_id == expected_id:
-                            sanitized.append(next_msg)
-                            i += 1
-                            matched_direct_result = True
-                            break
-                        dropped_tool_results += 1
-                        i += 1
+                # fork: betterlcm — collect the whole contiguous run of results FIRST and match
+                # by call id, instead of walking results in call order and discarding every one
+                # that does not match the id currently being looked for. Providers may return
+                # results in a different order than the calls were made (calls a,b -> results
+                # b,a), and upstream then dropped the real `b` result and replaced it with a
+                # stub reading "see context summary above" — with nothing proving any summary
+                # covered it (audit p01 E10 / audit A #9). Re-ordering preserves the provider
+                # contract without deleting an answer the model actually received.
+                run_start = i + 1
+                run_end = run_start
+                while run_end < len(messages) and messages[run_end].get("role") == "tool":
+                    run_end += 1
+                pending: Dict[str, List[Dict[str, Any]]] = {}
+                for result_msg in messages[run_start:run_end]:
+                    pending.setdefault(
+                        str(result_msg.get("tool_call_id") or "").strip(), []
+                    ).append(result_msg)
 
-                    if not matched_direct_result and insert_missing_tool_stubs:
+                for expected_id in expected_ids:
+                    queued = pending.get(expected_id) or []
+                    if queued:
+                        sanitized.append(queued.pop(0))
+                        continue
+                    if insert_missing_tool_stubs:
                         sanitized.append({
                             "role": "tool",
                             "content": "[Result from earlier conversation — see context summary above]",
                             "tool_call_id": expected_id,
                         })
                         inserted_stub_results += 1
+
+                # Anything left over answers no call in this window. It is still real content:
+                # count it as dropped from the PROVIDER view (it cannot be replayed without its
+                # call) — the raw row and its DAG lineage are untouched and remain expandable.
+                leftover = sum(len(queue) for queue in pending.values())
+                if leftover:
+                    dropped_tool_results += leftover
+                    logger.debug(
+                        "LCM tool-pair repair: %d result(s) answered no call in this window",
+                        leftover,
+                    )
+                i = run_end - 1
 
                 while i + 1 < len(messages) and messages[i + 1].get("role") == "tool":
                     dropped_tool_results += 1
@@ -5698,47 +5749,70 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         condensed_any = False
         suppression_reason = ""
         fanin = max(1, self._config.condensation_fanin)
+        # fork: betterlcm — one compress() may publish up to `leaf_pass_cap` leaves at a large
+        # window; upstream's single pass of the depth loop was matched to its one-leaf-per-call
+        # rate, so keeping it let leaves accumulate faster than they were merged. The cap is 1
+        # at the low anchor (upstream exactly) and scales with production. The budget gate and
+        # the shared deadline are rechecked between groups. (audit D #3)
+        group_cap = max(1, int(self.effective_condense_group_cap or 1))
+        groups_published = 0
 
-        for depth in range(upper):
-            uncondensed = self._dag.get_uncondensed_at_depth(
-                self._session_id, depth
-            )
-            if len(uncondensed) < fanin:
-                continue
-
-            allow_condense, reason = self._should_allow_follow_on_condensation(
-                uncondensed_count=len(uncondensed),
-                leaf_compacted_this_turn=leaf_compacted_this_turn,
-                force_overflow=force_overflow,
-                critical_budget_pressure=critical_budget_pressure,
-            )
-            if not allow_condense:
-                suppression_reason = reason or suppression_reason
-                continue
-
-            # Take the first fanin nodes and condense. fork: betterlcm — once the budget gate
-            # is active (t > 0) the group is the OLDEST same-depth frontier material by
-            # content age instead of upstream's insertion order; at 256k the budget is 0 and
-            # upstream's selection is used unchanged.
-            to_condense = uncondensed[:fanin]
-            if frontier_budget > 0:
-                oldest = self._select_oldest_condensation_group(fanin, max_depth, depth=depth)
-                if oldest:
-                    to_condense = oldest
-            source_tokens, summary_tokens, level = self._condense_summary_nodes(
-                to_condense,
-                focus_topic=focus_topic,
-            )
-            condensed_any = True
-
-            logger.info(
-                "LCM condensation: d%d × %d → d%d (L%d, %d→%d tokens)",
-                depth, len(to_condense), depth + 1, level,
-                source_tokens, summary_tokens,
-            )
-
-            if leaf_compacted_this_turn and self._config.cache_friendly_condensation_enabled:
+        for _group_pass in range(group_cap):
+            if deadline is not None and time.monotonic() >= deadline:
+                self._last_condensation_suppressed_reason = "time_budget_exhausted"
                 break
+            if frontier_budget > 0 and self._summary_frontier_tokens() <= frontier_budget:
+                break  # back under the budget: stop here, do not drain the frontier
+            published_this_pass = 0
+
+            for depth in range(upper):
+                uncondensed = self._dag.get_uncondensed_at_depth(
+                    self._session_id, depth
+                )
+                if len(uncondensed) < fanin:
+                    continue
+
+                allow_condense, reason = self._should_allow_follow_on_condensation(
+                    uncondensed_count=len(uncondensed),
+                    leaf_compacted_this_turn=leaf_compacted_this_turn,
+                    force_overflow=force_overflow,
+                    critical_budget_pressure=critical_budget_pressure,
+                )
+                if not allow_condense:
+                    suppression_reason = reason or suppression_reason
+                    continue
+
+                # Take the first fanin nodes and condense. fork: betterlcm — once the budget
+                # gate is active (t > 0) the group is the OLDEST same-depth frontier material
+                # by content age instead of upstream's insertion order; at 256k the budget is
+                # 0 and upstream's selection is used unchanged.
+                to_condense = uncondensed[:fanin]
+                if frontier_budget > 0:
+                    oldest = self._select_oldest_condensation_group(fanin, max_depth, depth=depth)
+                    if oldest:
+                        to_condense = oldest
+                source_tokens, summary_tokens, level = self._condense_summary_nodes(
+                    to_condense,
+                    focus_topic=focus_topic,
+                    deadline=deadline,  # fork: the shared compress() clock, actually forwarded
+                )
+                condensed_any = True
+                published_this_pass += 1
+                groups_published += 1
+
+                logger.info(
+                    "LCM condensation: d%d × %d → d%d (L%d, %d→%d tokens)",
+                    depth, len(to_condense), depth + 1, level,
+                    source_tokens, summary_tokens,
+                )
+
+                if leaf_compacted_this_turn and self._config.cache_friendly_condensation_enabled:
+                    break
+                if groups_published >= group_cap:
+                    break
+
+            if published_this_pass == 0 or groups_published >= group_cap:
+                break  # nothing eligible remains, or the per-call capacity is spent
 
         if not condensed_any and leaf_compacted_this_turn and self._config.cache_friendly_condensation_enabled:
             self._last_condensation_suppressed_reason = suppression_reason

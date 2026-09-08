@@ -121,8 +121,11 @@ def test_leaf_and_condense_writes_record_level(tmp_path, monkeypatch):
             return "s\nExpand for details about: mock"
 
         monkeypatch.setattr(escalation, "_call_llm_for_summary", fake)
-        e.compress([{"role": "user", "content": "one " * 30}, {"role": "user", "content": "tail"}])
-        e.compress([{"role": "user", "content": "two " * 30}, {"role": "user", "content": "tail2"}])
+        # replay like the host does: the next turn carries the context compress() returned,
+        # so the new raw messages are actually ingested and the leaf keeps its lineage
+        ctx = e.compress([{"role": "user", "content": "one " * 30}, {"role": "user", "content": "tail"}])
+        e.compress(list(ctx) + [{"role": "user", "content": "two " * 30},
+                                {"role": "user", "content": "tail2"}])
         nodes = e._dag.get_session_nodes("lv")
         levels = {n.node_id: e._dag.node_meta.read(n.node_id)["level"] for n in nodes}
         assert sorted(levels.values())[0] == 1 and 2 in levels.values()
@@ -202,5 +205,35 @@ def test_node_results_carry_the_index_block_when_present(tmp_path):
         blob = json.dumps(described)
         assert "- second topic" in blob  # the multi-line block reaches the tool result
         assert blob.count('"index_block"') == 1  # only the node that has one
+    finally:
+        e.shutdown()
+
+
+def test_index_block_is_bounded_in_responses_but_never_in_storage(tmp_path):
+    """Audit D #5: storing the block whole is right; attaching it unbounded to every node in a
+    retrieval result let one call carry far more than the tool's own budget."""
+    from hermes_lcm import tools as lcm_tools
+    cfg = LCMConfig()
+    cfg.database_path = str(tmp_path / "bounded.db")
+    e = LCMEngine(config=cfg, hermes_home=str(tmp_path))
+    try:
+        e.on_session_start("b", platform="cli", context_length=200_000)
+        topics = "\n".join(f"- topic {i}: what happened and where to look for it" for i in range(400))
+        summary = "body\nExpand for details about:\n" + topics
+        node_id = e._dag.add_node(SummaryNode(
+            session_id="b", depth=0, summary=summary, token_count=10, source_token_count=50,
+            source_ids=[], source_type="messages", created_at=time.time(),
+            expand_hint=LCMEngine._extract_expand_hint(summary)))
+        e._dag.node_meta.write(node_id, level=1, summary=summary)
+
+        stored = e._dag.node_meta.read(node_id)["index_block"]
+        assert "topic 399" in stored, "storage is never shortened"
+
+        payload = lcm_tools._node_index_block_payload(e, e._dag.get_node(node_id))
+        assert payload["index_block_truncated"] is True
+        assert len(payload["index_block"]) <= 4_000
+        assert payload["index_block_total_chars"] == len(stored)
+        assert payload["index_block_continue_with"]["node_id"] == node_id
+        assert not payload["index_block"].endswith("- topic")  # cut on a line boundary
     finally:
         e.shutdown()

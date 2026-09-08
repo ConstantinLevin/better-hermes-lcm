@@ -104,3 +104,35 @@ def test_like_fallback_orders_before_limiting(tmp_path):
         assert [n.node_id for n in top3] == [newest, newest - 1, newest - 2]
     finally:
         dag.close()
+
+
+def test_node_decoding_does_not_depend_on_physical_column_order(tmp_path):
+    """Audit p04 DG1: reads used `SELECT *` and decoded positionally, so a database whose
+    columns were added in a different order — an older build, a restored backup, a future
+    migration — silently decoded expand_hint as summary, with no error anywhere."""
+    import sqlite3
+    import time as _time
+    from hermes_lcm.dag import SummaryDAG, SummaryNode
+    path = tmp_path / "reordered.db"
+    dag = SummaryDAG(path)
+    node_id = dag.add_node(SummaryNode(session_id="s", depth=1, summary="THE SUMMARY",
+                                       token_count=7, source_token_count=9, source_ids=[3],
+                                       source_type="messages", created_at=_time.time(),
+                                       expand_hint="THE HINT"))
+    dag.close()
+
+    # append a column, exactly as a later migration would: physical order now differs
+    conn = sqlite3.connect(str(path))
+    conn.execute("ALTER TABLE summary_nodes ADD COLUMN a_future_column TEXT DEFAULT 'x'")
+    conn.commit()
+    conn.close()
+
+    dag = SummaryDAG(path)
+    try:
+        node = dag.get_node(node_id)
+        assert node.summary == "THE SUMMARY"
+        assert node.expand_hint == "THE HINT"
+        assert node.source_ids == [3] and node.depth == 1 and node.token_count == 7
+        assert dag.get_session_nodes("s")[0].summary == "THE SUMMARY"
+    finally:
+        dag.close()

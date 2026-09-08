@@ -146,9 +146,15 @@ def _require_engine(kwargs: Dict[str, Any]) -> "LCMEngine | None":
     return engine if engine is not None else None
 
 
-def _node_index_block_payload(engine: Any, node: Any) -> Dict[str, Any]:
+def _node_index_block_payload(engine: Any, node: Any, *, max_chars: int = 4_000) -> Dict[str, Any]:
     """fork: betterlcm — the sidecar's multi-line index block for a node result, only when the
-    node has one (upstream result shapes are unchanged otherwise)."""
+    node has one (upstream result shapes are unchanged otherwise).
+
+    The block is stored whole, but a RESPONSE is bounded: attaching an unbounded multiline
+    index to every node in a result let one retrieval call carry far more than the tool's own
+    budget (audit D #5). When it does not fit, the response says so and names the exact call
+    that returns the rest — the block itself is never silently shortened in storage.
+    """
     store = getattr(getattr(engine, "_dag", None), "node_meta", None)
     if store is None or node is None:
         return {}
@@ -160,7 +166,15 @@ def _node_index_block_payload(engine: Any, node: Any) -> Dict[str, Any]:
     first_line = str(getattr(node, "expand_hint", "") or "")
     if not block or block == first_line:
         return {}
-    return {"index_block": block}
+    if len(block) <= max_chars:
+        return {"index_block": block}
+    kept = block[:max_chars].rsplit("\n", 1)[0] or block[:max_chars]
+    return {
+        "index_block": kept,
+        "index_block_truncated": True,
+        "index_block_total_chars": len(block),
+        "index_block_continue_with": {"tool": "lcm_describe", "node_id": int(node.node_id)},
+    }
 
 
 def _get_session_node(engine: "LCMEngine", node_id: int):
@@ -1349,6 +1363,26 @@ def _expand_message_sources(
         }
         if content_source == "externalized_payload":
             expanded["transcript_content"] = transcript_content
+        # fork: betterlcm — an assistant turn's tool CALLS are part of what it said. Omitting
+        # them made a call-only assistant message expand as empty content with
+        # `has_more: false` — a recovery path reporting success while returning nothing of what
+        # the agent actually did (audit p02 T04 / audit A #11). The arguments are counted
+        # against the same budget and paged with their own offset rather than dumped whole.
+        stored_tool_calls = stored.get("tool_calls")
+        if stored_tool_calls:
+            rendered = json.dumps(stored_tool_calls, ensure_ascii=False, default=str)
+            call_slice = _slice_content_for_response(rendered, max(0, remaining_tokens - sliced["content_returned_chars"] // 4), 0)
+            expanded["tool_calls"] = call_slice["content"]
+            expanded["tool_calls_chars"] = call_slice["content_chars"]
+            expanded["tool_calls_returned_chars"] = call_slice["content_returned_chars"]
+            if call_slice["content_truncated"]:
+                expanded["tool_calls_truncated"] = True
+                expanded["tool_calls_next_offset"] = call_slice["next_content_offset"]
+                expanded["tool_calls_continue_with"] = {
+                    "tool": "lcm_expand", "store_id": int(stored["store_id"]),
+                }
+        if stored.get("tool_call_id") and stored.get("role") == "tool":
+            expanded["tool_call_id"] = stored.get("tool_call_id")
         if stored.get("role") == "tool":
             if externalized is not None:
                 externalized_summary = dict(externalized)
@@ -2177,6 +2211,11 @@ def _recent_conversation_scope_session_ids(engine: "LCMEngine") -> list[str]:
     return ids or [current]
 
 
+class _RecentIncomplete(Exception):
+    """fork: betterlcm — the recent-window scan could not complete. Distinct from an empty
+    window, which is a real answer."""
+
+
 def _recent_leaf_sections(
     engine: "LCMEngine",
     window: RecentPeriodWindow,
@@ -2245,7 +2284,14 @@ def _recent_leaf_sections_staged(
                     "bound; returning no partial frontier",
                     _LCM_RECENT_FRONTIER_WORK_LIMIT,
                 )
-                return []
+                # fork: betterlcm — "too much matched to scan safely" is not "nothing happened".
+                # Returning a bare [] made the serializer report zero sections with
+                # truncated=false, i.e. an exhaustive negative over history that exists
+                # (audit p02 T16).
+                raise _RecentIncomplete(
+                    f"more than {_LCM_RECENT_FRONTIER_WORK_LIMIT} summaries match this window; "
+                    "narrow the period or use lcm_grep / lcm_load_session"
+                )
             if not id_rows:
                 return []
 
@@ -2443,8 +2489,15 @@ def lcm_recent(args: Dict[str, Any], **kwargs) -> str:
     rollup_scope = engine.current_session_id
     rollups, fallback_reason = _recent_ready_rollups(engine, window, rollup_scope)
     fallback = not rollups
+    incomplete_reason = ""
     if fallback:
-        sections = _recent_leaf_sections(engine, window, requested_scope, limit)
+        try:
+            sections = _recent_leaf_sections(engine, window, requested_scope, limit)
+        except _RecentIncomplete as exc:          # fork: betterlcm
+            sections, incomplete_reason = [], str(exc)
+        except Exception as exc:                  # fork: a read failure is not an empty window
+            logger.warning("LCM recent fallback read failed: %s", exc)
+            sections, incomplete_reason = [], f"recent-history read failed: {exc}"
     else:
         sections = _recent_rollup_sections(rollups)[:limit]
 
@@ -2458,6 +2511,9 @@ def lcm_recent(args: Dict[str, Any], **kwargs) -> str:
         "limit": limit,
         "char_limit": _scaled_cap(_LCM_RECENT_MAX_RESPONSE_CHARS),
         "mode": "leaf_summary_fallback" if fallback else "rollup",
+        # fork: betterlcm — say plainly when the window could not be scanned
+        "complete": not incomplete_reason,
+        **({"incomplete_reason": incomplete_reason} if incomplete_reason else {}),
         # ``provenance.rollups`` is filled by _bounded_recent_json from the
         # sections actually returned (bounded by limit + char cap);
         # ``rollups_covered`` is the O(1) aggregate count of ready rollups the
@@ -2605,6 +2661,7 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
     has_current_session = bool(current_session_id)
     results: list[Dict[str, Any]] = []
     search_failures: list[Dict[str, str]] = []  # fork: betterlcm — see the except blocks below
+    bounded_scans: list[Dict[str, Any]] = []  # fork: scans that stopped at a work cap
 
     if content_scope in {"history", "both"}:
         try:
@@ -2641,13 +2698,22 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
     # sessions via lcm_expand(store_id=...).
     if content_scope in {"history", "both"} and session_scope == "current" and not raw_message_filter_active:
         try:
+            node_progress: dict[str, Any] = {}  # fork: was this summary scan exhaustive?
             node_hits = engine._dag.search(
                 query,
                 session_id=search_session_id,
                 limit=source_limit,
                 sort=sort,
                 source=source,
+                progress=node_progress,
             )
+            if node_progress.get("complete") is False:
+                bounded_scans.append({
+                    "source": "summaries",
+                    "scanned_rows": int(node_progress.get("scanned_rows") or 0),
+                    "candidate_cap": int(node_progress.get("candidate_cap") or 0),
+                    "path": str(node_progress.get("path") or ""),
+                })
             for node in node_hits:
                 results.append(_shape_summary_hit(node))
         except Exception as exc:
@@ -2892,15 +2958,20 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
         response["externalized_refs"] = externalized_refs
     if externalized_scan is not None:
         response["externalized_scan"] = externalized_scan
-    if search_failures:
-        # fork: betterlcm — a partial or failed search must never look like an exhaustive
-        # negative. The hits that did succeed are kept; the caller is told what did not run.
-        response["search_failures"] = search_failures
+    if search_failures or bounded_scans:
+        # fork: betterlcm — a partial, failed or work-capped search must never look like an
+        # exhaustive negative. The hits that did succeed are kept; the caller is told what did
+        # not run and what stopped early (audit p05 SQ03).
+        if search_failures:
+            response["search_failures"] = search_failures
+        if bounded_scans:
+            response["bounded_scans"] = bounded_scans
         response["complete"] = False
         response["search_note"] = (
-            "Part of this search did not run (see search_failures); absence from these results "
-            "is not evidence of absence from history. Retry, or use lcm_load_session / "
-            "lcm_expand on a known session or store_id."
+            "Part of this search did not run or stopped at a work cap (see search_failures / "
+            "bounded_scans); absence from these results is not evidence of absence from "
+            "history. Narrow the query, or use lcm_load_session / lcm_expand on a known "
+            "session or store_id."
         )
     else:
         response["complete"] = True

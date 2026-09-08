@@ -418,6 +418,7 @@ ENV_FIELD_SPECS: tuple[_EnvFieldSpec, ...] = (
     _EnvFieldSpec("leaf_loop_max_seconds", "LCM_LEAF_LOOP_MAX_SECONDS", float),
     _EnvFieldSpec("summary_budget_fraction", "LCM_SUMMARY_BUDGET_FRACTION", float),
     _EnvFieldSpec("summary_concurrency", "LCM_SUMMARY_CONCURRENCY", int),
+    _EnvFieldSpec("condense_group_cap", "LCM_CONDENSE_GROUP_CAP", int),
     _EnvFieldSpec("serialize_message_max_chars", "LCM_SERIALIZE_MESSAGE_MAX_CHARS", int),
     _EnvFieldSpec("expand_page_tokens", "LCM_EXPAND_PAGE_TOKENS", int),
     _EnvFieldSpec("tool_response_char_scale", "LCM_TOOL_RESPONSE_CHAR_SCALE", float),
@@ -811,6 +812,7 @@ class LCMConfig:
     leaf_loop_max_seconds: float = 0.0        # wall budget for the leaf loop
     summary_budget_fraction: float = 0.0      # condensation trigger: summary pile > this*W
     summary_concurrency: int = 0              # concurrent summariser calls per leaf batch
+    condense_group_cap: int = 0               # condensation groups per compress() (0 = curve)
     serialize_message_max_chars: int = 0      # pre-summariser per-message cap (chars)
     expand_page_tokens: int = 0               # lcm_expand default page size
     tool_response_char_scale: float = 0.0     # multiplier on tool response char caps

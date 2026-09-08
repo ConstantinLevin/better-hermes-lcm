@@ -275,15 +275,21 @@ class TestProviderPrefixedAuxiliaryCalls:
                 "source_type": "messages",
                 "store_ids": [17, 18],
             }
-            assert bounded_source["content"].startswith(adversarial)
-            if bounded_source["content"] != source:
-                assert bounded_source["content_truncated"] is True
-                assert bounded_source["original_content_chars"] == len(source)
+            # fork: betterlcm — the envelope carries the source WHOLE (audit p05 PB01)
+            assert bounded_source["content"] == source
+            assert "content_truncated" not in bounded_source
 
-    def test_summary_l1_and_l2_budget_serialized_json_escaping_before_dispatch(
+    def test_summary_l1_and_l2_send_escape_heavy_source_whole(
         self,
         monkeypatch,
     ):
+        """fork: betterlcm — upstream fitted the serialized envelope to the caller's
+        source-token allowance and cut the MIDDLE of the source out when JSON escaping pushed
+        it over. The allowance is the source's own token count, so escape-heavy content lost
+        its middle with no model-capacity constraint anywhere in sight: a decision could vanish
+        before the summariser ever saw it (audit p05 PB01). Nothing is cut now; a chunk that is
+        genuinely too large for the route fails there and the leaf-rescue path retries it as
+        smaller chunks."""
         from hermes_lcm.escalation import summarize_with_escalation
 
         source = ('quote=" slash=\\ tab=\t newline=\n control=\x01\n' * 1500)
@@ -318,12 +324,14 @@ class TestProviderPrefixedAuxiliaryCalls:
                 ensure_ascii=False,
                 separators=(",", ":"),
             )
-            assert count_messages_tokens(messages) <= (
+            # the escaped envelope IS bigger than the nominal allowance, and that is fine:
+            # the source arrives complete, escapes and all
+            assert count_messages_tokens(messages) > (
                 count_messages_tokens(baseline_messages) + source_tokens
             )
-            assert bounded_source["content"] != source
-            assert bounded_source["content_truncated"] is True
-            assert bounded_source["original_content_chars"] == len(source)
+            assert bounded_source["content"] == source
+            assert "content_truncated" not in bounded_source
+            assert "source reduced" not in messages[1]["content"]
 
     def test_summary_call_keeps_unresolved_direct_slug_model_only(self, monkeypatch):
         from hermes_lcm.escalation import _call_llm_for_summary

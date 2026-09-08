@@ -162,7 +162,7 @@ def test_curve_is_monotone_across_the_whole_range():
     """
     rising = {"context_threshold", "fresh_tail_count", "condense_budget_tokens", "sweep_target_tokens",
               "incremental_max_depth", "summary_concurrency", "summary_spend_max_calls",
-              "summary_circuit_breaker_failure_threshold", "l2_budget_ratio", "leaf_pass_cap",
+              "summary_circuit_breaker_failure_threshold", "l2_budget_ratio", "leaf_pass_cap", "condense_group_cap",
               "leaf_loop_max_seconds", "summary_timeout_ms", "expansion_timeout_ms",
               "serialize_message_max_chars", "stub_threshold_tokens", "expansion_context_tokens",
               "expand_page_tokens", "tool_response_char_scale", "sqlite_cache_kib", "token_cache_size"}

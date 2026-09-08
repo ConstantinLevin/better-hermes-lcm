@@ -157,6 +157,17 @@ class SummaryNode:
     search_directness: float = 0.0
 
 
+# fork: betterlcm — the exact order `_row_to_node` decodes. Every summary_nodes read uses it
+# instead of `SELECT *`, so physical column order can never change the meaning of a field.
+_NODE_SELECT_COLUMNS = (
+    "node_id, session_id, depth, summary, token_count, source_token_count, "
+    "source_ids, source_type, created_at, earliest_at, latest_at, expand_hint"
+)
+_NODE_SELECT_COLUMNS_PREFIXED = ", ".join(
+    f"n.{column.strip()}" for column in _NODE_SELECT_COLUMNS.split(",")
+)
+
+
 class SummaryDAG:
     """SQLite-backed DAG of summary nodes."""
 
@@ -472,7 +483,7 @@ class SummaryDAG:
 
     def get_node(self, node_id: int) -> Optional[SummaryNode]:
         row = self._conn.execute(
-            "SELECT * FROM summary_nodes WHERE node_id = ?", (node_id,)
+            f"SELECT {_NODE_SELECT_COLUMNS} FROM summary_nodes WHERE node_id = ?", (node_id,)
         ).fetchone()
         return self._row_to_node(row) if row else None
 
@@ -483,14 +494,14 @@ class SummaryDAG:
         with self._db_lock:
             if depth is not None:
                 rows = self._conn.execute(
-                    """SELECT * FROM summary_nodes
+                    f"""SELECT {_NODE_SELECT_COLUMNS} FROM summary_nodes
                        WHERE session_id = ? AND depth = ?
                        ORDER BY created_at LIMIT ?""",
                     (session_id, depth, limit),
                 ).fetchall()
             else:
                 rows = self._conn.execute(
-                    """SELECT * FROM summary_nodes
+                    f"""SELECT {_NODE_SELECT_COLUMNS} FROM summary_nodes
                        WHERE session_id = ?
                        ORDER BY depth, created_at LIMIT ?""",
                     (session_id, limit),
@@ -583,7 +594,7 @@ class SummaryDAG:
         samples: Dict[int, List[SummaryNode]] = {}
         for depth in depths:
             rows = self._conn.execute(
-                """SELECT * FROM summary_nodes
+                f"""SELECT {_NODE_SELECT_COLUMNS} FROM summary_nodes
                    WHERE session_id = ? AND depth = ?
                    ORDER BY created_at LIMIT ?""",
                 (session_id, depth, per_depth_limit),
@@ -600,7 +611,7 @@ class SummaryDAG:
         """
         with self._db_lock:
             rows = self._conn.execute(
-                """SELECT n.* FROM summary_nodes n
+                f"""SELECT {_NODE_SELECT_COLUMNS_PREFIXED} FROM summary_nodes n
                    WHERE n.session_id = ? AND n.depth = ?
                    AND n.node_id NOT IN (
                        SELECT json_each.value FROM summary_nodes p,
@@ -616,7 +627,8 @@ class SummaryDAG:
 
     def search(self, query: str, session_id: str | None = None,
                limit: int = 20, sort: str | None = None,
-               source: str | None = None) -> List[SummaryNode]:
+               source: str | None = None,
+               progress: dict[str, Any] | None = None) -> List[SummaryNode]:
         """FTS5 search across summary nodes.
 
         Retrieval contract:
@@ -626,7 +638,24 @@ class SummaryDAG:
         - ``source`` filters summaries by descendant raw-message lineage, not by
           session-level source presence
         - mixed-source nodes may match more than one ``source`` filter
+
+        fork: betterlcm — pass ``progress`` to learn whether the answer is EXHAUSTIVE. The
+        scan is bounded by a candidate cap, and upstream returned the bounded result the same
+        way it returned a complete one, so "no matches" could mean "your match is candidate
+        501" (audit p05 SQ03). The dict is filled with ``complete``, ``scanned_rows``,
+        ``candidate_cap`` and ``path``.
         """
+        def _finish(found: List[SummaryNode], *, complete: bool, scanned: int,
+                    cap: int, path: str) -> List[SummaryNode]:
+            if progress is not None:
+                progress.update({
+                    "complete": complete,
+                    "scanned_rows": scanned,
+                    "candidate_cap": cap,
+                    "path": path,
+                })
+            return found[:limit]
+
         safe_query = sanitize_fts5_query(query)
         terms = extract_search_terms(safe_query)
         phrases = extract_quoted_phrases(safe_query)
@@ -635,7 +664,8 @@ class SummaryDAG:
         # NOT one of those: it sanitizes to a term form the index answers, so it
         # stays on the FTS path (F31 §3).
         if requires_like_fallback(query, safe_query):
-            return self._search_like(query, session_id=session_id, limit=limit, sort=sort, source=source)
+            return self._search_like(query, session_id=session_id, limit=limit, sort=sort,
+                                     source=source, progress=progress)
 
         order_by = _build_search_order_by(sort, "COALESCE(n.latest_at, n.created_at)")
         fetch_limit = compute_search_fetch_limit(limit, terms, phrases)
@@ -651,7 +681,7 @@ class SummaryDAG:
                 with self._db_lock:
                     if session_id is not None:
                         rows = self._conn.execute(
-                            f"""SELECT n.*, rank as search_rank FROM nodes_fts fts
+                            f"""SELECT {_NODE_SELECT_COLUMNS_PREFIXED}, rank as search_rank FROM nodes_fts fts
                                JOIN summary_nodes n ON n.node_id = fts.rowid
                                WHERE nodes_fts MATCH ? AND n.session_id = ?
                                ORDER BY {order_by} LIMIT ? OFFSET ?""",
@@ -659,7 +689,7 @@ class SummaryDAG:
                         ).fetchall()
                     else:
                         rows = self._conn.execute(
-                            f"""SELECT n.*, rank as search_rank FROM nodes_fts fts
+                            f"""SELECT {_NODE_SELECT_COLUMNS_PREFIXED}, rank as search_rank FROM nodes_fts fts
                                JOIN summary_nodes n ON n.node_id = fts.rowid
                                WHERE nodes_fts MATCH ?
                                ORDER BY {order_by} LIMIT ? OFFSET ?""",
@@ -668,7 +698,10 @@ class SummaryDAG:
                 scanned_rows += len(rows)
             except sqlite3.Error as exc:
                 logger.warning("FTS node search failed, falling back to LIKE: %s", exc)
-                return self._search_like(query, session_id=session_id, limit=limit, sort=sort, source=source)
+                if progress is not None:
+                    progress["fts_error"] = str(exc)
+                return self._search_like(query, session_id=session_id, limit=limit, sort=sort,
+                                         source=source, progress=progress)
 
             raw_nodes = [self._row_to_node(r) for r in rows]
             for node in raw_nodes:
@@ -681,28 +714,34 @@ class SummaryDAG:
                 results.append(node)
             results.sort(key=lambda node: _fts_result_sort_key(node, sort))
 
-            exhausted = len(rows) < fetch_limit or scanned_rows >= candidate_cap
+            rows_exhausted = len(rows) < fetch_limit  # fork: the index really ran out
+            exhausted = rows_exhausted or scanned_rows >= candidate_cap
             if source and not exhausted:
                 offset += len(rows)
                 remaining = candidate_cap - scanned_rows
                 if remaining <= 0:
-                    return results[:limit]
+                    return _finish(results, complete=False, scanned=scanned_rows,
+                                   cap=candidate_cap, path="fts")
                 fetch_limit = min(fetch_limit * 2, remaining)
                 continue
 
             if exhausted or not apply_directness_adjustment or len(results) <= limit:
-                return results[:limit]
+                return _finish(results, complete=rows_exhausted, scanned=scanned_rows,
+                               cap=candidate_cap, path="fts")
 
             worst_visible_primary = _fts_primary_value(results[min(limit, len(results)) - 1], sort)
             last_fetched_primary = _fts_primary_value(raw_nodes[-1], sort)
             best_unseen_primary = last_fetched_primary - max_rank_bonus
             if best_unseen_primary > worst_visible_primary:
-                return results[:limit]
+                # the ranking bound proves nothing unseen can enter the page
+                return _finish(results, complete=True, scanned=scanned_rows,
+                               cap=candidate_cap, path="fts")
 
             offset += len(rows)
             remaining = candidate_cap - scanned_rows
             if remaining <= 0:
-                return results[:limit]
+                return _finish(results, complete=False, scanned=scanned_rows,
+                               cap=candidate_cap, path="fts")
             fetch_limit = min(fetch_limit * 2, remaining)
 
     @staticmethod
@@ -711,13 +750,29 @@ class SummaryDAG:
 
     def _search_like(self, query: str, session_id: str | None = None,
                      limit: int = 20, sort: str | None = None,
-                     source: str | None = None) -> List[SummaryNode]:
+                     source: str | None = None,
+                     progress: dict[str, Any] | None = None) -> List[SummaryNode]:
+        def _finish(found: List[SummaryNode], *, complete: bool, scanned: int,
+                    cap: int) -> List[SummaryNode]:
+            if progress is not None:
+                progress.update({
+                    "complete": complete,
+                    "scanned_rows": scanned,
+                    "candidate_cap": cap,
+                    "path": "like",
+                })
+            return found[:limit]
+
         # LIKE keeps every character the index cannot spell (emoji, punctuation)
         # because substring matching is the only way to find those rows.
         safe_query = sanitize_like_query(query)
         terms = extract_search_terms(safe_query)
         phrases = extract_quoted_phrases(safe_query)
         if not terms:
+            # fork: a query that sanitizes to nothing was never run — say so
+            if progress is not None:
+                progress.update({"complete": False, "scanned_rows": 0, "candidate_cap": 0,
+                                 "path": "like", "no_terms": True})
             return []
         fetch_limit = compute_search_fetch_limit(limit, terms, phrases)
 
@@ -748,7 +803,7 @@ class SummaryDAG:
             order_sql = "ORDER BY created_at DESC, node_id DESC" if self._is_recency_sort(sort) else ""
             with self._db_lock:
                 rows = self._conn.execute(
-                    f"""SELECT * FROM summary_nodes
+                    f"""SELECT {_NODE_SELECT_COLUMNS} FROM summary_nodes
                         WHERE {' AND '.join(where)}
                         {order_sql}
                         LIMIT ? OFFSET ?""",
@@ -770,13 +825,17 @@ class SummaryDAG:
                 nodes.append(node)
 
             nodes.sort(key=lambda node: _fallback_result_sort_key(node, sort))
-            if not source or len(rows) < fetch_limit or scanned_rows >= candidate_cap:
-                return nodes[:limit]
+            rows_exhausted = len(rows) < fetch_limit
+            if not source or rows_exhausted or scanned_rows >= candidate_cap:
+                # without a source filter one ordered page is the answer for THIS page;
+                # more rows may exist beyond it whenever the page came back full
+                return _finish(nodes, complete=rows_exhausted, scanned=scanned_rows,
+                               cap=candidate_cap)
 
             offset += len(rows)
             remaining = candidate_cap - scanned_rows
             if remaining <= 0:
-                return nodes[:limit]
+                return _finish(nodes, complete=False, scanned=scanned_rows, cap=candidate_cap)
             fetch_limit = min(fetch_limit * 2, remaining)
 
     # -- DAG traversal ------------------------------------------------------
@@ -787,7 +846,7 @@ class SummaryDAG:
             return []
         placeholders = ",".join("?" * len(node.source_ids))
         rows = self._conn.execute(
-            f"""SELECT * FROM summary_nodes
+            f"""SELECT {_NODE_SELECT_COLUMNS} FROM summary_nodes
                 WHERE node_id IN ({placeholders})
                 ORDER BY created_at""",
             node.source_ids,
@@ -934,6 +993,15 @@ class SummaryDAG:
     # -- Helpers ------------------------------------------------------------
 
     def _row_to_node(self, row) -> SummaryNode:
+        """Decode one summary_nodes row.
+
+        fork: betterlcm — the projection is EXPLICIT (``_NODE_SELECT_COLUMNS``) and decoding is
+        positional against that projection, not against ``SELECT *``. With ``SELECT *`` the
+        field order came from the physical table, so a database whose columns were added in a
+        different order — an older build, a restored backup, a future migration — silently
+        decoded ``expand_hint`` as ``summary`` and so on, with no error anywhere (audit p04
+        DG1). Trailing extras (e.g. a search rank appended by an FTS join) stay supported.
+        """
         return SummaryNode(
             node_id=row[0],
             session_id=row[1],

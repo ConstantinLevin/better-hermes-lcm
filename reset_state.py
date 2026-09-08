@@ -59,3 +59,10 @@ class ResetStateMixin:
         self._compression_boundary_active_placeholder_digest_budget = {}
         self._compression_boundary_active_placeholder_digest_ordinals = {}
         self._compression_boundary_stored_placeholder_digest_counts = {}
+        # fork: betterlcm — preflight decisions belong to the REQUEST that made them. Leaving
+        # them set across a reset let a new session inherit "this compress is cleanup only"
+        # from the old one and skip the leaf pass it needed (audit p05 RS01). The failure
+        # cooldown is cleared by HostCooldownMixin.on_session_reset for the same reason.
+        self._preflight_cleanup_only_due_to_boundary_cooldown = False
+        self._preflight_cleanup_only_below_threshold = False
+        self._last_leaf_summary_error = ""

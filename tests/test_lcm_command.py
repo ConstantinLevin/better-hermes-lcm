@@ -1577,7 +1577,10 @@ def test_clean_apply_stages_250001_sessions_and_bounds_node_purge_batches(tmp_pa
         CREATE TABLE summary_nodes(
             node_id INTEGER PRIMARY KEY,
             session_id TEXT NOT NULL,
-            depth INTEGER NOT NULL
+            depth INTEGER NOT NULL,
+            -- fork: betterlcm — the provenance guard reads these; the real table always has them.
+            source_ids TEXT NOT NULL DEFAULT '[]',
+            source_type TEXT NOT NULL DEFAULT 'messages'
         );
         CREATE INDEX idx_nodes_session_node
             ON summary_nodes(session_id, node_id);

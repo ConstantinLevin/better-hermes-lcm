@@ -380,7 +380,8 @@ def test_maintenance_creates_private_backups_and_tightens_existing_slot(tmp_path
         assert _mode(backup_dir) == 0o700
         _assert_private_sqlite_artifacts(timestamped["backup_path"])
         _assert_private_sqlite_artifacts(rotate_path)
-        assert not rotate_path.with_name(rotate_path.name + ".tmp").exists()
+        # fork: betterlcm — per-call scratch names, so assert on leftovers, not one name
+        assert not list(rotate_path.parent.glob(rotate_path.name + "*.tmp"))
 
         for backup_path in (timestamped["backup_path"], rotate_path):
             with sqlite3.connect(backup_path) as restored:
@@ -502,7 +503,8 @@ def test_rotate_backup_failure_preserves_existing_atomic_slot(tmp_path, monkeypa
         assert rotate_path.read_bytes() == previous_backup
         assert _mode(backup_dir) == 0o700
         assert _mode(rotate_path) == 0o600
-        assert not rotate_path.with_name(rotate_path.name + ".tmp").exists()
+        # fork: betterlcm — per-call scratch names, so assert on leftovers, not one name
+        assert not list(rotate_path.parent.glob(rotate_path.name + "*.tmp"))
     finally:
         store.close()
 

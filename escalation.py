@@ -259,7 +259,25 @@ def _call_llm_for_summary(prompt: str | list[dict[str, str]], max_tokens: int,
         if timeout is not None:
             call_kwargs["timeout"] = timeout
         response = call_llm(**call_kwargs)
-        content = response.choices[0].message.content
+        choice = response.choices[0]
+        # fork: betterlcm — a summary that stopped at the generation limit is an UNFINISHED
+        # index, and upstream accepted it as a finished one: the node became durable and the
+        # topics after the cut point were indexed nowhere (audit p05 ES01). "stop" is not taken
+        # as proof of completion — some host paths fabricate it — but an explicit truncation
+        # reason is trusted, and the chunk is left raw for another route or a smaller retry.
+        finish_reason = str(getattr(choice, "finish_reason", "") or "").strip().lower()
+        if finish_reason in _TRUNCATED_FINISH_REASONS:
+            logger.warning(
+                "LCM summary rejected: the route stopped at its generation limit "
+                "(finish_reason=%s, model=%s)",
+                finish_reason,
+                model or "<default>",
+            )
+            _LAST_ROUTE_ERROR.error = SummaryUnavailableError(
+                f"route returned an unfinished summary (finish_reason={finish_reason})"
+            )
+            return None
+        content = choice.message.content
         if not isinstance(content, str):
             content = str(content) if content else ""
         sanitized = _sanitize_reasoning_summary(content)
@@ -271,6 +289,11 @@ def _call_llm_for_summary(prompt: str | list[dict[str, str]], max_tokens: int,
         return sanitized
     except Exception as e:
         logger.warning("LLM summarization failed: %s", e)
+        # fork: betterlcm — keep the cause. Swallowing it turned "maximum context length" into
+        # a bare None, so the leaf-rescue path (which recognises capacity/timeout failures by
+        # type or text) could not tell a too-large chunk from a dead route and armed a cooldown
+        # instead of retrying with a smaller chunk (audit p05 ES03).
+        _LAST_ROUTE_ERROR.error = e
         return None
 
 
@@ -327,6 +350,21 @@ def _summary_model_chain(primary_model: str = "", fallback_models: list[str] | t
     return chain
 
 
+# fork: betterlcm — reasons that mean "the model was cut off", not "the model finished".
+_TRUNCATED_FINISH_REASONS = frozenset({
+    "length", "max_tokens", "max_output_tokens", "content_filter", "incomplete",
+})
+
+
+class _RouteErrorSlot(threading.local):
+    """fork: betterlcm — the most recent route exception on THIS thread."""
+
+    error: BaseException | None = None
+
+
+_LAST_ROUTE_ERROR = _RouteErrorSlot()
+
+
 def _invoke_summary_llm_chain(
     prompt: str | list[dict[str, str]],
     max_tokens: int,
@@ -337,6 +375,7 @@ def _invoke_summary_llm_chain(
     circuit_breaker: SummaryCircuitBreaker | None = None,
     spend_guard: "SummarySpendGuard | None" = None,
     accepts_result: Callable[[str], bool] | None = None,
+    route_errors: list[BaseException] | None = None,  # fork: betterlcm — see ES03
 ) -> Optional[str]:
     chain = _summary_model_chain(model, fallback_models)
     skipped = 0
@@ -356,6 +395,7 @@ def _invoke_summary_llm_chain(
                 "deferring to deterministic fallback"
             )
             break
+        _LAST_ROUTE_ERROR.error = None
         try:
             result = _invoke_summary_llm(
                 prompt,
@@ -366,6 +406,9 @@ def _invoke_summary_llm_chain(
         except Exception as exc:
             logger.warning("LLM summarization failed: %s", exc)
             result = None
+            _LAST_ROUTE_ERROR.error = exc
+        if result is None and route_errors is not None and _LAST_ROUTE_ERROR.error is not None:
+            route_errors.append(_LAST_ROUTE_ERROR.error)  # fork: keep the cause for rescue
         if result and (accepts_result is None or accepts_result(result)):
             if circuit_breaker is not None:
                 circuit_breaker.record_success(candidate_model)
@@ -554,6 +597,37 @@ End with: "Expand for details about: <one line per topic>".{focus_guidance}{cust
 # fork: betterlcm — deterministic (L3) truncation removed. See errors.SummaryUnavailableError.
 
 
+# fork: betterlcm — replies that acknowledge or refuse instead of indexing (audit p05 ES06).
+_NON_INDEX_REFUSAL_MARKERS = (
+    "i can't", "i cannot", "i can not", "i'm unable", "i am unable", "unable to comply",
+    "as an ai", "cannot assist", "can't assist", "i won't", "i will not",
+    "no content to summarize", "nothing to summarize",
+)
+_NON_INDEX_ACKNOWLEDGEMENTS = frozenset({
+    "ok", "okay", "k", "sure", "done", "understood", "acknowledged", "got it", "yes", "no",
+    "noted", "will do", "thanks", "thank you", "n/a", "none", "null", "-",
+})
+
+
+def _is_index_shaped_summary(result: str) -> bool:
+    """Does this reply index the source at all, or is it an acknowledgement/refusal?
+
+    Deliberately narrow: it rejects replies that carry no information about the source at all
+    — bare acknowledgements and refusals — and nothing else. A terse summary is still a
+    summary; judging coverage properly needs the source's own topics and belongs to the
+    index-navigation gate, not here.
+    """
+    normalized = " ".join(str(result or "").split())
+    if not normalized:
+        return False
+    lowered = normalized.lower()
+    if lowered.rstrip(".!") in _NON_INDEX_ACKNOWLEDGEMENTS:
+        return False
+    if any(lowered.startswith(marker) for marker in _NON_INDEX_REFUSAL_MARKERS):
+        return False
+    return True
+
+
 def summarize_with_escalation(
     text: str,
     source_tokens: int,
@@ -589,8 +663,18 @@ def summarize_with_escalation(
     # than the source, so the raised error names the real cause (a tiny chunk, not a dead
     # route). The loop's leaf_chunk_tokens floor keeps chunks large enough in practice.
     rejected_for_length: list[int] = []
+    route_errors: list[BaseException] = []  # fork: betterlcm — why the routes failed (ES03)
+
+    rejected_as_non_index: list[str] = []  # fork: betterlcm — see ES06
 
     def _accepts(result: str) -> bool:
+        # fork: betterlcm — "smaller than the source" was the ONLY substantive acceptance test,
+        # so "OK" was a valid summary of a chunk holding a decision, a rejection and a fix: the
+        # compaction succeeded and the node said nothing about what was underneath
+        # (audit p05 ES06). A reply that indexes nothing is a route failure, not a summary.
+        if not _is_index_shaped_summary(result):
+            rejected_as_non_index.append(result.strip()[:120])
+            return False
         if count_tokens(result) < source_tokens:
             return True
         rejected_for_length.append(count_tokens(result))
@@ -605,6 +689,7 @@ def summarize_with_escalation(
         circuit_breaker=circuit_breaker,
         spend_guard=spend_guard,
         accepts_result=_accepts,
+        route_errors=route_errors,
     )
 
     if l1_result:
@@ -631,6 +716,7 @@ def summarize_with_escalation(
         circuit_breaker=circuit_breaker,
         spend_guard=spend_guard,
         accepts_result=_accepts,
+        route_errors=route_errors,
     )
 
     if l2_result:
@@ -642,13 +728,25 @@ def summarize_with_escalation(
     # messages stay in context. ``l3_truncate_tokens`` is accepted for call-site
     # compatibility and ignored.
     del l3_truncate_tokens
+    if rejected_as_non_index and not rejected_for_length:
+        raise SummaryUnavailableError(
+            "no route produced an index of the source; it answered with "
+            f"{rejected_as_non_index!r} (model={model or '<default>'})"
+        )
     if rejected_for_length:
         raise SummaryUnavailableError(
             f"summaries not shorter than the {source_tokens}-token source "
             f"(outputs of {rejected_for_length} tokens rejected; a chunk this small is not worth "
             f"summarising — raise leaf_chunk_tokens or leave it raw; model={model or '<default>'})"
         )
-    raise SummaryUnavailableError(
+    # fork: betterlcm — name the actual route failure so the caller's rescue predicate can see
+    # a capacity/timeout error and retry with a smaller chunk instead of arming a cooldown.
+    last_error = route_errors[-1] if route_errors else None
+    detail = f"; last route error: {last_error}" if last_error is not None else ""
+    error = SummaryUnavailableError(
         f"summariser unavailable after L1/L2 for {source_tokens} source tokens "
-        f"(model={model or '<default>'}, fallbacks={list(fallback_models or [])})"
+        f"(model={model or '<default>'}, fallbacks={list(fallback_models or [])}){detail}"
     )
+    if last_error is not None:
+        raise error from last_error
+    raise error

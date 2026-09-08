@@ -1,0 +1,99 @@
+"""fork: betterlcm — the backup is the last line of defence against loss, so it must never
+overwrite another backup, never share a scratch file with a concurrent rotate, and never
+report success for bytes that are still only in the page cache (audit p05 MT01/MT02/MT03)."""
+import os
+import sqlite3
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+from hermes_lcm import maintenance
+from hermes_lcm.store import MessageStore
+
+
+def _engine(tmp_path):
+    store = MessageStore(tmp_path / "db" / "lcm.db")
+    store.append("s", {"role": "user", "content": "backup"}, source="cli")
+    store.commit()
+    backup_dir = tmp_path / "backups"
+    return SimpleNamespace(
+        _store=store,
+        _dag=SimpleNamespace(_conn=store._conn),
+        backup_dir=lambda: backup_dir,
+        rotate_backup_path=lambda: backup_dir / "rotate-latest.sqlite3",
+    ), store, backup_dir
+
+
+def test_two_backups_in_the_same_second_do_not_overwrite_each_other(tmp_path, monkeypatch):
+    engine, store, backup_dir = _engine(tmp_path)
+    try:
+        frozen = type("_Clock", (), {"now": staticmethod(lambda: _Frozen())})
+
+        class _Frozen:
+            def strftime(self, _fmt):
+                return "20260908_120000"
+
+        monkeypatch.setattr(maintenance, "datetime", frozen)
+        first = maintenance.backup_database(engine)
+        store.append("s", {"role": "user", "content": "later"}, source="cli")
+        store.commit()
+        second = maintenance.backup_database(engine)
+
+        assert first["ok"] and second["ok"]
+        assert first["backup_path"] != second["backup_path"], "the first backup was overwritten"
+        assert first["backup_path"].exists() and second["backup_path"].exists()
+        with sqlite3.connect(first["backup_path"]) as restored:
+            assert restored.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 1
+        with sqlite3.connect(second["backup_path"]) as restored:
+            assert restored.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 2
+    finally:
+        store.close()
+
+
+def test_a_failed_backup_leaves_no_file_that_looks_like_a_snapshot(tmp_path, monkeypatch):
+    engine, store, backup_dir = _engine(tmp_path)
+    try:
+        def fail_backup(_dest):
+            raise sqlite3.Error("synthetic backup failure")
+
+        monkeypatch.setattr(store, "backup", fail_backup)
+        result = maintenance.backup_database(engine)
+        assert result["ok"] is False
+        assert list(backup_dir.glob("*.sqlite3")) == [], "an empty file was left behind"
+    finally:
+        store.close()
+
+
+def test_rotate_uses_a_private_scratch_file_per_call(tmp_path, monkeypatch):
+    engine, store, backup_dir = _engine(tmp_path)
+    seen: list[str] = []
+    real_mkstemp = maintenance.tempfile.mkstemp
+
+    def record(**kwargs):
+        fd, name = real_mkstemp(**kwargs)
+        seen.append(name)
+        return fd, name
+
+    try:
+        monkeypatch.setattr(maintenance.tempfile, "mkstemp", record)
+        assert maintenance.rotate_backup_database(engine)["ok"] is True
+        assert maintenance.rotate_backup_database(engine)["ok"] is True
+        assert len(set(seen)) == 2, "two rotates shared one scratch file"
+        assert not list(backup_dir.glob("*.tmp")), "scratch files leaked"
+    finally:
+        store.close()
+
+
+def test_backup_is_fsynced_before_success_is_reported(tmp_path, monkeypatch):
+    engine, store, backup_dir = _engine(tmp_path)
+    synced: list[int] = []
+    real_fsync = os.fsync
+    try:
+        monkeypatch.setattr(os, "fsync", lambda fd: (synced.append(fd), real_fsync(fd))[1])
+        result = maintenance.backup_database(engine)
+        assert result["ok"] is True
+        # the snapshot itself and its directory entry
+        assert len(synced) >= 2, "success was reported for cached-only bytes"
+    finally:
+        store.close()

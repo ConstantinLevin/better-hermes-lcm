@@ -186,6 +186,9 @@ class HostCooldownMixin:
         return result
 
     def _compaction_lock_object(self):
+        # fork: betterlcm — normally constructed in LCMEngine.__init__ (see H01). The lazy
+        # branch remains only for objects that mix this in without that constructor; it is not
+        # the ordinary path, so it cannot re-introduce the two-locks race for the engine.
         lock = getattr(self, "_compaction_lock", None)
         if lock is None:
             from .leaf_pipeline import CompactionLock

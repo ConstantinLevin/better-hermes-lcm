@@ -94,6 +94,39 @@ def rotate_marker_summary(
     )
 
 
+ASSEMBLY_OMISSION_MARKER_HEADER = (
+    "[LCM assembly omissions — nothing below is deleted; it is just not rendered this turn]"
+)
+
+
+def injected_context_marker(removed_chars: int) -> str:
+    """Name a span of host-injected context removed from the summariser's input.
+
+    The block is dropped so recalled/injected text cannot steer the summariser, but the raw
+    message is stored unchanged: this marker says the removal happened and how much it was,
+    so the summary can never present a shortened message as the whole one.
+    """
+    # NB: neither angle brackets nor the tag name — the marker is re-scanned by the stripper
+    # it comes from, and naming the tag would put the injected envelope's own vocabulary back
+    # into the summariser's input.
+    return f"[LCM: {removed_chars} chars of injected context removed before summarising]"
+
+
+def excluded_reply_marker(store_ids: List[int]) -> str:
+    """Name rows a leaf consumed but deliberately kept out of the summariser input.
+
+    Replies to host-injected placeholders are noise for a summary and content for the
+    archive, so they are published as sources of the node and named here — never dropped
+    silently, never mistaken for something the summary covers.
+    """
+    shown = ", ".join(str(store_id) for store_id in store_ids[:20])
+    more = f" (+{len(store_ids) - 20} more)" if len(store_ids) > 20 else ""
+    return (
+        f"[LCM: {len(store_ids)} repl(y/ies) to ignored host-injected message(s) are sources of "
+        f"this node but are NOT summarised above; read them with lcm_expand — store ids {shown}{more}]"
+    )
+
+
 def assembly_omission_marker(
     *,
     omitted_node_ids: List[int],
@@ -101,7 +134,7 @@ def assembly_omission_marker(
     omitted_tail_messages: int,
 ) -> str:
     """One prefix part naming what the assembly budget/caps left out of this turn's context."""
-    lines = ["[LCM assembly omissions — nothing below is deleted; it is just not rendered this turn]"]
+    lines = [ASSEMBLY_OMISSION_MARKER_HEADER]
     if omitted_node_ids:
         shown = ", ".join(str(n) for n in omitted_node_ids[:40])
         more = f" (+{len(omitted_node_ids) - 40} more)" if len(omitted_node_ids) > 40 else ""

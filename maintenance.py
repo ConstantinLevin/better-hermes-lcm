@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 import sqlite3
 import stat
+import tempfile
 from typing import Any
 
 from .sqlite_util import (
@@ -53,6 +54,60 @@ def _prepare_private_backup_directory(path: Path) -> None:
     finally:
         os.close(fd)
 
+# fork: betterlcm — backup helpers. A backup is the fork's last line of defence against loss,
+# so it may never overwrite another backup, never share a scratch file with a concurrent
+# writer, and never report success for bytes that are still only in the page cache
+# (audit p05 MT01 / MT02 / MT03).
+
+def _create_unique_backup_file(backup_dir: Path, stem: str, timestamp: str) -> Path:
+    """Create an empty 0600 backup file whose name is not already taken.
+
+    ``datetime.now()`` has one-second resolution, so two backups in the same second used to
+    resolve to the same path and the second silently replaced the first. Creation is now
+    exclusive: the returned path is a file this call brought into existence.
+    """
+    flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    for attempt in range(1, 1000):
+        suffix = "" if attempt == 1 else f"-{attempt}"
+        candidate = backup_dir / f"{stem}-{timestamp}{suffix}.sqlite3"
+        try:
+            fd = os.open(candidate, flags, 0o600)
+        except FileExistsError:
+            continue
+        os.close(fd)
+        return candidate
+    unique = os.urandom(6).hex()
+    candidate = backup_dir / f"{stem}-{timestamp}-{unique}.sqlite3"
+    fd = os.open(candidate, flags, 0o600)
+    os.close(fd)
+    return candidate
+
+
+def _fsync_backup(path: Path) -> None:
+    """Flush the finished snapshot and its directory entry to disk.
+
+    Without this, ``/lcm backup`` reported a byte count for a file that only existed in the
+    page cache; the crash the operator took the backup against could still lose it.
+    """
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    fd = os.open(path, flags)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
+    try:
+        directory_fd = os.open(path.parent, directory_flags)
+    except OSError:  # pragma: no cover - platforms without directory descriptors
+        return
+    try:
+        os.fsync(directory_fd)
+    except OSError:  # pragma: no cover - directory fsync unsupported
+        pass
+    finally:
+        os.close(directory_fd)
+
+
 def flush_engine_connections(engine) -> None:
     """Commit pending writes on every SQLite connection the engine owns.
 
@@ -87,11 +142,13 @@ def backup_database(engine) -> dict[str, Any]:
 
     backup_dir = engine.backup_dir()
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    backup_path = backup_dir / f"{db_path.stem}-{timestamp}.sqlite3"
+    backup_path: Path | None = None
 
     try:
         _prepare_private_backup_directory(backup_dir)
         flush_engine_connections(engine)
+        # fork: exclusive creation — a second backup in the same second gets its own file
+        backup_path = _create_unique_backup_file(backup_dir, db_path.stem, timestamp)
         _prepare_private_sqlite_file(backup_path)
 
         dest = sqlite3.connect(str(backup_path))
@@ -100,7 +157,14 @@ def backup_database(engine) -> dict[str, Any]:
         finally:
             dest.close()
         _restrict_existing_sqlite_artifacts(backup_path)
+        _fsync_backup(backup_path)  # fork: durable before we report success
     except (OSError, sqlite3.Error) as exc:
+        # fork: betterlcm — an incomplete snapshot must not be left behind looking like one.
+        try:
+            if backup_path is not None and backup_path.exists():
+                backup_path.unlink()
+        except OSError:  # pragma: no cover - best effort
+            pass
         return {
             "ok": False,
             "db_path": db_path,
@@ -133,15 +197,22 @@ def rotate_backup_database(engine) -> dict[str, Any]:
 
     backup_path = engine.rotate_backup_path()
     backup_dir = backup_path.parent
-    tmp_path = backup_path.with_name(backup_path.name + ".tmp")
+    tmp_path: Path | None = None
 
     try:
         _prepare_private_backup_directory(backup_dir)
         _restrict_existing_sqlite_artifacts(backup_path)
         flush_engine_connections(engine)
 
-        if tmp_path.exists():
-            tmp_path.unlink()
+        # fork: betterlcm — a per-call scratch file. Every rotate used to write
+        # "<slot>.tmp", so two rotates running together wrote one file: the loser's snapshot
+        # was replaced mid-write and the winner renamed a database another writer was still
+        # filling in (audit p05 MT02).
+        tmp_fd, tmp_name = tempfile.mkstemp(
+            dir=str(backup_dir), prefix=backup_path.name + ".", suffix=".tmp"
+        )
+        os.close(tmp_fd)
+        tmp_path = Path(tmp_name)
         _prepare_private_sqlite_file(tmp_path)
         dest = sqlite3.connect(str(tmp_path))
         try:
@@ -149,13 +220,16 @@ def rotate_backup_database(engine) -> dict[str, Any]:
         finally:
             dest.close()
         _restrict_existing_sqlite_artifacts(tmp_path)
+        _fsync_backup(tmp_path)  # fork: the bytes are on disk before the rename publishes them
         # Atomic replace so the rolling slot is never half-written.
         tmp_path.replace(backup_path)
+        tmp_path = None
         _restrict_existing_sqlite_artifacts(backup_path)
+        _fsync_backup(backup_path)  # fork: and the rename itself is durable
     except (OSError, sqlite3.Error) as exc:
         # Best-effort cleanup of the tmp file if something failed midway.
         try:
-            if tmp_path.exists():
+            if tmp_path is not None and tmp_path.exists():
                 tmp_path.unlink()
         except OSError:
             pass

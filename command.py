@@ -1867,6 +1867,25 @@ def _doctor_retention_text(engine) -> str:
     return "\n".join(lines)
 
 
+class CleanupWouldBreakProvenance(RuntimeError):
+    """fork: betterlcm — deleting these sessions would strand a summary outside them."""
+
+    def __init__(self, node_ids: list[int], store_ids: list[int]) -> None:
+        self.node_ids = node_ids
+        self.store_ids = store_ids
+        detail = []
+        if node_ids:
+            detail.append(f"{len(node_ids)} summary node(s) (e.g. {node_ids[:5]})")
+        if store_ids:
+            detail.append(f"{len(store_ids)} raw message(s) (e.g. {store_ids[:5]})")
+        super().__init__(
+            "refusing to clean: " + " and ".join(detail) +
+            " are still referenced by summaries in sessions you did not select. Cleaning them "
+            "would leave those summaries unexpandable. Select the referencing sessions too, or "
+            "expand/export the affected lineage first."
+        )
+
+
 def _delete_clean_candidates_atomically(engine, session_ids: set[str]) -> dict[str, int]:
     """Delete cleanup candidates in one SQLite transaction.
 
@@ -1895,6 +1914,42 @@ def _delete_clean_candidates_atomically(engine, session_ids: set[str]) -> dict[s
         conn.execute("BEGIN IMMEDIATE")
         SummaryDAG.stage_delete_session_scope(conn, session_ids)
         scope_table = SummaryDAG.DELETE_SESSION_SCOPE_TABLE
+
+        # fork: betterlcm — refuse to delete anything a node OUTSIDE the deletion set still
+        # points at. `/new` retains the deeper summaries in the new session and leaves their
+        # children with the old one, so cleaning the predecessor could break a parent in a
+        # session the operator never selected: the retained node stays, its lineage does not,
+        # and expanding it returns nothing. Backup-first does not help — the live database is
+        # still wrong (audit p03 C01 / audit A #6).
+        referenced_nodes = [
+            int(row[0])
+            for row in conn.execute(
+                f"""SELECT DISTINCT json_each.value FROM summary_nodes AS parent, json_each(parent.source_ids)
+                    WHERE parent.source_type = 'nodes'
+                      AND NOT EXISTS (SELECT 1 FROM {scope_table} AS scope
+                                      WHERE scope.session_id = parent.session_id)
+                      AND json_each.value IN (
+                          SELECT node_id FROM summary_nodes AS doomed
+                          WHERE EXISTS (SELECT 1 FROM {scope_table} AS scope
+                                        WHERE scope.session_id = doomed.session_id))"""
+            ).fetchall()
+        ]
+        referenced_messages = [
+            int(row[0])
+            for row in conn.execute(
+                f"""SELECT DISTINCT json_each.value FROM summary_nodes AS parent, json_each(parent.source_ids)
+                    WHERE parent.source_type = 'messages'
+                      AND NOT EXISTS (SELECT 1 FROM {scope_table} AS scope
+                                      WHERE scope.session_id = parent.session_id)
+                      AND json_each.value IN (
+                          SELECT store_id FROM messages AS doomed
+                          WHERE EXISTS (SELECT 1 FROM {scope_table} AS scope
+                                        WHERE scope.session_id = doomed.session_id))"""
+            ).fetchall()
+        ]
+        if referenced_nodes or referenced_messages:
+            conn.rollback()
+            raise CleanupWouldBreakProvenance(referenced_nodes, referenced_messages)
         # Capture the store_ids about to be deleted so their raw-history chunks
         # can be archived in this same transaction (chunks map to messages by
         # store_id; a deleted message's chunks must drop from ranking).
@@ -2039,6 +2094,15 @@ def _doctor_clean_apply_text(engine) -> str:
     session_ids = {item["session_id"] for item in candidates}
     try:
         deleted = _delete_clean_candidates_atomically(engine, session_ids)
+    except CleanupWouldBreakProvenance as exc:   # fork: betterlcm
+        return "\n".join([
+            "LCM doctor clean apply",
+            "status: refused",
+            f"database_path: {backup['db_path']}",
+            f"backup_path: {backup['backup_path']}",
+            f"error: {exc}",
+            "note: nothing was deleted",
+        ])
     except sqlite3.Error as exc:
         return "\n".join([
             "LCM doctor clean apply",

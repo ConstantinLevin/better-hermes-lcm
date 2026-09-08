@@ -91,6 +91,12 @@ WINDOW_SCALED_DEFAULTS: tuple[Anchor, ...] = (
            high_is_fraction=True, cast=int, unset=0),
     Anchor("incremental_max_depth", "incremental_max_depth", 3, 5, cast=int),
     Anchor("summary_concurrency", "summary_concurrency", 1, 6, cast=int, unset=0),
+    # How many condensation groups one compress() may publish. Upstream does ONE pass of its
+    # depth loop per call, which matched its one-leaf-per-call production rate. The fork can
+    # publish up to `leaf_pass_cap` leaves per call at 1M, so keeping the upstream schedule let
+    # leaves accumulate faster than they were merged (audit D #3). 16 groups x fanin 4 = the
+    # 64-leaf cap. At the low anchor this is 1 = upstream exactly.
+    Anchor("condense_group_cap", "condense_group_cap", 1, 16, cast=int, unset=0),
     Anchor("summary_spend_max_calls", "summary_spend_max_calls", 24, 120, cast=int),
     Anchor("summary_circuit_breaker_failure_threshold",
            "summary_circuit_breaker_failure_threshold", 2, 4, cast=int),

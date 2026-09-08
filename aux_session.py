@@ -501,17 +501,43 @@ class AuxiliarySessionMixin:
         log_prefix = str(getattr(caller_self, "log_prefix", "") or "").strip()
         if log_prefix.startswith("[subagent-"):
             return True
+        # fork: betterlcm — a restricted TOOLSET is not an identity. Upstream returned True for
+        # any agent whose toolsets were a nonempty subset of {"memory", "skills"}, so a
+        # legitimate foreground agent restricted to those tools was classified auxiliary and
+        # its conversation was never stored at all — storage bypassed without the operator
+        # having excluded anything (audit p05 AX01). The toolset shape is now only corroborating
+        # evidence: it counts when something else already identifies this frame as a child.
         enabled_toolsets = getattr(caller_self, "enabled_toolsets", None)
         if enabled_toolsets is not None:
             try:
                 toolsets = {str(toolset) for toolset in enabled_toolsets}
             except TypeError:
                 toolsets = set()
-            if toolsets and toolsets <= {"memory", "skills"}:
+            if toolsets and toolsets <= {"memory", "skills"} and self._has_auxiliary_identity(caller_self):
                 return True
         if getattr(caller_self, "ephemeral_system_prompt", None) and log_prefix.startswith("[subagent-"):
             return True
         return False
+
+    @staticmethod
+    def _has_auxiliary_identity(caller_self: object) -> bool:
+        """fork: betterlcm — is this frame identified as an auxiliary/child agent at all?
+
+        Only an explicit marker counts: a subagent log prefix or a parent/auxiliary attribute the
+        host set. Restricted tools alone never do, and neither does an ephemeral system prompt
+        (foreground agents get those too).
+        """
+        log_prefix = str(getattr(caller_self, "log_prefix", "") or "").strip()
+        if log_prefix.startswith("[subagent-") or log_prefix.startswith("[aux"):
+            return True
+        for attribute in ("_subagent_id", "_parent_subagent_id", "_lcm_auxiliary", "is_auxiliary",
+                          "is_subagent", "parent_session_id", "_parent_session_id", "subagent_role"):
+            if getattr(caller_self, attribute, None):
+                return True
+        try:
+            return int(getattr(caller_self, "_delegate_depth", 0) or 0) > 0
+        except (TypeError, ValueError):
+            return False
 
     def _auxiliary_generation_token_for(self, caller_self: object, *, force_new: bool = False) -> int:
         """Return a process-local, non-reusable token for an auxiliary frame.

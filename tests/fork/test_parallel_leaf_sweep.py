@@ -2,6 +2,7 @@
 failure, tool-group boundaries, compaction lock, per-worker progress hook."""
 import sys
 import threading
+from concurrent.futures import ThreadPoolExecutor
 import time
 import types
 
@@ -250,3 +251,111 @@ def test_plan_chunks_and_chunks_needed():
     assert chunks[1][0] is msgs[2]
     assert leaf_pipeline.chunks_needed(900_000, 300_000, 40_000, 0.20) == int((600_000 / 32_000) + 0.999) + 1
     assert leaf_pipeline.chunks_needed(100, 300_000, 40_000, 0.20, extra=5) == 6
+
+
+# ── audit D2: workers must run inside the host's execution scopes ───────────────────────────
+
+def test_workers_inherit_context_vars_deadline_and_cancellation(tmp_path, monkeypatch):
+    """Upstream called the summariser on the thread the host had prepared, inside three
+    thread-local scopes (progress hook, stream deadline, interrupt protection) and with the
+    caller's context variables — which carry the profile/secret scope and therefore the model
+    ROUTING the operator configured. A bare worker starts with none of that, so its call could
+    take a different route, outlive the host's deadline and ignore /stop.
+    """
+    import contextvars
+    from hermes_lcm import leaf_pipeline as lp
+
+    route = contextvars.ContextVar("lcm_test_route", default="unset")
+    route.set("operator-configured")
+
+    class _Local:
+        pass
+
+    host_progress, host_deadline, host_interrupt = _Local(), _Local(), _Local()
+    host_progress.hook = lambda *a, **k: None
+    host_deadline.value = 12345.0
+    host_interrupt.active = True
+    host_interrupt.cancel_check = lambda: False
+    host_interrupt.cancel_event = None
+
+    import contextlib as _ctx
+    monkeypatch.setattr(lp, "_host_aux_progress", host_progress)
+    monkeypatch.setattr(lp, "_host_stream_deadline", lambda: host_deadline.value)
+    monkeypatch.setattr(lp, "_host_aux_interrupt", host_interrupt)
+
+    seen = {}
+
+    @_ctx.contextmanager
+    def fake_progress(hook):
+        seen["progress"] = hook
+        yield
+
+    @_ctx.contextmanager
+    def fake_deadline(value):
+        seen["deadline"] = value
+        yield
+
+    @_ctx.contextmanager
+    def fake_interrupt(active=True, cancel_check=None, cancel_event=None):
+        seen["interrupt"] = (active, cancel_check)
+        yield
+
+    monkeypatch.setattr(lp, "_host_aux_progress_hook", fake_progress)
+    monkeypatch.setattr(lp, "_host_aux_stream_deadline", fake_deadline)
+    monkeypatch.setattr(lp, "_host_aux_interrupt_scope", fake_interrupt)
+
+    def summarize(chunk, **kwargs):
+        seen["route"] = route.get()
+        seen["thread"] = threading.current_thread().name
+        return ("ok", 1, "s", 1, 1)
+
+    lookahead = lp.LeafLookahead(summarize, [[{"role": "user", "content": "a"}],
+                                             [{"role": "user", "content": "b"}]],
+                                 concurrency=2, focus_topic=None, deadline=None)
+    try:
+        assert lookahead.take([{"role": "user", "content": "a"}]) == ("ok", 1, "s", 1, 1)
+        assert seen["thread"].startswith("lcm-leaf"), "must actually run on a worker"
+        assert seen["route"] == "operator-configured", "context vars (and routing) must cross"
+        assert seen["progress"] is host_progress.hook
+        assert seen["deadline"] == 12345.0
+        assert seen["interrupt"] == (True, host_interrupt.cancel_check)
+    finally:
+        lookahead.close()
+
+
+def test_worker_wait_is_bounded_by_the_shared_deadline(tmp_path):
+    """An unbounded future.result() kept the compaction thread — and the per-engine compaction
+    lock — occupied after the host abandoned the attempt, so the host's retry found the engine
+    busy and did nothing."""
+    import time as _time
+    from hermes_lcm import leaf_pipeline as lp
+    from hermes_lcm.errors import SummaryUnavailableError
+
+    release = threading.Event()
+
+    def slow(chunk, **kwargs):
+        release.wait(30)
+        return ("late", 1, "s", 1, 1)
+
+    lookahead = lp.LeafLookahead(slow, [[{"role": "user", "content": "a"}]],
+                                 concurrency=1, focus_topic=None,
+                                 deadline=_time.monotonic() + 0.2)
+    try:
+        started = _time.monotonic()
+        with pytest.raises(SummaryUnavailableError, match="waiting for a worker"):
+            lookahead.take([{"role": "user", "content": "a"}])
+        assert _time.monotonic() - started < 5, "must not wait for the abandoned call"
+    finally:
+        release.set()
+        lookahead.close()
+
+
+def test_lookahead_workers_do_not_block_process_exit():
+    from hermes_lcm import leaf_pipeline as lp
+    assert issubclass(lp.DaemonThreadPoolExecutor, ThreadPoolExecutor)
+    pool = lp.DaemonThreadPoolExecutor(max_workers=1, thread_name_prefix="lcm-probe")
+    try:
+        pool.submit(lambda: None).result(timeout=5)
+        assert all(t.daemon for t in pool._threads)
+    finally:
+        pool.shutdown(wait=False)

@@ -95,24 +95,66 @@ def test_condense_at_1m_over_budget_condenses_oldest_first_until_under(tmp_path,
         e.shutdown()
 
 
-def test_condense_over_budget_uses_upstreams_loop_not_a_drain(tmp_path, mock_summariser):
-    """The budget is a GATE in front of upstream's loop, not a replacement for it.
+def test_condense_over_budget_is_gated_not_drained_and_keeps_up_with_production(tmp_path, mock_summariser):
+    """The budget is a GATE in front of upstream's loop, not a replacement for it — but the
+    loop must also keep pace with what a large window produces.
 
-    An earlier version drained the frontier until it was under budget; with the tiny budget the
-    curve yields just above 256k that condensed everything on every compaction. Upstream's loop
-    does one group per depth per call, and that is what must happen once the gate opens.
+    An earlier fork version drained the frontier until it was under budget, which with the tiny
+    budget the curve yields just above 256k condensed everything on every compaction. Then the
+    correction went too far the other way: upstream's ONE group per depth per call, while the
+    fork publishes up to 64 leaves per call at 1M, so leaves accumulated faster than they
+    merged (audit D #3). Capacity now scales with production and stops as soon as the frontier
+    is back under budget.
     """
     e = _engine(tmp_path, W1M)
     try:
+        assert int(e.effective_condense_group_cap) == 16
         base = time.time()
         for i in range(12):
-            _leaf(e, 60_000, earliest=base + i, created=base + i)
+            _leaf(e, 60_000, earliest=base + i, created=base + i)  # 720k, budget is 200k
         e._maybe_condense()
-        d1 = [n for n in e._dag.get_session_nodes(e._session_id) if n.depth == 1]
-        assert len(d1) == 1
-        assert sorted(d1[0].source_ids) == sorted(n.node_id for n in
-                                                  sorted(e._dag.get_session_nodes(e._session_id),
-                                                         key=lambda n: n.node_id)[:4])
+        nodes = e._dag.get_session_nodes(e._session_id)
+        d1 = [n for n in nodes if n.depth == 1]
+        assert 1 < len(d1) <= 3, "must merge more than one group, and stop once under budget"
+        assert e._summary_frontier_tokens() <= 200_000
+        # oldest material first, and every leaf accounted for exactly once
+        merged = sorted(sid for n in d1 for sid in n.source_ids)
+        assert merged == sorted(n.node_id for n in nodes if n.depth == 0)[:len(merged)]
+    finally:
+        e.shutdown()
+
+
+def test_condense_group_cap_is_one_at_the_low_anchor(tmp_path, mock_summariser):
+    """At 256k the cap is 1: exactly upstream's single pass of the depth loop."""
+    e = _engine(tmp_path, W256)
+    try:
+        assert int(e.effective_condense_group_cap) == 1
+        base = time.time()
+        for i in range(12):
+            _leaf(e, 10, earliest=base + i, created=base + i)
+        e._maybe_condense()
+        assert len([n for n in e._dag.get_session_nodes(e._session_id) if n.depth == 1]) == 1
+    finally:
+        e.shutdown()
+
+
+def test_condensation_respects_the_shared_deadline(tmp_path, monkeypatch):
+    """The `deadline` argument was accepted and never forwarded to the condensation call."""
+    from hermes_lcm import escalation
+    seen = {}
+
+    def fake(prompt, max_tokens, model="", timeout=None):
+        seen["timeout"] = timeout
+        return "condensed\nExpand for details about: mock"
+
+    monkeypatch.setattr(escalation, "_call_llm_for_summary", fake)
+    e = _engine(tmp_path, W1M)
+    try:
+        base = time.time()
+        for i in range(8):
+            _leaf(e, 60_000, earliest=base + i, created=base + i)
+        e._maybe_condense(deadline=time.monotonic() + 3)
+        assert seen["timeout"] is not None and seen["timeout"] <= 3.001, seen
     finally:
         e.shutdown()
 

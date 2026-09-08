@@ -25,6 +25,7 @@ from .sanitize import _contains_sensitive_redaction
 from .tokens import count_message_tokens, count_messages_tokens, count_tokens
 from .errors import SummaryUnavailableError  # fork: betterlcm
 from .message_analysis import _tool_call_id  # fork: betterlcm
+from . import marked_loss  # fork: betterlcm
 
 logger = logging.getLogger(__name__)
 
@@ -434,6 +435,17 @@ class CompactionMixin:
             self._leaf_lookahead = None
             lookahead.close()
 
+    def _fork_leaf_scheduling_active(self) -> bool:
+        """fork: betterlcm — True once the curve has actually left the low anchor.
+
+        At or below ``scale_low_window`` every resolved value is upstream's, so the fork must
+        also behave like upstream: one whole-backlog pass, no wall clock of its own. The fork's
+        chunking, pass cap and clock only apply above it.
+        """
+        window = int(getattr(self, "context_length", 0) or 0)
+        low = int(getattr(self._config, "scale_low_window", 0) or 262_144)
+        return window > low
+
     def _non_sweep_drain_stop_tokens(self) -> int:
         """fork: betterlcm — where the non-sweep loop stops draining (wire units).
 
@@ -635,7 +647,12 @@ class CompactionMixin:
         leaf_loop_max_seconds = float(self.effective_leaf_loop_max_seconds or _THRESHOLD_FULL_SWEEP_MAX_SECONDS)
         sweep_max_passes = max(1, int(getattr(self._config, "sweep_max_passes", 0) or _THRESHOLD_FULL_SWEEP_MAX_PASSES))
         sweep_deadline = time.monotonic() + leaf_loop_max_seconds
-        leaf_deadline = sweep_deadline
+        # fork: betterlcm — the wall clock belongs to the FORK's multi-pass scheduling. The
+        # sweep keeps its own (upstream had one there); upstream's ordinary and dynamic-chunk
+        # paths had none, so imposing one on them changed behaviour at the low anchor where the
+        # contract says the fork must be upstream (audit D #4).
+        leaf_deadline = sweep_deadline if (threshold_full_sweep_active
+                                           or self._fork_leaf_scheduling_active()) else None
         # fork: curved. Explicit summary_prefix_target_tokens wins; otherwise the curve, whose low
         # anchor is leaf_chunk_tokens exactly like upstream's fallback.
         sweep_target_tokens = max(1, int(self.effective_sweep_target_tokens))
@@ -704,7 +721,7 @@ class CompactionMixin:
         preexisting_dependent_reply_records = self._load_generated_ignored_dependent_reply_records()
 
         while leaf_passes < max_leaf_passes:
-            if time.monotonic() >= leaf_deadline:
+            if leaf_deadline is not None and time.monotonic() >= leaf_deadline:
                 if threshold_full_sweep_active:
                     sweep_stop_reason = "time_budget_exhausted"
                 else:
@@ -874,13 +891,23 @@ class CompactionMixin:
                 # fork: betterlcm — curved chunk: the whole backlog at 256k (upstream), 0.04*W
                 # at 1M; chunk boundaries never split an assistant/tool group.
                 curved_chunk_tokens = int(self.effective_leaf_chunk_tokens or 0)
-                if force_overflow or curved_chunk_tokens <= 0 or raw_tokens_outside_tail <= curved_chunk_tokens:
+                if (force_overflow
+                        or curved_chunk_tokens <= 0
+                        or not self._fork_leaf_scheduling_active()   # fork: at the low anchor,
+                        or raw_tokens_outside_tail <= curved_chunk_tokens):
+                    # "the entire eligible backlog" is upstream's BEHAVIOUR, not a size; a
+                    # resumed or imported history larger than the window must still go in one
+                    # pass there, rather than being chunked by a value that merely equals W.
                     to_compact = candidate_raw
                 else:
                     to_compact = self._select_oldest_leaf_chunk_aligned(candidate_raw, curved_chunk_tokens)
                     # fork: betterlcm — with concurrency > 1, summarise the NEXT chunks on
                     # workers while this one is persisted (leaf_pipeline.LeafLookahead).
-                    if getattr(self, "_leaf_lookahead", None) is None and not deferred_maintenance_active:
+                    if (
+                        getattr(self, "_leaf_lookahead", None) is None
+                        and not deferred_maintenance_active
+                        and not cleanup_only  # fork: betterlcm — see the cleanup-only break below
+                    ):
                         self._leaf_lookahead = self._start_leaf_lookahead(
                             candidate_raw,
                             curved_chunk_tokens,
@@ -893,6 +920,16 @@ class CompactionMixin:
 
             if not to_compact:
                 noop_reason = "no eligible leaf chunk selected"
+                break
+
+            if cleanup_only:
+                # fork: betterlcm — this pass publishes nothing, so it must not START any
+                # model work either. Upstream checked the restriction only AFTER launching
+                # lookahead summarisation, pre-compaction extraction and assertion scheduling,
+                # spending time and the spend guard's budget on results it then discarded —
+                # and at 1M, where lookahead runs several chunks concurrently, that can block
+                # the compaction that actually needs to happen (audit p05 CP07).
+                noop_reason = "below threshold: cleanup only, no leaf pass"
                 break
 
             selected_raw_chunk = to_compact
@@ -929,9 +966,6 @@ class CompactionMixin:
                 ):
                     self._schedule_pre_compaction_assertions(summary_input_chunk)
 
-                if cleanup_only:  # fork: betterlcm — preamble ran; no leaf pass below threshold
-                    noop_reason = "below threshold: cleanup only, no leaf pass"
-                    break
                 try:
                     summary_kwargs: dict[str, Any] = {"focus_topic": focus_topic}
                     if threshold_full_sweep_active:
@@ -1013,7 +1047,23 @@ class CompactionMixin:
                 break
             consumed_store_ids = self._get_store_ids_for_messages(source_lookup_chunk)
             consumed_store_ids = sorted(dict.fromkeys(consumed_store_ids))
-            earliest_at, latest_at = self._store.get_time_bounds(source_store_ids)
+
+            # fork: betterlcm — every row this leaf CONSUMES becomes a source of it. Upstream
+            # published only the summarised lineage, so replies to host-injected placeholders
+            # (excluded from the summariser input on purpose) were swept past the frontier and
+            # then reachable from no node at all: expanding the summary that covers their span
+            # returned the other messages and never mentioned them (audit p05 CP01). They stay
+            # out of the summary TEXT and are named in a marker instead, so the extra sources
+            # can never read as content the summariser claimed to cover.
+            published_source_ids = sorted(set(source_store_ids) | set(consumed_store_ids))
+            excluded_source_ids = [
+                store_id for store_id in published_source_ids if store_id not in set(source_store_ids)
+            ]
+            if excluded_source_ids:
+                summary_text = summary_text.rstrip() + "\n" + marked_loss.excluded_reply_marker(
+                    excluded_source_ids
+                )
+            earliest_at, latest_at = self._store.get_time_bounds(published_source_ids)
             summary_tokens = count_tokens(summary_text)
 
             node = SummaryNode(
@@ -1022,7 +1072,7 @@ class CompactionMixin:
                 summary=summary_text,
                 token_count=summary_tokens,
                 source_token_count=source_tokens,
-                source_ids=source_store_ids,
+                source_ids=published_source_ids,
                 source_type="messages",
                 created_at=time.time(),
                 earliest_at=earliest_at,

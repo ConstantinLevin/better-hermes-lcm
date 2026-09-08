@@ -1619,10 +1619,9 @@ class TestEscalationStripReasoning:
             assert envelope["operation"] == "lcm_summary_l1"
             bounded_source = envelope["sources"][0]
             original_source = adversarial + "\n\n---\n\n" + second_summary
-            assert bounded_source["content"].startswith(adversarial[:12])
-            assert bounded_source["content"].endswith(second_summary[-16:])
-            assert bounded_source["content_truncated"] is True
-            assert bounded_source["original_content_chars"] == len(original_source)
+            # fork: betterlcm — the envelope carries the source WHOLE (audit p05 PB01)
+            assert bounded_source["content"] == original_source
+            assert "content_truncated" not in bounded_source
             assert session_id not in messages[1]["content"]
             assert bounded_source["provenance"] == {
                 "source_type": "summary_nodes",
@@ -8199,7 +8198,11 @@ class TestMessageFiltering:
         dependent_ids = [row["store_id"] for row in rows if "dependent assistant reply" in row["content"]]
         nodes = engine._dag.get_session_nodes("user-123")
         assert dependent_ids
-        assert all(dependent_ids[0] not in node.source_ids for node in nodes)
+        # fork: betterlcm — the reply stays out of the summariser input and out of active
+        # context, but a row this leaf CONSUMED must remain reachable from it: it is a
+        # source of the node and is named there as not summarised (audit p05 CP01).
+        assert any(dependent_ids[0] in node.source_ids for node in nodes)
+        assert any(str(dependent_ids[0]) in node.summary for node in nodes)
         assert engine._last_compacted_store_id >= dependent_ids[0]
 
     def test_dependent_assistant_reply_to_ignored_system_backlog_is_not_summarized(self, tmp_path, monkeypatch):
@@ -8265,7 +8268,11 @@ class TestMessageFiltering:
         dependent_ids = [row["store_id"] for row in rows if "trailing dependent assistant reply" in row["content"]]
         nodes = engine._dag.get_session_nodes("user-123")
         assert dependent_ids
-        assert all(dependent_ids[0] not in node.source_ids for node in nodes)
+        # fork: betterlcm — the reply stays out of the summariser input and out of active
+        # context, but a row this leaf CONSUMED must remain reachable from it: it is a
+        # source of the node and is named there as not summarised (audit p05 CP01).
+        assert any(dependent_ids[0] in node.source_ids for node in nodes)
+        assert any(str(dependent_ids[0]) in node.summary for node in nodes)
         assert engine._last_compacted_store_id >= dependent_ids[0]
 
     def test_dependent_reply_marker_does_not_match_later_identical_reply(self, tmp_path):
@@ -8791,7 +8798,11 @@ class TestMessageFiltering:
         ]
         nodes = engine._dag.get_session_nodes("user-123")
         assert dependent_ids
-        assert all(dependent_ids[0] not in node.source_ids for node in nodes)
+        # fork: betterlcm — the reply stays out of the summariser input and out of active
+        # context, but a row this leaf CONSUMED must remain reachable from it: it is a
+        # source of the node and is named there as not summarised (audit p05 CP01).
+        assert any(dependent_ids[0] in node.source_ids for node in nodes)
+        assert any(str(dependent_ids[0]) in node.summary for node in nodes)
         assert engine._last_compacted_store_id >= dependent_ids[0]
 
     def test_dependent_reply_in_tail_is_marked_before_anchor_break(self, tmp_path, monkeypatch):
@@ -22234,7 +22245,12 @@ class TestAssemblyToolPairGuardrail:
         assert result == messages
         self._assert_provider_tool_sequence_valid(result)
 
-    def test_sanitize_tool_pairs_replaces_out_of_order_parallel_results_with_stubs(self, tmp_path):
+    def test_sanitize_tool_pairs_reorders_parallel_results_instead_of_dropping_them(self, tmp_path):
+        """fork: betterlcm — upstream kept the first result and replaced every later
+        out-of-order one with an "earlier conversation" stub, so a real tool result the agent
+        had already received was deleted to satisfy an ORDERING constraint. The results are
+        complete and identifiable by call id, so the fork reorders them to match the call
+        order: same provider-valid sequence, nothing discarded (audit p01 / A #4)."""
         instance = self._make_engine(tmp_path, "lcm_parallel_out_of_order.db")
         messages = [
             {"role": "assistant", "tool_calls": [
@@ -22250,8 +22266,7 @@ class TestAssemblyToolPairGuardrail:
         self._assert_provider_tool_sequence_valid(result)
         assert [msg.get("tool_call_id") for msg in result[1:3]] == ["call_a", "call_b"]
         assert result[1]["content"] == "A out of order"
-        assert "earlier conversation" in result[2]["content"]
-        assert all(msg.get("content") != "B out of order" for msg in result)
+        assert result[2]["content"] == "B out of order"
 
 
 class TestEngineTools:

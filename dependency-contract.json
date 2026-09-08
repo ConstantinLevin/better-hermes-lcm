@@ -45,6 +45,10 @@
         "agent.auxiliary_client.call_llm",
         "agent.auxiliary_client._aux_progress",
         "agent.auxiliary_client.aux_progress_hook",
+        "agent.auxiliary_client._aux_interrupt_protection",
+        "agent.auxiliary_client.aux_interrupt_protection",
+        "agent.auxiliary_client._current_aux_stream_deadline",
+        "agent.auxiliary_client.aux_stream_deadline",
         "agent.context_compressor"
       ]
     },

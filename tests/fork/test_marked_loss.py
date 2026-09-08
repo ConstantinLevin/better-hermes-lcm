@@ -541,3 +541,271 @@ def test_search_failure_is_reported_not_returned_as_no_matches(tmp_path, monkeyp
         assert "not evidence of absence" in degraded["search_note"]
     finally:
         e.shutdown()
+
+
+def test_transcript_gc_never_rewrites_a_row_against_a_sanitized_only_payload(tmp_path):
+    """Audit p01 E12 / B21: GC looked up a SANITIZED copy of the row first and accepted that
+    match, so a payload holding only the sanitized text authorised replacing the row with a
+    reference to it. Sanitisation removes whole injected blocks — what it removed would then
+    exist nowhere. Failing to GC is a missed optimisation; GC against a partial payload is
+    unrecoverable loss.
+    """
+    from hermes_lcm.externalize import maybe_externalize_tool_output
+    from hermes_lcm.extraction import sanitize_pre_compaction_content
+    e = _engine(
+        tmp_path, "gc.db",
+        large_output_externalization_enabled=True,
+        # high threshold: ingest must NOT externalize the row itself — this test is about the
+        # GC step deciding whether an existing payload may replace a row that still holds raw
+        large_output_externalization_threshold_chars=1_000_000,
+        large_output_transcript_gc_enabled=True,
+    )
+    try:
+        e.on_session_start("gc", platform="cli", context_length=200_000)
+        original = ("<active_memory>injected block</active_memory>\n"
+                    "THE DECISION WAS TO CANCEL THE LAUNCH\n" + "z" * 400)
+        sanitized = sanitize_pre_compaction_content(original)
+        assert sanitized != original, "fixture must exercise the sanitising path"
+
+        store_id = e._store.append("gc", {"role": "tool", "tool_call_id": "c1",
+                                          "content": original}, source="cli")
+        e._store._conn.commit()
+        # a payload that holds only the SANITIZED text
+        assert maybe_externalize_tool_output(sanitized, tool_call_id="c1", session_id="gc",
+                                             config=e._config, hermes_home=e._hermes_home,
+                                             force=True) is not None
+
+        chunk = [{"role": "tool", "tool_call_id": "c1", "content": original}]
+        e._maybe_gc_compacted_tool_results(chunk, [store_id])
+        row = e._store.get(store_id)
+        assert row["content"] == original, "the row must survive: no payload holds its bytes"
+
+        # once the payload really does hold the original, GC proceeds
+        assert maybe_externalize_tool_output(original, tool_call_id="c1", session_id="gc",
+                                             config=e._config, hermes_home=e._hermes_home,
+                                             force=True) is not None
+        e._maybe_gc_compacted_tool_results(chunk, [store_id])
+        assert e._store.get(store_id)["content"] != original
+    finally:
+        e.shutdown()
+
+
+def test_out_of_order_tool_results_are_reordered_not_discarded(tmp_path):
+    """Audit p01 E10 / audit A #9: results arriving in a different order than the calls were
+    made made the repair drop the real result and insert a stub reading "see context summary
+    above" — with nothing proving any summary covered it."""
+    e = _engine(tmp_path, "toolpairs.db")
+    try:
+        messages = [
+            {"role": "assistant", "content": "two calls", "tool_calls": [
+                {"id": "a", "type": "function", "function": {"name": "t", "arguments": "{}"}},
+                {"id": "b", "type": "function", "function": {"name": "t", "arguments": "{}"}},
+            ]},
+            {"role": "tool", "tool_call_id": "b", "content": "REAL RESULT B"},
+            {"role": "tool", "tool_call_id": "a", "content": "REAL RESULT A"},
+        ]
+        sanitized = e._sanitize_active_context_messages(messages)
+        blob = "\n".join(str(m.get("content")) for m in sanitized)
+        assert "REAL RESULT A" in blob and "REAL RESULT B" in blob
+        assert "see context summary above" not in blob
+        # provider contract still holds: results follow their call, in call order
+        assert [m.get("tool_call_id") for m in sanitized if m.get("role") == "tool"] == ["a", "b"]
+    finally:
+        e.shutdown()
+
+
+def test_user_text_quoting_a_summary_header_is_still_stored(tmp_path):
+    """Audit A #2 / p01 E11: the scaffold classifier decides whether a message is EXCLUDED
+    FROM STORAGE, and it matched the header anywhere in any message — so a user pasting a
+    summary block to ask about it was silently never stored."""
+    e = _engine(tmp_path, "scaffold.db")
+    try:
+        e._session_id = "s"
+        real = e._dag.add_node(SummaryNode(session_id="s", depth=0, summary="real",
+                                           token_count=5, source_token_count=9, source_ids=[],
+                                           source_type="messages", created_at=time.time()))
+        quoting_user = {"role": "user", "content":
+                        "why did you write [Recent Summary (d0, node 999)] like this?\n"
+                        "[Expand for details: something]"}
+        assert e._is_replayed_context_scaffold_message(quoting_user) is False
+
+        embedded = {"role": "user", "content":
+                    f"debug this: [Recent Summary (d0, node {real})] ... [Expand for details: x]"}
+        assert e._is_replayed_context_scaffold_message(embedded) is False, "header must START it"
+
+        trailing = {"role": "user", "content":
+                    f"[Recent Summary (d0, node {real})]\nbody\n[Expand for details: x]\n"
+                    "^ this is what you produced. why is the decision missing?"}
+        assert e._is_replayed_context_scaffold_message(trailing) is False, "trailing text is theirs"
+
+        our_own = {"role": "user", "content":
+                   f"[Recent Summary (d0, node {real})]\nbody\n[Expand for details: x]"}
+        assert e._is_replayed_context_scaffold_message(our_own) is True
+
+        # an UNBACKED marker replayed from an earlier process is still our scaffolding: it must
+        # be dropped, never re-summarised as if it were raw conversation
+        unbacked = {"role": "assistant", "content":
+                    "[Recent Summary (d0, node 999999)]\nbody\n[Expand for details: x]"}
+        assert e._is_replayed_context_scaffold_message(unbacked) is True
+
+        # ... and so is a prefix whose last part is the assembly omission marker
+        omitted = {"role": "user", "content":
+                   f"[Recent Summary (d0, node {real})]\nbody\n[Expand for details: x]\n\n---\n\n"
+                   + marked_loss.assembly_omission_marker(
+                       omitted_node_ids=[7], depth_cap_hits=[], omitted_tail_messages=0)}
+        assert e._is_replayed_context_scaffold_message(omitted) is True
+    finally:
+        e.shutdown()
+
+
+def test_expansion_returns_the_tool_calls_an_assistant_made(tmp_path):
+    """Audit p02 T04 / audit A #11: an assistant turn that is mostly tool-call arguments
+    expanded as EMPTY content with has_more:false — a recovery path reporting success while
+    returning nothing of what the agent actually did."""
+    import json
+    from hermes_lcm import tools as lcm_tools
+    e = _engine(tmp_path, "toolcalls.db")
+    try:
+        e.on_session_start("tc", platform="cli", context_length=200_000)
+        store_id = e._store.append("tc", {
+            "role": "assistant", "content": "",
+            "tool_calls": [{"id": "c1", "type": "function", "function": {
+                "name": "terminal", "arguments": '{"command": "rm -rf /srv//important"}'}}],
+        }, source="cli")
+        e._store._conn.commit()
+        node_id = e._dag.add_node(SummaryNode(
+            session_id="tc", depth=0, summary="ran a command", token_count=5,
+            source_token_count=20, source_ids=[store_id], source_type="messages",
+            created_at=time.time()))
+        result = json.loads(lcm_tools.lcm_expand({"node_id": node_id}, engine=e))
+        blob = json.dumps(result["expanded"])
+        assert "terminal" in blob and "important" in blob, result
+    finally:
+        e.shutdown()
+
+
+def test_recent_reports_an_unscannable_window_instead_of_an_empty_one(tmp_path, monkeypatch):
+    """Audit p02 T16: more matches than the work cap, or a read failure, returned a bare [] —
+    the serializer then reported zero sections with truncated=false, an exhaustive negative
+    over history that exists."""
+    import json
+    from hermes_lcm import tools as lcm_tools
+    e = _engine(tmp_path, "recent.db")
+    try:
+        e.on_session_start("r", platform="cli", context_length=200_000)
+        monkeypatch.setattr(lcm_tools, "_recent_leaf_sections",
+                            lambda *a, **k: (_ for _ in ()).throw(
+                                lcm_tools._RecentIncomplete("more than 4096 summaries match")))
+        payload = json.loads(lcm_tools.lcm_recent({"period": "today"}, engine=e))
+        assert payload["complete"] is False
+        assert "4096" in payload["incomplete_reason"]
+
+        monkeypatch.setattr(lcm_tools, "_recent_leaf_sections",
+                            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("database is locked")))
+        payload = json.loads(lcm_tools.lcm_recent({"period": "today"}, engine=e))
+        assert payload["complete"] is False and "database is locked" in payload["incomplete_reason"]
+
+        monkeypatch.setattr(lcm_tools, "_recent_leaf_sections", lambda *a, **k: [])
+        payload = json.loads(lcm_tools.lcm_recent({"period": "today"}, engine=e))
+        assert payload["complete"] is True and "incomplete_reason" not in payload
+    finally:
+        e.shutdown()
+
+
+def test_clean_refuses_to_delete_sources_a_retained_summary_still_references(tmp_path):
+    """Audit p03 C01 / audit A #6: `/lcm clean` deleted a session's rows without checking
+    incoming references, so cleaning the predecessor of a `/new` could strand a summary
+    retained in the CURRENT session — the node survives, its lineage does not, and expanding
+    it returns nothing. Backup-first does not help: the live database is still wrong."""
+    from hermes_lcm import command as lcm_command
+    e = _engine(tmp_path, "clean.db", new_session_retain_depth=2)
+    try:
+        e._session_id = "old"
+        store_id = e._store.append("old", {"role": "user", "content": "the source"}, source="cli")
+        e._store._conn.commit()
+        leaf = e._dag.add_node(SummaryNode(session_id="old", depth=0, summary="leaf",
+                                           token_count=5, source_token_count=9,
+                                           source_ids=[store_id], source_type="messages",
+                                           created_at=time.time()))
+        top = e._dag.add_node(SummaryNode(session_id="old", depth=2, summary="retained",
+                                          token_count=5, source_token_count=9,
+                                          source_ids=[leaf], source_type="nodes",
+                                          created_at=time.time()))
+        e.on_session_reset()
+        assert e.carry_over_new_session_context("old", "new") == 1
+        e._session_id = "new"
+
+        with pytest.raises(lcm_command.CleanupWouldBreakProvenance) as caught:
+            lcm_command._delete_clean_candidates_atomically(e, {"old"})
+        assert leaf in caught.value.node_ids
+
+        # nothing was deleted, and the retained node is still expandable
+        assert e._dag.get_node(leaf) is not None
+        assert e._store.get(store_id)["content"] == "the source"
+        assert e._dag.get_node(top) is not None
+    finally:
+        e.shutdown()
+
+
+def test_a_restricted_toolset_alone_does_not_make_an_agent_auxiliary(tmp_path):
+    """Audit p05 AX01: any agent whose toolsets were a subset of {"memory","skills"} was
+    classified auxiliary, so a legitimate foreground agent restricted to those tools had its
+    conversation never stored — storage bypassed without the operator excluding anything."""
+    e = _engine(tmp_path, "aux.db")
+    try:
+        class _Foreground:
+            enabled_toolsets = ["memory"]
+            log_prefix = "[agent]"
+
+        class _Subagent:
+            enabled_toolsets = ["memory"]
+            log_prefix = "[subagent-7]"
+
+        class _HostMarkedChild:
+            enabled_toolsets = ["memory", "skills"]
+            log_prefix = "[agent]"
+            parent_session_id = "parent-1"
+
+        assert e._caller_is_auxiliary_agent_frame(_Foreground()) is False
+        assert e._caller_is_auxiliary_agent_frame(_Subagent()) is True
+        assert e._caller_is_auxiliary_agent_frame(_HostMarkedChild()) is True
+    finally:
+        e.shutdown()
+
+
+def test_every_row_a_leaf_consumes_becomes_a_source_of_it(tmp_path, monkeypatch, ignore_patterns_engine):
+    """Audit p05 CP01: replies to host-injected ignored messages are excluded from the
+    summariser input on purpose, but upstream also left them out of the node's source_ids
+    while sweeping them past the frontier — so the rows were consumed and then reachable
+    from no node at all. They must be sources of the leaf, and marked as not summarised."""
+    from hermes_lcm import engine as lcm_engine
+    e = _engine(tmp_path, "cp01.db", fresh_tail_count=1, leaf_chunk_tokens=10,
+                ignore_message_patterns=["SECRET"])
+    try:
+        e._session_id = "cp01"
+        monkeypatch.setattr(lcm_engine, "summarize_with_escalation",
+                            lambda **kw: ("visible summary\n[Expand for details: visible]", 1))
+        messages = [
+            {"role": "user", "content": "SECRET ignored backlog " + "x" * 200},
+            {"role": "assistant", "content": "dependent reply to the ignored message"},
+            {"role": "user", "content": "visible backlog " + "y" * 200},
+            {"role": "assistant", "content": "fresh tail"},
+        ]
+        e.compress(messages, current_tokens=count_messages_tokens(messages))
+
+        nodes = e._dag.get_session_nodes("cp01")
+        assert nodes, "the leaf must have been published"
+        node = nodes[0]
+        rows = {row["store_id"]: str(row.get("content") or "")
+                for row in e._store.get_session_messages("cp01")}
+        dependent_ids = [sid for sid, text in rows.items() if "dependent reply" in text]
+        assert dependent_ids, "the dependent reply must be stored"
+        consumed = [sid for sid in dependent_ids if sid <= e._last_compacted_store_id]
+        for store_id in consumed:
+            assert store_id in node.source_ids, "a consumed row must be expandable from its leaf"
+            assert str(store_id) in node.summary, "and named, not silently added"
+        if consumed:
+            assert "NOT summarised" in node.summary
+            assert "dependent reply" not in node.summary, "excluded content stays out of the text"
+    finally:
+        e.shutdown()

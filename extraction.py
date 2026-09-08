@@ -11,12 +11,18 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from . import marked_loss  # fork: betterlcm
 from .model_routing import apply_lcm_model_route
 
 logger = logging.getLogger(__name__)
 
+# fork: betterlcm — no whitespace in the payload class. With ``\s`` in it the match ran past
+# the URI and swallowed the ordinary words after it ("…;base64,AAAA hello world decision"
+# erased the sentence), so prose vanished from the summariser input with only a media marker
+# left behind (audit p05 EX02). A line-wrapped payload now simply stops at the first newline:
+# the remainder stays in the text, which costs a little size and loses nothing.
 _MEDIA_DATA_URI_RE = re.compile(
-    r"data:(?:image|audio|video)/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=\s]{16,}",
+    r"data:(?:image|audio|video)/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=]{16,}",
     re.IGNORECASE,
 )
 _MEDIA_ATTACHMENT_MARKER = "[Media attachment]"
@@ -229,8 +235,24 @@ def _select_injected_context_closer(
     return closers[0]
 
 
-def strip_injected_context_blocks(text: str) -> str:
-    """Remove transient memory/context blocks before compaction summarization."""
+def _injection_marker(removed: str, mark: bool) -> str:
+    """fork: betterlcm — one marker for a removed injected block, empty when it held nothing.
+
+    Only the summariser-input paths mark. Removing an injected block on the way INTO the store
+    removes something LCM (or the host) put there this turn, not conversation content, and a
+    marker there would be noise stored forever.
+    """
+    if not mark or not removed.strip():
+        return ""
+    return marked_loss.injected_context_marker(len(removed))
+
+
+def strip_injected_context_blocks(text: str, *, mark: bool = False) -> str:
+    """Remove transient memory/context blocks before compaction summarization.
+
+    fork: betterlcm — ``mark=True`` leaves a marker naming how much was removed, for the paths
+    whose output the summariser reads (audit p05 EX01).
+    """
     if not text:
         return ""
 
@@ -255,15 +277,24 @@ def strip_injected_context_blocks(text: str) -> str:
             if not opener:
                 break
 
+            # fork: betterlcm — the removal boundary is upstream's (safety first: a spoofed
+            # closer inside recalled text must not be able to smuggle content past it), but
+            # the cut is MARKED. Upstream deleted whatever lay between two block-shaped tags,
+            # so a real decision written between two memory blocks disappeared from the
+            # summariser's input with nothing to say it had ever been there (audit p05 EX01).
             closer = _select_injected_context_closer(cleaned, opener, close_re)
             if closer is None:
                 if _at_line_end(cleaned, opener.end()):
-                    cleaned = cleaned[: opener.start()]
+                    removed = cleaned[opener.start():]
+                    cleaned = cleaned[: opener.start()] + _injection_marker(removed, mark)
                 else:
+                    removed = cleaned[opener.start():opener.end()]
                     cleaned = cleaned[: opener.start()] + cleaned[opener.end() :]
                 changed = True
                 continue
-            cleaned = cleaned[: opener.start()] + cleaned[closer.end() :]
+            removed = cleaned[opener.start():closer.end()]
+            cleaned = (cleaned[: opener.start()] + _injection_marker(removed, mark)
+                       + cleaned[closer.end() :])
             changed = True
 
     before_header = cleaned
@@ -274,24 +305,36 @@ def strip_injected_context_blocks(text: str) -> str:
 
 def _sanitize_json_like(value: Any) -> Any:
     if isinstance(value, dict):
-        return {
-            (
-                strip_injected_context_blocks(_sanitize_string_media(key))
-                if isinstance(key, str)
-                else key
-            ): _sanitize_json_like(val)
-            for key, val in value.items()
-        }
+        # fork: betterlcm — a sanitised key may never take another key's place. Upstream
+        # rebuilt the dict from sanitised keys, so two keys that became identical collapsed
+        # and the first value was dropped outright: {"a<active_memory>x</active_memory>":
+        # "FIRST", "a": "SECOND"} became {"a": "SECOND"} — a whole tool argument gone with no
+        # marker (audit p05 EX04). Keys are still cleaned of payloads; a collision keeps the
+        # original key instead, so every value survives.
+        sanitized: Dict[Any, Any] = {}
+        for key, val in value.items():
+            clean_key = key
+            if isinstance(key, str):
+                candidate = strip_injected_context_blocks(_sanitize_string_media(key))
+                if candidate not in sanitized or candidate == key:
+                    clean_key = candidate
+            if clean_key in sanitized:
+                clean_key = key
+            sanitized[clean_key] = _sanitize_json_like(val)
+        return sanitized
     if isinstance(value, list):
         return [_sanitize_json_like(item) for item in value]
     if isinstance(value, str):
+        # fork: no marker inside tool ARGUMENTS. The serialized argument block has its own
+        # fixed char budget and its own elision marker; adding one marker per removed block
+        # there displaces the real arguments it is meant to protect.
         return strip_injected_context_blocks(_sanitize_string_media(value))
     return value
 
 
 def sanitize_pre_compaction_content(text: Any) -> str:
     """Replace inline media/base64 payloads and transient injected context before compaction."""
-    return strip_injected_context_blocks(_sanitize_content_block(text))
+    return strip_injected_context_blocks(_sanitize_content_block(text), mark=True)
 
 
 def sanitize_pre_compaction_tool_arguments(arguments: Any) -> str:

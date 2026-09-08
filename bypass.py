@@ -9,6 +9,7 @@ unchanged.
 """
 
 import importlib
+import inspect  # fork: betterlcm
 import logging
 from typing import Any, Dict, List, Optional
 
@@ -152,14 +153,22 @@ class BypassMixin:
             # Older Hermes hosts may not expose all constructor kwargs. Keep the
             # fallback deliberately conservative rather than failing open to an
             # unbounded ignored/stateless transcript.
-            try:
-                compressor = ContextCompressor(
-                    self.model or "unknown",
-                    threshold_percent=self.context_threshold or self.threshold_percent or 0.50,
-                    protect_first_n=self.protect_first_n,
-                    protect_last_n=self.protect_last_n,
-                    quiet_mode=True,
+            #
+            # fork: betterlcm — drop only the kwargs this host cannot take. Upstream fell back
+            # to a fixed five-argument call, which silently discarded the operator's summary
+            # model, provider, credentials and context length: one unsupported keyword sent
+            # bypassed summarisation to a different route than the one that was configured
+            # (audit p05 BY03).
+            supported = self._constructor_supported_kwargs(ContextCompressor, kwargs)
+            dropped = sorted(set(kwargs) - set(supported))
+            if dropped:
+                logger.warning(
+                    "LCM native ContextCompressor does not accept %s on this host; "
+                    "initializing the bypassed-session fallback without them",
+                    ", ".join(dropped),
                 )
+            try:
+                compressor = ContextCompressor(**supported)
             except Exception as exc:
                 logger.warning(
                     "LCM could not initialize Hermes native ContextCompressor for bypassed session fallback; using deterministic trim: %s",
@@ -176,6 +185,28 @@ class BypassMixin:
         self._host_fallback_session_id = session_id
         self._sync_host_fallback_compressor(compressor)
         return compressor
+
+    @staticmethod
+    def _constructor_supported_kwargs(factory: Any, kwargs: Dict[str, Any]) -> Dict[str, Any]:
+        """fork: betterlcm — the subset of ``kwargs`` this constructor actually accepts.
+
+        Falls back to the minimum every known host supports when the signature cannot be
+        read, so an unreadable signature degrades the same way the old fixed call did.
+        """
+        try:
+            parameters = inspect.signature(factory).parameters
+        except (TypeError, ValueError):  # pragma: no cover - builtins / C constructors
+            return {
+                key: value
+                for key, value in kwargs.items()
+                if key in {"model", "threshold_percent", "protect_first_n", "protect_last_n", "quiet_mode"}
+            }
+        if any(
+            parameter.kind is inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters.values()
+        ):
+            return dict(kwargs)
+        return {key: value for key, value in kwargs.items() if key in parameters}
 
     def _sync_host_fallback_compressor(self, compressor: Any) -> None:
         """Keep the delegated native compressor aligned with LCM runtime metadata."""
@@ -494,10 +525,33 @@ class BypassMixin:
                 self._last_compress_aborted = False
             return compacted
         self._mirror_host_fallback_state(compressor)
+        # fork: betterlcm — an abort is a decision to PRESERVE, not a failed attempt. Upstream
+        # counted every native return as at least one compression and, when the unchanged
+        # result was still over target, ran the deterministic trim over it and cleared the
+        # abort flag — so the host's explicit "do not compress this" became a destructive
+        # delete reported as success (audit p05 BY02).
+        native_aborted = bool(getattr(compressor, "_last_compress_aborted", False))
+        native_changed = compacted is not safe_messages and compacted != safe_messages
         after_count = int(getattr(compressor, "compression_count", before_count) or before_count)
-        self.compression_count += max(1, after_count - before_count)
+        if native_changed:
+            self.compression_count += max(1, after_count - before_count)
+        elif after_count > before_count:
+            # the host counted an attempt that changed nothing; mirror its count, no more
+            self.compression_count += after_count - before_count
         compacted = self._sanitize_active_context_messages(compacted)
         if target_tokens is not None and count_messages_tokens(compacted) > target_tokens:
+            if native_aborted and not native_changed:
+                # fork: betterlcm — say plainly that the host's preservation decision is being
+                # overridden. The assembly cap is a hard provider bound for a session LCM does
+                # not store, so the deterministic trim still has to run, but upstream counted
+                # the untouched native return as a compression first and reported the whole
+                # sequence as ordinary success (audit p05 BY02).
+                logger.warning(
+                    "LCM native compressor aborted for bypassed %s %s but its context is still "
+                    "over the assembly cap; falling back to the deterministic trim",
+                    reason,
+                    session_id,
+                )
             compacted = self._fallback_tail_compaction(safe_messages, target_tokens=target_tokens)
             if compacted != safe_messages:
                 self._last_compress_aborted = False

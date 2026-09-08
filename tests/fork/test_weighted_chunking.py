@@ -181,3 +181,60 @@ def test_rescue_fallback_never_splits_a_tool_group(tmp_path):
         assert e._next_leaf_rescue_chunk([call, result], current_source_tokens=999) == []
     finally:
         e.shutdown()
+
+
+# ── audit D4: the low anchor is upstream's BEHAVIOUR, not values that merely equal it ───────
+
+def test_oversized_history_at_the_low_anchor_still_goes_in_one_pass(tmp_path, summariser_calls):
+    """Upstream selects the entire eligible backlog when dynamic chunking is off. The fork
+    approximated that with a chunk of W, so a resumed or imported history LARGER than the
+    window was chunked instead — a different DAG from upstream's on exactly the histories most
+    likely to be imported."""
+    e = _engine(tmp_path, W256)
+    try:
+        # ~40 messages of ~9k tokens each: a backlog well past the 256k window
+        messages = [{"role": "user", "content": f"turn-{i} " + ("word " * 9000)} for i in range(40)]
+        messages += _tail()
+        e.compress(messages, current_tokens=e.threshold_tokens + 1)
+        leaves = [n for n in e._dag.get_session_nodes(e._session_id) if n.depth == 0]
+        assert len(leaves) == 1, "one whole-backlog pass, as upstream"
+        assert len(leaves[0].source_ids) == 40
+    finally:
+        e.shutdown()
+
+
+def test_the_forks_wall_clock_does_not_apply_at_the_low_anchor(tmp_path):
+    """Upstream's ordinary and dynamic-chunk paths had no wall clock — only its sweep did.
+    Imposing the fork's clock on them changed behaviour where the contract says the fork must
+    BE upstream."""
+    e = _engine(tmp_path, W256)
+    try:
+        assert e._fork_leaf_scheduling_active() is False
+        e._set_context_length(W256 + 1, source="test")
+        assert e._fork_leaf_scheduling_active() is True
+    finally:
+        e.shutdown()
+
+
+def test_dynamic_chunking_keeps_upstream_timing_at_the_low_anchor(tmp_path, monkeypatch, summariser_calls):
+    """With upstream's own dynamic-chunk policy enabled, a slow but SUCCESSFUL run must not be
+    cut short by a clock upstream never had."""
+    import time as _time
+    e = _engine(tmp_path, W256, dynamic_leaf_chunk_enabled=True, dynamic_leaf_chunk_max=40_000)
+    try:
+        clock = {"now": _time.monotonic()}
+        monkeypatch.setattr("hermes_lcm.compaction.time.monotonic", lambda: clock["now"])
+        from hermes_lcm import escalation
+        original = escalation._call_llm_for_summary
+
+        def slow(prompt, max_tokens, model="", timeout=None):
+            clock["now"] += 500  # far beyond any fork budget
+            return original(prompt, max_tokens, model=model, timeout=timeout)
+
+        monkeypatch.setattr(escalation, "_call_llm_for_summary", slow)
+        messages = _backlog(30) + _tail()
+        e.compress(messages, current_tokens=e.threshold_tokens + 1)
+        assert e._last_compression_status == "compacted"
+        assert e._last_compression_noop_reason != "leaf loop time budget exhausted"
+    finally:
+        e.shutdown()
