@@ -865,7 +865,11 @@ class CompactionMixin:
                 working_leaf_chunk_tokens = self._working_leaf_chunk_tokens(
                     raw_tokens_outside_tail
                 )
-                to_compact = self._select_oldest_leaf_chunk(
+                # fork: betterlcm — tool-group aligned here too. A chunk boundary inside an
+                # assistant/tool group shows the summariser a call with no result and leaves
+                # the result to a different leaf; correctness cannot depend on which optional
+                # mode is on (audit p05 CP06).
+                to_compact = self._select_oldest_leaf_chunk_aligned(
                     candidate_raw,
                     working_leaf_chunk_tokens,
                 )
@@ -880,7 +884,10 @@ class CompactionMixin:
                 if force_overflow:
                     to_compact = candidate_raw
                 else:
-                    to_compact = self._select_oldest_leaf_chunk(candidate_raw, working_leaf_chunk_tokens)
+                    # fork: betterlcm — aligned in the dynamic branch too (audit p05 CP06)
+                    to_compact = self._select_oldest_leaf_chunk_aligned(
+                        candidate_raw, working_leaf_chunk_tokens
+                    )
             else:
                 if raw_tokens_outside_tail < self._config.leaf_chunk_tokens and not force_overflow:
                     if not (deferred_maintenance_active and critical_budget_pressure):
@@ -1086,12 +1093,29 @@ class CompactionMixin:
             self._last_compacted_store_id = max(consumed_store_ids) if consumed_store_ids else 0
             self._persist_frontier_marker()
 
+            pressure_consumed_chunk = pressure_messages[
+                leading_anchor_count:leading_anchor_count + selected_raw_len
+            ]
             pressure_remaining_messages = pressure_messages[leading_anchor_count + selected_raw_len:]
             working_messages = working_messages[:leading_anchor_count] + remaining_messages
             pressure_messages = pressure_messages[:leading_anchor_count] + pressure_remaining_messages
             leaf_compacted_this_turn = True
             leaf_passes += 1
-            estimated_active_tokens = max(0, estimated_active_tokens - source_tokens + summary_tokens)
+            # fork: betterlcm — subtract what the PRESSURE view holds for the span just
+            # consumed. ``estimated_active_tokens`` starts from the host's observed prompt
+            # size, which counts the original messages; ``source_tokens`` counts the working
+            # copy, which stubbing/redaction can have shortened by orders of magnitude (2,505
+            # tokens of tool output against a 15-token stub). Subtracting the small number
+            # from the large estimate left phantom pressure behind and drove compaction and
+            # spend that the window-scaled target never asked for (audit p05 CP08).
+            consumed_pressure_tokens = (
+                count_messages_tokens(pressure_consumed_chunk)
+                if pressure_consumed_chunk
+                else source_tokens
+            )
+            estimated_active_tokens = max(
+                0, estimated_active_tokens - consumed_pressure_tokens + summary_tokens
+            )
 
             if threshold_full_sweep_active:
                 leading_anchor_count = self._leading_anchor_count(working_messages)
@@ -1152,6 +1176,36 @@ class CompactionMixin:
                 working_messages,
                 observed_tokens=observed_prompt_tokens,
             )
+            # fork: betterlcm — summary pressure can exist without raw backlog. Upstream
+            # returned from here before the condensation step, so a session whose raw prefix
+            # was drained (or wholly inside the fresh tail, or below the leaf floor) kept an
+            # oversized pile of uncondensed summaries forever: nothing shrank the frontier
+            # because nothing new could be compacted (audit p05 CP04). Condensation gates
+            # itself on the frontier budget and the fan-in, so this is a no-op unless the pile
+            # really is too large.
+            if not cleanup_only:
+                try:
+                    if threshold_full_sweep_active:
+                        if sweep_raw_drained:
+                            _passes, sweep_stop_reason = self._run_threshold_sweep_condensation(
+                                target_tokens=sweep_target_tokens,
+                                pass_budget=max(0, sweep_max_passes - leaf_passes),
+                                deadline=sweep_deadline,
+                                focus_topic=focus_topic,
+                            )
+                    else:
+                        self._maybe_condense(
+                            focus_topic=focus_topic,
+                            leaf_compacted_this_turn=False,
+                            force_overflow=force_overflow,
+                            critical_budget_pressure=critical_budget_pressure,
+                            deadline=leaf_deadline,
+                        )
+                except SummaryUnavailableError as exc:
+                    self._last_leaf_summary_error = str(exc)
+                    logger.warning(
+                        "LCM condensation unavailable with no leaf pass this turn: %s", exc
+                    )
             if force_overflow and len(messages) >= 1:
                 leading_anchor_count = self._leading_anchor_count(working_messages)
                 compressed = self._assemble_overflow_recovery_context(

@@ -313,11 +313,22 @@ def _invoke_summary_llm(prompt: str | list[dict[str, str]], max_tokens: int,
 
 
 def _normalized_focus_topic(focus_topic: str, max_chars: int = 160) -> str:
-    """Return a single-line, bounded focus topic for prompt injection."""
+    """Return a single-line, bounded focus topic for prompt injection.
+
+    fork: betterlcm — the cut is named. An ellipsis said something had been shortened but not
+    how much, so a qualifier past character 160 ("…, but only for the staging cluster") could
+    silently change what the summariser was asked to emphasise (audit p05 ES05). The focus is
+    a preference, not source content — it is derived from material the summariser is reading
+    anyway — so the bound stays; only its honesty changes.
+    """
     normalized = " ".join(str(focus_topic or "").split())
     if len(normalized) <= max_chars:
         return normalized
-    return normalized[: max(0, max_chars - 1)].rstrip() + "…"
+    kept = max(0, max_chars - 1)
+    return (
+        normalized[:kept].rstrip()
+        + f"… [focus shortened: {kept} of {len(normalized)} chars shown]"
+    )
 
 
 # Historical section headings — mirror upstream hermes-agent constants so that

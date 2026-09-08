@@ -27473,9 +27473,15 @@ class TestExtractionDuringCompress:
         assert len(extraction_calls) > 0
         assert extraction_calls[0]["model"] == "test-extract-model"
 
-        # Extraction prompt contains serialized message roles
-        assert "[USER]:" in extraction_calls[0]["prompt"]
-        assert "[ASSISTANT]:" in extraction_calls[0]["prompt"]
+        # Extraction prompt contains serialized message roles — inside the untrusted-data
+        # envelope the fork now uses for extraction as well (audit p05 EX05)
+        prompt = extraction_calls[0]["prompt"]
+        assert [message["role"] for message in prompt] == ["system", "user"]
+        envelope = json.loads(prompt[1]["content"])
+        assert envelope["operation"] == "lcm_extraction"
+        source_text = envelope["sources"][0]["content"]
+        assert "[USER]:" in source_text
+        assert "[ASSISTANT]:" in source_text
 
         # Daily file created with extracted content
         files = list(Path(tmp_path / "extractions").glob("*.md"))

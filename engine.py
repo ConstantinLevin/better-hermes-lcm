@@ -3651,14 +3651,21 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         omitted_node_ids: list[int],
         depth_cap_hits: list[int],
         omitted_tail_messages: int,
+        dropped_internal_turns: int = 0,
     ) -> str:
         """fork: betterlcm — see marked_loss.assembly_omission_marker."""
-        if not omitted_node_ids and not depth_cap_hits and not omitted_tail_messages:
+        if (
+            not omitted_node_ids
+            and not depth_cap_hits
+            and not omitted_tail_messages
+            and not dropped_internal_turns
+        ):
             return ""
         return marked_loss.assembly_omission_marker(
             omitted_node_ids=omitted_node_ids,
             depth_cap_hits=depth_cap_hits,
             omitted_tail_messages=omitted_tail_messages,
+            dropped_internal_turns=dropped_internal_turns,
         )
 
     def _purge_embeddings_for_nodes(
@@ -5051,7 +5058,12 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                 base = self._hermes_home or os.path.expanduser("~/.hermes")
                 output_path = os.path.join(base, "lcm-extractions")
             extraction_model = self._config.extraction_model or self._config.summary_model
-            extract_before_compaction(
+            # fork: betterlcm — hand the note its exact lineage (audit p05 EX07)
+            try:
+                source_store_ids = sorted(dict.fromkeys(self._get_store_ids_for_messages(messages)))
+            except Exception:  # pragma: no cover - provenance is best effort
+                source_store_ids = []
+            written = extract_before_compaction(
                 serialized_messages=serialized,
                 output_path=output_path,
                 session_id=self._session_id or "",
@@ -5061,7 +5073,16 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                     if timeout_seconds is not None
                     else self.effective_summary_timeout_ms / 1000  # fork: curved
                 ),
+                source_store_ids=source_store_ids,
             )
+            if not written:
+                # fork: betterlcm — extraction is best effort, but a failed pass is not a
+                # successful "nothing to extract"; the operator sees which one happened.
+                logger.warning(
+                    "LCM pre-compaction extraction did not complete for %d message(s); "
+                    "the segment is still summarised and stored",
+                    len(messages),
+                )
         except Exception as e:
             logger.warning("Pre-compaction extraction failed (non-blocking): %s", e)
 
@@ -6397,11 +6418,17 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                         continue
                     selected_parts.append(part)
         # fork: betterlcm — whatever was left out is named, so absence from the prefix
-        # never reads as absence from history.
+        # never reads as absence from history. That includes the assistant turns the
+        # active-context cleanup below is about to drop for holding only internal content.
+        dropped_internal_turns = sum(
+            1 for message in tail_selected
+            if isinstance(message, dict) and _should_drop_active_assistant_message(message)
+        )
         omission_marker = self._assembly_omission_marker(
             omitted_node_ids=omitted_node_ids,
             depth_cap_hits=depth_cap_hits,
             omitted_tail_messages=omitted_tail_messages,
+            dropped_internal_turns=dropped_internal_turns,
         )
         if omission_marker:
             selected_parts = (selected_parts if summary_parts else []) + [omission_marker]

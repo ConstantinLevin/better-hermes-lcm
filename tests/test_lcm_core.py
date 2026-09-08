@@ -4508,8 +4508,11 @@ class TestEscalation:
         focus_topic = json.loads(messages[1]["content"])["request"]["focus_topic"]
         assert "\n" not in focus_topic
         assert focus_topic.startswith("migration very-long-topic")
-        assert len(focus_topic) <= 160
-        assert focus_topic.endswith("…")
+        # fork: betterlcm — the cut names itself, so the shortened focus is a little longer
+        # than the bound on the CONTENT it carries (audit p05 ES05)
+        assert focus_topic.endswith("chars shown]")
+        assert "focus shortened: 159 of " in focus_topic
+        assert len(focus_topic.split("… [focus shortened")[0]) <= 160
         assert noisy_focus not in messages[0]["content"]
 
     def test_custom_instructions_injected_into_l1_prompt(self):
@@ -7166,8 +7169,10 @@ class TestExtraction:
         finally:
             ext_module._call_extraction_llm = original
 
-        assert "[with media attachment]" in seen_prompt["prompt"]
-        assert "data:image/png;base64" not in seen_prompt["prompt"]
+        # fork: betterlcm — extraction goes through the untrusted-data envelope (p05 EX05)
+        source_text = json.loads(seen_prompt["prompt"][1]["content"])["sources"][0]["content"]
+        assert "[with media attachment]" in source_text
+        assert "data:image/png;base64" not in source_text
 
     def test_extract_writes_daily_file(self, tmp_path):
         from hermes_lcm.extraction import extract_before_compaction

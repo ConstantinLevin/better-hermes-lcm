@@ -91,3 +91,44 @@ def test_an_acknowledgement_is_not_a_summary(monkeypatch):
         escalation.summarize_with_escalation("a decision, a rejection and a fix",
                                              source_tokens=200, token_budget=50)
     assert "index" in str(raised.value)
+
+
+def test_extraction_failure_is_not_reported_as_nothing_to_extract(tmp_path, monkeypatch):
+    """Audit p05 EX08/EX06: a provider failure and a truncated generation both returned None,
+    which the caller read as a successful "nothing worth extracting"."""
+    from hermes_lcm import extraction as ext
+    from hermes_lcm.errors import ExtractionUnavailableError
+
+    def down(prompt, model="", timeout=None):
+        raise ExtractionUnavailableError("extraction call failed: service down")
+
+    monkeypatch.setattr(ext, "_call_extraction_llm", down)
+    assert ext.extract_before_compaction("[USER]: something", str(tmp_path / "notes")) is False
+    assert not list((tmp_path / "notes").glob("*.md")) if (tmp_path / "notes").exists() else True
+
+    monkeypatch.setattr(ext, "_call_extraction_llm", lambda *a, **k: "NOTHING_TO_EXTRACT")
+    assert ext.extract_before_compaction("[USER]: something", str(tmp_path / "notes")) is True
+
+
+def test_an_extraction_note_names_the_rows_it_came_from(tmp_path, monkeypatch):
+    """Audit p05 EX07: notes carried a wall-clock header and nothing that ties the bullets to
+    the segment they were derived from, even across several passes in one session."""
+    from hermes_lcm import extraction as ext
+
+    monkeypatch.setattr(ext, "_call_extraction_llm", lambda *a, **k: "- Decided: ship on Friday")
+    assert ext.extract_before_compaction(
+        "[USER]: ship it", str(tmp_path / "notes"), session_id="s1", source_store_ids=[7, 8, 9]
+    ) is True
+    note = next((tmp_path / "notes").glob("*.md")).read_text()
+    assert "store_ids=7, 8, 9" in note
+    assert "sha256:" in note
+    assert "lcm_expand(store_id=…)" in note
+
+
+def test_a_shortened_focus_says_how_much_it_lost(monkeypatch):
+    """Audit p05 ES05: the focus was cut at 160 characters with a bare ellipsis, so a
+    qualifier past that point silently changed what the summariser was asked to emphasise."""
+    long_focus = "migrate the store " * 20 + "but only for the staging cluster"
+    shortened = escalation._normalized_focus_topic(long_focus)
+    assert shortened.endswith("chars shown]")
+    assert str(len(" ".join(long_focus.split()))) in shortened

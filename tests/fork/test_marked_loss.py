@@ -197,6 +197,26 @@ def test_assembly_depth_cap_hit_is_marked(tmp_path):
         e.shutdown()
 
 
+def test_an_assistant_turn_dropped_as_internal_only_is_named_in_the_prefix(tmp_path):
+    """Audit p05 SA01: active-context cleanup drops assistant turns whose only content was
+    internal/reasoning material. Upstream logged that for the operator; the agent's own view
+    of its history was simply one turn shorter with nothing to say so."""
+    e = _engine(tmp_path, incremental_max_depth=0)
+    try:
+        tail = [
+            {"role": "user", "content": "what did you decide?"},
+            {"role": "assistant", "content": "<thinking>internal only</thinking>"},
+            {"role": "user", "content": "well?"},
+        ]
+        assembled = e._assemble_context(None, tail)
+        rendered = "\n".join(str(m.get("content")) for m in assembled)
+        assert "[LCM assembly omissions" in rendered
+        assert "held only internal/reasoning content" in rendered
+        assert all("internal only" not in str(m.get("content")) for m in assembled)
+    finally:
+        e.shutdown()
+
+
 def test_assembly_budget_skips_are_marked_with_node_ids(tmp_path):
     e = _engine(tmp_path, incremental_max_depth=0)
     try:

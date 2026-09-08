@@ -4,6 +4,7 @@ Best-effort: failures never block compaction. Extracted content is written to
 daily note files so key decisions survive even if the DAG summary loses nuance.
 """
 
+import hashlib
 import json
 import logging
 import re
@@ -12,7 +13,14 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from . import marked_loss  # fork: betterlcm
+from .errors import ExtractionUnavailableError  # fork: betterlcm
 from .model_routing import apply_lcm_model_route
+from .prompt_boundary import build_untrusted_data_messages  # fork: betterlcm
+
+# fork: betterlcm — reasons that mean the model was cut off (mirrors escalation).
+_TRUNCATED_FINISH_REASONS = frozenset({
+    "length", "max_tokens", "max_output_tokens", "content_filter", "incomplete",
+})
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +64,21 @@ def _at_line_end(text: str, index: int) -> bool:
     return not text[index:line_end].strip()
 
 
+# fork: betterlcm — the instruction half of the extraction prompt, for the trusted system role.
+EXTRACTION_INSTRUCTIONS = """Extract decisions, commitments, outcomes, and rules from the supplied
+conversation segment.
+
+Format as a flat list of bullet points. Each bullet should be self-contained and understandable
+without the surrounding conversation. Include:
+- Decisions made (what was chosen, and why if stated)
+- Commitments (who will do what)
+- Outcomes (what happened as a result of an action)
+- Rules or constraints discovered
+
+Skip: greetings, meta-discussion, reasoning that led nowhere, repeated information.
+If there is nothing worth extracting, respond with exactly: NOTHING_TO_EXTRACT"""
+
+
 EXTRACTION_PROMPT = """Extract decisions, commitments, outcomes, and rules from this conversation segment.
 
 Format as a flat list of bullet points. Each bullet should be self-contained and understandable
@@ -72,14 +95,22 @@ CONTENT:
 {text}"""
 
 
-def _call_extraction_llm(prompt: str, model: str = "",
+def _call_extraction_llm(prompt: "str | list[dict[str, str]]", model: str = "",
                           timeout: float | None = None) -> Optional[str]:
-    """Call the Hermes auxiliary LLM for extraction."""
+    """Call the Hermes auxiliary LLM for extraction.
+
+    fork: betterlcm — a provider failure raises instead of returning ``None``. Returning None
+    for both "the model said there was nothing" and "the call never happened" made a missing
+    extraction indistinguishable from a successful negative assessment (audit p05 EX08).
+    A generation that stopped at its limit is a failure too, not a finished extraction
+    (audit p05 EX06).
+    """
     try:
         from agent.auxiliary_client import call_llm
+        messages = prompt if isinstance(prompt, list) else [{"role": "user", "content": prompt}]
         call_kwargs = {
             "task": "extraction",
-            "messages": [{"role": "user", "content": prompt}],
+            "messages": messages,
             "temperature": 0.2,
             "max_tokens": 2000,
         }
@@ -87,14 +118,22 @@ def _call_extraction_llm(prompt: str, model: str = "",
         if timeout is not None:
             call_kwargs["timeout"] = timeout
         response = call_llm(**call_kwargs)
-        content = response.choices[0].message.content
+        choice = response.choices[0]
+        finish_reason = str(getattr(choice, "finish_reason", "") or "").strip().lower()
+        if finish_reason in _TRUNCATED_FINISH_REASONS:
+            raise ExtractionUnavailableError(
+                f"extraction stopped at the generation limit (finish_reason={finish_reason})"
+            )
+        content = choice.message.content
         if not isinstance(content, str):
             content = str(content) if content else ""
         from .escalation import _strip_reasoning_blocks
         return _strip_reasoning_blocks(content).strip()
+    except ExtractionUnavailableError:
+        raise
     except Exception as e:
         logger.debug("Extraction LLM call failed: %s", e)
-        return None
+        raise ExtractionUnavailableError(f"extraction call failed: {e}") from e
 
 
 def _sanitize_string_media(text: str) -> str:
@@ -358,6 +397,7 @@ def extract_before_compaction(
     session_id: str = "",
     model: str = "",
     timeout: float | None = None,
+    source_store_ids: "List[int] | None" = None,  # fork: betterlcm (audit p05 EX07)
 ) -> bool:
     """Extract decisions from messages about to be compacted and write to a daily file.
 
@@ -365,7 +405,23 @@ def extract_before_compaction(
     Never raises — failures are logged and swallowed.
     """
     try:
-        prompt = EXTRACTION_PROMPT.format(text=serialized_messages)
+        # fork: betterlcm — the same untrusted-data boundary the summariser uses. Upstream
+        # interpolated the historical conversation into one user message after "CONTENT:", so
+        # instructions found in that history reached the model as instructions and could steer
+        # what got written into the persistent notes (audit p05 EX05).
+        prompt = build_untrusted_data_messages(
+            operation="lcm_extraction",
+            system_instructions=EXTRACTION_INSTRUCTIONS,
+            sources=[
+                {
+                    "provenance": {
+                        "source_type": "messages",
+                        **({"session_id_present": True} if session_id else {}),
+                    },
+                    "content": serialized_messages,
+                }
+            ],
+        )
         result = _call_extraction_llm(prompt, model=model, timeout=timeout)
 
         if not result or result.strip() == "NOTHING_TO_EXTRACT":
@@ -381,7 +437,17 @@ def extract_before_compaction(
         header = f"\n\n## Extraction — {datetime.now().strftime('%H:%M')}"
         if session_id:
             header += f" ({session_id})"
-        header += "\n\n"
+        header += "\n"
+        # fork: betterlcm — say exactly which rows these bullets came from. A note headed only
+        # by a wall-clock time cannot be tied back to its segment, and several passes in one
+        # session produce several such notes (audit p05 EX07).
+        digest = hashlib.sha256(serialized_messages.encode("utf-8", "replace")).hexdigest()[:16]
+        provenance = f"source chars={len(serialized_messages)}, sha256:{digest}"
+        if source_store_ids:
+            shown = ", ".join(str(store_id) for store_id in list(source_store_ids)[:40])
+            more = f" (+{len(source_store_ids) - 40} more)" if len(source_store_ids) > 40 else ""
+            provenance += f", store_ids={shown}{more} — lcm_expand(store_id=…)"
+        header += f"*Source: {provenance}*\n\n"
 
         with open(file_path, "a", encoding="utf-8") as f:
             f.write(header)

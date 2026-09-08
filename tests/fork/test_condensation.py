@@ -196,3 +196,52 @@ def test_summary_size_rules_come_from_config(tmp_path, mock_summariser):
         assert mock_summariser and mock_summariser[0] >= 60
     finally:
         e.shutdown()
+
+
+def test_summary_pressure_alone_still_reaches_condensation(tmp_path, mock_summariser):
+    """Audit p05 CP04: the no-leaf branch returned before the condensation step, so a session
+    with an oversized summary frontier and no eligible raw backlog (drained, or wholly inside
+    the fresh tail) could never shrink: nothing new could be compacted, so nothing condensed."""
+    e = _engine(tmp_path, None, condensation_fanin=2, incremental_max_depth=2,
+                fresh_tail_count=8, leaf_chunk_tokens=100_000)
+    try:
+        e._session_id = "cp04"
+        for index in range(6):
+            _leaf(e, 500, earliest=1000 + index)
+        assert all(n.depth == 0 for n in e._dag.get_session_nodes("cp04"))
+
+        e.threshold_tokens = 1
+        # only a fresh tail: no raw backlog is eligible for a leaf pass
+        e.compress([{"role": "user", "content": "just the tail"}], current_tokens=10_000)
+
+        depths = {n.depth for n in e._dag.get_session_nodes("cp04")}
+        assert 1 in depths, "summary pressure never reached condensation"
+    finally:
+        e.shutdown()
+
+
+def test_dynamic_chunking_selects_through_the_aligned_selector(tmp_path, monkeypatch,
+                                                               mock_summariser):
+    """Audit p05 CP06: full sweep and dynamic chunking called the UNALIGNED selector, so a
+    chunk boundary could fall between an assistant tool call and the results answering it —
+    the summariser saw a call with no outcome and the outcome landed in another leaf."""
+    e = _engine(tmp_path, None, dynamic_leaf_chunk_enabled=True, fresh_tail_count=1,
+                leaf_chunk_tokens=20)
+    try:
+        e._session_id = "cp06"
+        e.threshold_tokens = 1
+        aligned_calls: list[int] = []
+        real_aligned = e._select_oldest_leaf_chunk_aligned
+        monkeypatch.setattr(e, "_select_oldest_leaf_chunk_aligned",
+                            lambda *a, **k: (aligned_calls.append(1), real_aligned(*a, **k))[1])
+        messages = [
+            {"role": "user", "content": "u" * 400},
+            {"role": "assistant", "tool_calls": [
+                {"id": "a", "function": {"name": "read", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "a", "content": "result a " + "r" * 400},
+            {"role": "user", "content": "tail"},
+        ]
+        e.compress(messages, current_tokens=100_000)
+        assert aligned_calls, "the dynamic branch bypassed the tool-group-aligned selector"
+    finally:
+        e.shutdown()

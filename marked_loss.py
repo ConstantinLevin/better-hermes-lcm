@@ -132,6 +132,7 @@ def assembly_omission_marker(
     omitted_node_ids: List[int],
     depth_cap_hits: List[int],
     omitted_tail_messages: int,
+    dropped_internal_turns: int = 0,
 ) -> str:
     """One prefix part naming what the assembly budget/caps left out of this turn's context."""
     lines = [ASSEMBLY_OMISSION_MARKER_HEADER]
@@ -151,5 +152,13 @@ def assembly_omission_marker(
         lines.append(
             f"- {omitted_tail_messages} large fresh-tail message(s) were skipped by the assembly cap; "
             "they remain in the raw store (lcm_recent / lcm_expand)"
+        )
+    if dropped_internal_turns:
+        # fork: betterlcm — active-context cleanup removes assistant turns whose only content
+        # was internal/reasoning material. Upstream logged that for the operator and left the
+        # agent's own view of its history quietly one turn shorter (audit p05 SA01).
+        lines.append(
+            f"- {dropped_internal_turns} assistant turn(s) held only internal/reasoning content "
+            "and are not replayed; the stored rows are unchanged (lcm_recent / lcm_expand)"
         )
     return "\n".join(lines)
