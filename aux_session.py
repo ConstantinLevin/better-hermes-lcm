@@ -22,6 +22,11 @@ import weakref
 from pathlib import Path
 from typing import Any, Dict
 
+# fork: betterlcm — how far the host-session ancestry walk follows parent links before it
+# gives up. Upstream stopped at 32, which a deep agent tree can exceed; see
+# ``_session_has_auxiliary_ancestor`` (audit p05 AX03).
+_ANCESTRY_WALK_MAX_HOPS = 256
+
 logger = logging.getLogger(__name__)
 
 
@@ -744,7 +749,13 @@ class AuxiliarySessionMixin:
             finally:
                 conn.close()
         except Exception as exc:  # pragma: no cover - defensive against host DB drift
-            logger.debug("LCM auxiliary child session probe failed: %s", exc)
+            # fork: betterlcm — say that the answer is unknown rather than merely negative
+            logger.warning(
+                "LCM auxiliary child probe failed for %s (%s); treating it as foreground "
+                "(its conversation WILL be stored)",
+                session_id,
+                exc,
+            )
             return False
         if not row:
             return False
@@ -784,11 +795,17 @@ class AuxiliarySessionMixin:
             return False
         visited: set[str] = set()
         current = session_id
+        # fork: betterlcm — a bounded or failed walk is UNKNOWN, not a proven negative
+        # (audit p05 AX03). The answer stays "not auxiliary" on purpose: classifying a
+        # session as auxiliary means its conversation is never stored, and unrecoverable
+        # non-storage is a worse outcome than a rebind. But the uncertainty is now said out
+        # loud instead of being indistinguishable from a resolved lineage, and the walk is
+        # long enough for real agent trees (upstream stopped at 32 hops).
         try:
             uri = state_db_path.resolve().as_uri() + "?mode=ro"
             conn = sqlite3.connect(uri, uri=True)
             try:
-                for _ in range(32):
+                for _ in range(_ANCESTRY_WALK_MAX_HOPS):
                     if not current or current in visited:
                         return False
                     if current in auxiliary_lineage_ids:
@@ -801,9 +818,21 @@ class AuxiliarySessionMixin:
                     if not row:
                         return False
                     current = str(row[0] or "")
+                else:
+                    logger.warning(
+                        "LCM auxiliary ancestry walk for %s hit the %d-hop bound; treating it "
+                        "as foreground (its conversation WILL be stored)",
+                        session_id,
+                        _ANCESTRY_WALK_MAX_HOPS,
+                    )
             finally:
                 conn.close()
         except Exception as exc:  # pragma: no cover - defensive against host DB drift
-            logger.debug("LCM auxiliary ancestor probe failed: %s", exc)
+            logger.warning(
+                "LCM auxiliary ancestor probe failed for %s (%s); treating it as foreground "
+                "(its conversation WILL be stored)",
+                session_id,
+                exc,
+            )
             return False
         return False

@@ -276,6 +276,34 @@ def extract_search_terms(query: str) -> List[str]:
     return deduped
 
 
+def describe_query_interpretation(query: str) -> dict:
+    """fork: betterlcm — what this query was actually searched for, and what was dropped.
+
+    Term extraction removes bare Boolean words and edge punctuation, and sanitisation strips
+    characters the index treats as syntax. Upstream did all of that silently, so a search for
+    ``AND 🚀`` or ``*`` quietly became a different search — or no search at all — and the empty
+    result read as an exhaustive negative (audit p05 SQ01).
+    """
+    text = (query or "").strip()
+    terms = extract_search_terms(text)
+    phrases = extract_quoted_phrases(text)
+    kept = {term.casefold() for term in terms} | {phrase.casefold() for phrase in phrases}
+    dropped: list[str] = []
+    for token in _QUOTED_PHRASE_RE.sub(" ", text).split():
+        cleaned = token.strip().strip(_STRIP_EDGE_PUNCT)
+        if not cleaned:
+            if token not in dropped:
+                dropped.append(token)
+            continue
+        if cleaned.casefold() in kept:
+            continue
+        if any(cleaned.casefold() in term.casefold() for term in terms):
+            continue
+        if token not in dropped:
+            dropped.append(token)
+    return {"terms": terms, "phrases": phrases, "dropped_tokens": dropped}
+
+
 def extract_quoted_phrases(query: str) -> List[str]:
     return [phrase.strip() for phrase in _QUOTED_PHRASE_RE.findall(query or "") if phrase.strip()]
 

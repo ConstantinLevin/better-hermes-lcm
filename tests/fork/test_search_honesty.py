@@ -79,3 +79,22 @@ def test_grep_tells_the_agent_when_a_scan_stopped_at_a_work_cap(tmp_path, monkey
         assert "not evidence of absence" in payload["search_note"]
     finally:
         e.shutdown()
+
+
+def test_grep_says_which_query_tokens_it_did_not_search_for(tmp_path):
+    """Audit p05 SQ01: bare Boolean words and punctuation are removed from the term list, so
+    a search for "AND 🚀" or "*" quietly became a different search and its empty result read
+    as an exhaustive negative."""
+    from hermes_lcm import tools as lcm_tools
+    cfg = LCMConfig(database_path=str(tmp_path / "terms.db"))
+    e = LCMEngine(config=cfg, hermes_home=str(tmp_path))
+    try:
+        e.on_session_start("q", platform="cli", context_length=200_000)
+        payload = json.loads(lcm_tools.lcm_grep({"query": "AND rocket"}, engine=e))
+        assert payload["query_interpretation"]["dropped_tokens"] == ["AND"]
+        assert "rocket" in payload["query_interpretation"]["terms"]
+
+        plain = json.loads(lcm_tools.lcm_grep({"query": "rocket"}, engine=e))
+        assert "query_interpretation" not in plain, "nothing was dropped, so nothing to report"
+    finally:
+        e.shutdown()

@@ -64,7 +64,8 @@ def _unknown(
         observed = 0.0
     anchor = _parse_anchor(session_date)
     return {
-        "observed_at": _epoch(anchor) if anchor else observed,
+        "observed_at": observed,  # fork: never overwritten by the session anchor (p05 OT01)
+        "session_date_at": _epoch(anchor) if anchor else None,
         "stored_at": observed,
         "event_at": None,
         "event_date": None,
@@ -106,11 +107,25 @@ def resolve_occurrence_time(
             session_date=session_date,
             reason="ambiguous_multiple_explicit_dates",
         )
+    if explicit and list(_RELATIVE.finditer(content)):
+        # fork: betterlcm — an explicit date used to return immediately, before the relative
+        # expressions were looked at, so "On 2020-01-01 we proposed removal; yesterday we
+        # cancelled it" was recorded as a definite 2020 event (audit p05 OT02). Mixed evidence
+        # is ambiguous evidence.
+        return _unknown(
+            observed_at,
+            session_date=session_date,
+            reason="ambiguous_explicit_and_relative_dates",
+        )
     if explicit:
         day, match = explicit[0]
         anchor = _parse_anchor(session_date)
         return {
-            "observed_at": _epoch(anchor) if anchor else float(observed_at or 0.0),
+            # fork: betterlcm — the OBSERVATION time is the host's timestamp for this row.
+            # Upstream replaced it with midnight of the session date, which made provenance
+            # less precise and then labelled that as the original observation (audit p05 OT01).
+            "observed_at": float(observed_at or 0.0),
+            "session_date_at": _epoch(anchor) if anchor else None,
             "stored_at": float(observed_at or 0.0),
             "event_at": _epoch(day),
             "event_date": day.isoformat(),
@@ -142,26 +157,37 @@ def resolve_occurrence_time(
 
     match = matches[0]
     simple = (match.group("simple") or "").casefold()
-    if simple == "today":
-        day = anchor
-    elif simple == "yesterday":
-        day = anchor - timedelta(days=1)
-    elif match.group("weekday"):
-        target = _WEEKDAYS[match.group("weekday").casefold()]
-        delta = (anchor.weekday() - target) % 7
-        day = anchor - timedelta(days=delta or 7)
-    else:
-        count = int(match.group("count"))
-        unit = match.group("unit").casefold()
-        if unit.startswith("day"):
-            day = anchor - timedelta(days=count)
-        elif unit.startswith("week"):
-            day = anchor - timedelta(weeks=count)
+    # fork: betterlcm — source text is arbitrary. "999999999999 days ago" raised OverflowError
+    # out of the arithmetic and aborted the caller's whole enrichment pass; an unresolvable
+    # count is explicit unknown metadata, not an exception (audit p05 OT03).
+    try:
+        if simple == "today":
+            day = anchor
+        elif simple == "yesterday":
+            day = anchor - timedelta(days=1)
+        elif match.group("weekday"):
+            target = _WEEKDAYS[match.group("weekday").casefold()]
+            delta = (anchor.weekday() - target) % 7
+            day = anchor - timedelta(days=delta or 7)
         else:
-            day = _subtract_months(anchor, count)
+            count = int(match.group("count"))
+            unit = match.group("unit").casefold()
+            if unit.startswith("day"):
+                day = anchor - timedelta(days=count)
+            elif unit.startswith("week"):
+                day = anchor - timedelta(weeks=count)
+            else:
+                day = _subtract_months(anchor, count)
+    except (OverflowError, ValueError, TypeError):
+        return _unknown(
+            observed_at,
+            session_date=session_date,
+            reason="relative_expression_out_of_range",
+        )
 
     return {
-        "observed_at": _epoch(anchor),
+        "observed_at": float(observed_at or 0.0),  # fork: the host's timestamp (p05 OT01)
+        "session_date_at": _epoch(anchor),
         "stored_at": float(observed_at or 0.0),
         "event_at": _epoch(day),
         "event_date": day.isoformat(),

@@ -79,7 +79,7 @@ from .retrieval_core import (
     run_knn,
 )
 from .rollup_store import RollupStore
-from .search_query import AGE_DECAY_RATE, normalize_search_sort
+from .search_query import AGE_DECAY_RATE, describe_query_interpretation, normalize_search_sort  # fork
 from .session_patterns import build_session_match_keys, compile_session_pattern
 from .sqlite_util import _sqlite_savepoint
 from .store import build_message_fts_spec
@@ -2958,6 +2958,10 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
         response["externalized_refs"] = externalized_refs
     if externalized_scan is not None:
         response["externalized_scan"] = externalized_scan
+    # fork: betterlcm — say how the raw query was interpreted whenever anything was dropped
+    interpretation = describe_query_interpretation(query)
+    if interpretation["dropped_tokens"]:
+        response["query_interpretation"] = interpretation
     if search_failures or bounded_scans:
         # fork: betterlcm — a partial, failed or work-capped search must never look like an
         # exhaustive negative. The hits that did succeed are kept; the caller is told what did
