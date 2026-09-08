@@ -57,3 +57,4 @@ Format: `file` — what the hook does — why — how to re-apply on a conflict.
 | `command.py` | `/lcm doctor coverage` route + `_doctor_coverage_text` + help line | CLI surface | keep ours |
 | `presets.py` | `suggest_preset_for_engine`: first branch `>= 512k -> (None, "window-scaled defaults active (t=…)")`; class docstring notes the two anchors | the curve, not a preset, tunes large windows | keep ours; branches below 512k untouched |
 | `dependency-contract.json` | `agent.auxiliary_client._aux_progress` / `aux_progress_hook` declared as imported host APIs (leaf_pipeline.py) | the validator lists every host symbol a module imports | keep ours (two array entries) |
+| `plugin.yaml` | `version: 1.0.0-rc.1+betterlcm` | the fork is identifiable in `hermes plugins list` | keep the `+betterlcm` suffix on upstream's new version |
