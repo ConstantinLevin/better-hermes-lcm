@@ -1008,6 +1008,15 @@ LCM_DESCRIBE = {
                 "type": "string",
                 "description": "Optional externalized payload ref filename to inspect instead of a summary node.",
             },
+            "index_offset": {
+                "type": "integer",
+                "description": (
+                    "fork: betterlcm — character offset into the node's stored index block, for "
+                    "continuing one that did not fit an earlier response. Use "
+                    "index_block_next_offset (or index_block_continue_with) from that response."
+                ),
+                "default": 0,
+            },
         },
         "required": [],
     },

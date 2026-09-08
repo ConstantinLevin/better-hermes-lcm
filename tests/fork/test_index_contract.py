@@ -178,3 +178,47 @@ def test_focus_guidance_sets_emphasis_and_never_permits_omission():
         assert "STALE" in system and "Historical" in system
     # with no focus topic the block is absent entirely
     assert "EMPHASIS and ORDER" not in _system(escalation._build_l1_prompt("src", 500, depth=0))
+
+
+def test_a_truncated_index_block_can_actually_be_continued(tmp_path):
+    """verify-4 #14: the truncated index named lcm_describe as its continuation, and that call
+    returned subtree metadata — never the rest of the index. The omitted topics were
+    advertised but unreachable."""
+    import json
+    import time
+    from hermes_lcm import tools as lcm_tools
+    from hermes_lcm.config import LCMConfig
+    from hermes_lcm.dag import SummaryNode
+    from hermes_lcm.engine import LCMEngine
+
+    cfg = LCMConfig(database_path=str(tmp_path / "index.db"), incremental_max_depth=0)
+    e = LCMEngine(config=cfg, hermes_home=str(tmp_path))
+    try:
+        e.on_session_start("ix", platform="cli", context_length=200_000)
+        topics = "\n".join(f"- topic {index}: what happened and how it ended" for index in range(200))
+        node_id = e._dag.add_node_with_meta(SummaryNode(
+            session_id="ix", depth=0,
+            summary=f"a long session\nExpand for details about:\n{topics}",
+            token_count=50, source_token_count=500, source_ids=[1],
+            source_type="messages", created_at=time.time()), level=1)
+
+        first = json.loads(lcm_tools.lcm_describe({"node_id": node_id}, engine=e))
+        assert first["index_block_complete"] is False
+        assert "topic 0" in first["index_block"]
+        continuation = first["index_block_continue_with"]
+        assert continuation["tool"] == "lcm_describe"
+
+        seen = first["index_block"]
+        payload = first
+        for _ in range(20):
+            if payload.get("index_block_complete"):
+                break
+            payload = json.loads(lcm_tools.lcm_describe(
+                {k: v for k, v in payload["index_block_continue_with"].items() if k != "tool"},
+                engine=e,
+            ))
+            seen += payload["index_block"]
+        assert payload["index_block_complete"] is True
+        assert "topic 199" in seen, "the continuation never returned the end of the index"
+    finally:
+        e.shutdown()

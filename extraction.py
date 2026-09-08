@@ -238,19 +238,29 @@ def _sanitize_content_block(content: Any) -> str:
         if block_type in _TEXT_BLOCK_TYPES:
             text_value = content.get("text")
             if isinstance(text_value, dict):
-                text_value = text_value.get("value", "")
+                text_value = text_value.get("value", "") or text_value.get("text", "")
             if not text_value:
                 text_value = content.get("content", "")
-            return _sanitize_content_block(text_value)
+            # fork: betterlcm — a typed TEXT block can still carry an outcome beside its text
+            # (is_error, a status, its call id). Returning only the text made a failed step
+            # read exactly like a successful one (verify-4 #6).
+            return _sanitize_content_block(text_value) + _structured_outcome_suffix(content)
         if _looks_like_media_block(block_type, content):
             return _MEDIA_ATTACHMENT_MARKER
+        # fork: betterlcm — a block may carry BOTH `text` and `content` (stdout and stderr, for
+        # example). Taking the first and ignoring the second dropped a whole output stream
+        # (verify-4 #6). Keep every distinct one, then the typed siblings that change what the
+        # text MEANS: picking out `text` alone dropped a tool result's failure status and
+        # identity, so a failed call read exactly like a successful one (audit p05 EX03).
+        rendered_parts: List[str] = []
         for key in ("text", "content"):
-            if key in content:
-                # fork: betterlcm — keep the typed siblings that change what the text MEANS.
-                # Picking out `text` dropped a tool result's failure status and identity, so a
-                # failed call read to the summariser exactly like a successful one
-                # (audit p05 EX03).
-                return _sanitize_content_block(content.get(key)) + _structured_outcome_suffix(content)
+            if key not in content:
+                continue
+            part = _sanitize_content_block(content.get(key))
+            if part and part not in rendered_parts:
+                rendered_parts.append(part)
+        if rendered_parts:
+            return "\n".join(rendered_parts) + _structured_outcome_suffix(content)
         return _extract_structured_metadata(content)
     return str(content)
 
@@ -301,19 +311,22 @@ def _select_injected_context_closer(
     return closers[0]
 
 
-def _injection_marker(removed: str, mark: bool) -> str:
+def _injection_marker(removed: str, mark: bool, compact: bool = False) -> str:
     """fork: betterlcm — one marker for a removed injected block, empty when it held nothing.
 
     Only the summariser-input paths mark. Removing an injected block on the way INTO the store
     removes something LCM (or the host) put there this turn, not conversation content, and a
-    marker there would be noise stored forever.
+    marker there would be noise stored forever. ``compact`` is the short form used inside tool
+    arguments, where the block has its own character budget (verify-4 #7).
     """
     if not mark or not removed.strip():
         return ""
+    if compact:
+        return f"[LCM-{len(removed)}c]"
     return marked_loss.injected_context_marker(len(removed))
 
 
-def strip_injected_context_blocks(text: str, *, mark: bool = False) -> str:
+def strip_injected_context_blocks(text: str, *, mark: bool = False, compact: bool = False) -> str:
     """Remove transient memory/context blocks before compaction summarization.
 
     fork: betterlcm — ``mark=True`` leaves a marker naming how much was removed, for the paths
@@ -335,7 +348,13 @@ def strip_injected_context_blocks(text: str, *, mark: bool = False) -> str:
         open_re = re.compile(rf"<{escaped}(?:\s[^>]*)?>", re.IGNORECASE)
         close_re = re.compile(rf"</{escaped}\s*>", re.IGNORECASE)
         before_self_close = cleaned
-        cleaned = self_close_re.sub("", cleaned)
+        # fork: betterlcm — a self-closing tag carries its content in its ATTRIBUTES
+        # (<active_memory decision="CANCEL"/>), so removing it silently dropped that text
+        # (verify-4 #7). Marked like every other removal.
+        def _mark_self_close(match: "re.Match[str]") -> str:
+            return _injection_marker(match.group(0), mark, compact)
+
+        cleaned = self_close_re.sub(_mark_self_close, cleaned)
         changed = changed or cleaned != before_self_close
 
         while True:
@@ -352,14 +371,14 @@ def strip_injected_context_blocks(text: str, *, mark: bool = False) -> str:
             if closer is None:
                 if _at_line_end(cleaned, opener.end()):
                     removed = cleaned[opener.start():]
-                    cleaned = cleaned[: opener.start()] + _injection_marker(removed, mark)
+                    cleaned = cleaned[: opener.start()] + _injection_marker(removed, mark, compact)
                 else:
                     removed = cleaned[opener.start():opener.end()]
                     cleaned = cleaned[: opener.start()] + cleaned[opener.end() :]
                 changed = True
                 continue
             removed = cleaned[opener.start():closer.end()]
-            cleaned = (cleaned[: opener.start()] + _injection_marker(removed, mark)
+            cleaned = (cleaned[: opener.start()] + _injection_marker(removed, mark, compact)
                        + cleaned[closer.end() :])
             changed = True
 
@@ -396,10 +415,11 @@ def _sanitize_json_like(value: Any) -> Any:
     if isinstance(value, list):
         return [_sanitize_json_like(item) for item in value]
     if isinstance(value, str):
-        # fork: no marker inside tool ARGUMENTS. The serialized argument block has its own
-        # fixed char budget and its own elision marker; adding one marker per removed block
-        # there displaces the real arguments it is meant to protect.
-        return strip_injected_context_blocks(_sanitize_string_media(value))
+        # fork: betterlcm — a compact marker inside tool ARGUMENTS. The argument block has its
+        # own char budget, so the marker is the short form: enough to say a removal happened
+        # and how big it was, without the sentence that would displace real arguments
+        # (verify-4 #7).
+        return strip_injected_context_blocks(_sanitize_string_media(value), mark=True, compact=True)
     return value
 
 

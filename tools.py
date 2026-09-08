@@ -173,8 +173,63 @@ def _node_index_block_payload(engine: Any, node: Any, *, max_chars: int = 4_000)
         "index_block": kept,
         "index_block_truncated": True,
         "index_block_total_chars": len(block),
-        "index_block_continue_with": {"tool": "lcm_describe", "node_id": int(node.node_id)},
+        # the continuation carries the offset it must resume from; without it the named call
+        # returned subtree metadata and never the rest of the index (verify-4 #14)
+        "index_block_next_offset": len(kept),
+        "index_block_continue_with": {
+            "tool": "lcm_describe",
+            "node_id": int(node.node_id),
+            "index_offset": len(kept),
+        },
     }
+
+
+def _node_index_slice_payload(engine: Any, node: Any, *, offset: int = 0,
+                              max_chars: int = 4_000) -> Dict[str, Any]:
+    """fork: betterlcm — one page of a node's stored index block, from ``offset``.
+
+    The block is stored whole; only the RESPONSE is bounded, and every bounded response says
+    where the rest is and how to ask for it (verify-4 #14).
+    """
+    store = getattr(getattr(engine, "_dag", None), "node_meta", None)
+    if store is None or node is None:
+        return {}
+    try:
+        meta = store.read(int(node.node_id))
+    except Exception:
+        return {}
+    block = str((meta or {}).get("index_block") or "")
+    if not block:
+        return {}
+    start = max(0, int(offset))
+    if start >= len(block):
+        return {
+            "index_block": "",
+            "index_block_offset": start,
+            "index_block_total_chars": len(block),
+            "index_block_complete": True,
+        }
+    slice_text = block[start:start + max_chars]
+    if start + len(slice_text) < len(block):
+        # cut on a line boundary when there is one, so a topic is not split mid-word
+        trimmed = slice_text.rsplit("\n", 1)[0]
+        if trimmed:
+            slice_text = trimmed
+    end = start + len(slice_text)
+    payload: Dict[str, Any] = {
+        "index_block": slice_text,
+        "index_block_offset": start,
+        "index_block_total_chars": len(block),
+        "index_block_complete": end >= len(block),
+    }
+    if end < len(block):
+        payload["index_block_next_offset"] = end
+        payload["index_block_continue_with"] = {
+            "tool": "lcm_describe",
+            "node_id": int(node.node_id),
+            "index_offset": end,
+        }
+    return payload
 
 
 def _get_session_node(engine: "LCMEngine", node_id: int):
@@ -5560,6 +5615,12 @@ def lcm_describe(args: Dict[str, Any], **kwargs) -> str:
         if node is None:
             return json.dumps({"error": f"Node {node_id} not found in current session"})
         info = engine._dag.describe_subtree(node_id)
+        # fork: betterlcm — a truncated index block names THIS call as its continuation, so
+        # this call has to be able to return the rest of it. It returned subtree metadata and
+        # nothing else, which left the omitted topics advertised but unreachable
+        # (verify-4 #14 / p02 T01).
+        index_offset = _parse_non_negative_int(args.get("index_offset", 0), 0)
+        info.update(_node_index_slice_payload(engine, node, offset=index_offset))
         return json.dumps(info)
 
     depth_stats = engine._dag.get_session_depth_stats(session_id)
