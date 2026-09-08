@@ -60,7 +60,7 @@ def test_system_note_mentions_markers_and_keeps_the_scaffold_signature():
     note = LCMEngine._append_lcm_note_to_content("sys")
     assert note.startswith("sys\n\n[Note: This conversation uses Lossless Context Management (LCM). ")
     assert "Earlier turns have been compacted into hierarchical summaries below." in note
-    assert "[LCM elided" in note and "[LCM rotate marker]" in note and "Externalized tool output" in note
+    assert "'[LCM …]' markers" in note and "'[Externalized …]' stubs" in note
     assert "absence from the visible context is never absence from the record" in note
     assert "lcm_grep" in note and "lcm_expand" in note
     # the engine still recognises its own note as replay scaffolding

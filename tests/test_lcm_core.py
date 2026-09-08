@@ -4562,7 +4562,8 @@ class TestAssemblyBudgetSelection:
         return engine
 
     def test_assembly_skips_oversized_assistant_turn_to_preserve_user_prompt(self, tmp_path, monkeypatch):
-        engine = self._engine(tmp_path, monkeypatch, max_assembly_tokens=120)
+        # fork: betterlcm — caps raised by the fork's longer LCM system note (+54 tokens)
+        engine = self._engine(tmp_path, monkeypatch, max_assembly_tokens=180)
         huge_assistant = "oversized assistant tool chatter " * 400
 
         assembled = engine._assemble_context(
@@ -4590,7 +4591,7 @@ class TestAssemblyBudgetSelection:
         )
 
     def test_non_contiguous_raw_user_tail_replay_does_not_duplicate_durable_rows(self, tmp_path, monkeypatch):
-        engine = self._engine(tmp_path, monkeypatch, max_assembly_tokens=160)
+        engine = self._engine(tmp_path, monkeypatch, max_assembly_tokens=220)  # fork: longer note
         messages = [
             {"role": "system", "content": "sys"},
             {"role": "user", "content": "repeat user intent"},
@@ -4706,7 +4707,7 @@ class TestAssemblyBudgetSelection:
         assert rows[-1]["content"] == "new followup"
 
     def test_assembly_skips_oversized_summary_and_keeps_later_fit_summary(self, tmp_path, monkeypatch):
-        engine = self._engine(tmp_path, monkeypatch, max_assembly_tokens=140)
+        engine = self._engine(tmp_path, monkeypatch, max_assembly_tokens=200)  # fork: longer note
         engine._dag.add_node(SummaryNode(
             session_id="assembly-session",
             depth=2,

@@ -5841,12 +5841,10 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         note = (
             "\n\n[Note: This conversation uses Lossless Context Management (LCM). "
             "Earlier turns have been compacted into hierarchical summaries below. "
-            "Every summary is an index over fully retained history, not the history itself: "
-            "absence from the visible context is never absence from the record. "
-            "Stubs such as '[Externalized tool output: …]' and markers such as '[LCM elided …]' "
-            "or '[LCM rotate marker]' name what was cut and expand by node or store id. "
-            "Use lcm_grep to search history before assuming something was never said, "
-            "lcm_describe to inspect the DAG, "
+            "Summaries are indexes over fully retained history: absence from the visible "
+            "context is never absence from the record; '[Externalized …]' stubs and '[LCM …]' "
+            "markers name what was cut and expand by node or store id. "
+            "Use lcm_grep to search history, lcm_describe to inspect the DAG, "
             "and lcm_expand to recover original details from any summary.]"
         )
         if isinstance(content, str):

@@ -20858,7 +20858,7 @@ class TestAssemblyGuardrails:
         config = LCMConfig(
             fresh_tail_count=10,
             database_path=str(tmp_path / "lcm_guardrail_summary.db"),
-            max_assembly_tokens=189,
+            max_assembly_tokens=252,  # fork: betterlcm — empty-hint fallback text (+21 chars per node)
         )
         instance = LCMEngine(config=config)
         instance._session_id = "guardrail-session"
