@@ -409,6 +409,20 @@ ENV_FIELD_SPECS: tuple[_EnvFieldSpec, ...] = (
     _EnvFieldSpec("rollup_aggregate_max_tokens", "LCM_ROLLUP_AGGREGATE_MAX_TOKENS", int),
     _EnvFieldSpec("rollup_builds_per_pass", "LCM_ROLLUP_BUILDS_PER_PASS", int),
     _EnvFieldSpec("rollup_maintenance_budget_ms", "LCM_ROLLUP_MAINTENANCE_BUDGET_MS", int),
+    # fork: betterlcm — window-weighted tuning
+    _EnvFieldSpec("scale_low_window", "LCM_SCALE_LOW_WINDOW", int),
+    _EnvFieldSpec("scale_high_window", "LCM_SCALE_HIGH_WINDOW", int),
+    _EnvFieldSpec("drain_stop_fraction", "LCM_DRAIN_STOP_FRACTION", float),
+    _EnvFieldSpec("leaf_chunk_fraction", "LCM_LEAF_CHUNK_FRACTION", float),
+    _EnvFieldSpec("leaf_pass_cap", "LCM_LEAF_PASS_CAP", int),
+    _EnvFieldSpec("leaf_loop_max_seconds", "LCM_LEAF_LOOP_MAX_SECONDS", float),
+    _EnvFieldSpec("summary_budget_fraction", "LCM_SUMMARY_BUDGET_FRACTION", float),
+    _EnvFieldSpec("summary_concurrency", "LCM_SUMMARY_CONCURRENCY", int),
+    _EnvFieldSpec("serialize_message_max_chars", "LCM_SERIALIZE_MESSAGE_MAX_CHARS", int),
+    _EnvFieldSpec("expand_page_tokens", "LCM_EXPAND_PAGE_TOKENS", int),
+    _EnvFieldSpec("tool_response_char_scale", "LCM_TOOL_RESPONSE_CHAR_SCALE", float),
+    _EnvFieldSpec("sqlite_cache_kib", "LCM_SQLITE_CACHE_KIB", int),
+    _EnvFieldSpec("token_cache_size", "LCM_TOKEN_CACHE_SIZE", int),
 )
 
 _PARSER_BY_TYPE = {
@@ -775,6 +789,25 @@ class LCMConfig:
     config_sources: dict[str, str] = field(default_factory=dict)
     config_source_warnings: list[str] = field(default_factory=list)
     ignored_config_yaml_lcm_keys: list[str] = field(default_factory=list)
+
+    # ── fork: betterlcm — window-weighted tuning (see window_scaling.py) ──────────────
+    # Anchors of the weighting curve: below scale_low_window every default is upstream's,
+    # above scale_high_window it is the large-window design, in between it slides linearly.
+    scale_low_window: int = 262_144
+    scale_high_window: int = 1_000_000
+    # Explicit overrides for fork-added weighted settings. 0 / 0.0 = "no override, use the
+    # curve". Fraction fields are fractions of context_length.
+    drain_stop_fraction: float = 0.0          # non-sweep loop drains until active <= this*W
+    leaf_chunk_fraction: float = 0.0          # leaf chunk size as fraction of W
+    leaf_pass_cap: int = 0                    # max leaf passes per compress()
+    leaf_loop_max_seconds: float = 0.0        # wall budget for the leaf loop
+    summary_budget_fraction: float = 0.0      # condensation trigger: summary pile > this*W
+    summary_concurrency: int = 0              # concurrent summariser calls per leaf batch
+    serialize_message_max_chars: int = 0      # pre-summariser per-message cap (chars)
+    expand_page_tokens: int = 0               # lcm_expand default page size
+    tool_response_char_scale: float = 0.0     # multiplier on tool response char caps
+    sqlite_cache_kib: int = 0                 # SQLite cache_size (KiB) for lcm.db
+    token_cache_size: int = 0                 # tokens.py lru_cache size
 
     @classmethod
     def from_env(cls) -> "LCMConfig":
