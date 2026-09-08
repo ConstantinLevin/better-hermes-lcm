@@ -141,6 +141,12 @@ _UNRECOVERABLE_TRUNCATION_RE = re.compile(
     re.IGNORECASE,
 )
 _HERMES_RESULTS_DIRNAME = "hermes-results"
+# fork: betterlcm — the host's CURRENT home for oversized tool results. Hermes writes them to
+# ``$HERMES_HOME/cache/spillover``, names that path in the marker, and deletes files there
+# after 24 hours. Recovery accepted only the older ``<tmp>/hermes-results`` directory, so on
+# this deployment the durable transcript kept the preview and the complete output was left to
+# host cleanup: unrecoverable loss on the default configuration (audit p06 I2).
+_HERMES_SPILLOVER_SUBDIR = ("cache", "spillover")
 _MAX_RECOVERED_PERSISTED_OUTPUT_BYTES = 64 * 1024 * 1024
 _SENSITIVE_PLACEHOLDER_PREFIX = "[LCM sensitive redaction:"
 _SENSITIVE_PATTERN_CATALOG: dict[str, re.Pattern[str]] = {
@@ -479,18 +485,44 @@ def _persisted_output_saved_path(text: str | None) -> str | None:
     return raw_path
 
 
-def _safe_temp_hermes_results_file(path: Path) -> Path | None:
+def _hermes_home_path(hermes_home: str | None = None) -> Path:
+    """fork: betterlcm — the host home this process is working against."""
+    candidate = str(hermes_home or "").strip() or os.environ.get("HERMES_HOME", "").strip()
+    return Path(candidate).expanduser() if candidate else Path.home() / ".hermes"
+
+
+def _allowed_persisted_output_dirs(hermes_home: str | None = None) -> list[Path]:
+    """Directories a persisted-output marker may legitimately point into.
+
+    fork: betterlcm — the host's spillover directory joins the older temp directory here.
+    Both are resolved and compared as whole paths, so the marker still cannot name an
+    arbitrary file (audit p06 I2).
+    """
+    dirs: list[Path] = []
+    for candidate in (
+        Path(tempfile.gettempdir()) / _HERMES_RESULTS_DIRNAME,
+        _hermes_home_path(hermes_home).joinpath(*_HERMES_SPILLOVER_SUBDIR),
+    ):
+        try:
+            dirs.append(candidate.resolve())
+        except OSError:  # pragma: no cover - unresolvable path is simply not allowed
+            continue
+    return dirs
+
+
+def _safe_temp_hermes_results_file(path: Path, hermes_home: str | None = None) -> Path | None:
     if not path.is_absolute() or path.name in {"", ".", ".."}:
         return None
     parent = path.parent
-    if parent.name != _HERMES_RESULTS_DIRNAME:
-        return None
     try:
-        expected_parent = (Path(tempfile.gettempdir()) / _HERMES_RESULTS_DIRNAME).resolve()
         parent_is_valid_dir = parent.exists() and parent.is_dir() and not parent.is_symlink()
-        if not parent_is_valid_dir or parent.resolve() != expected_parent:
+        if not parent_is_valid_dir:
             return None
-        return expected_parent / path.name
+        resolved_parent = parent.resolve()
+        for expected_parent in _allowed_persisted_output_dirs(hermes_home):
+            if resolved_parent == expected_parent:
+                return expected_parent / path.name
+        return None
     except OSError:
         return None
 
@@ -551,12 +583,16 @@ def _read_regular_file_no_symlink(path: Path) -> tuple[str, dict[str, int]] | No
                 pass
 
 
-def recover_hermes_persisted_output_with_file_stat(text: str | None) -> tuple[str, dict[str, int]] | None:
+def recover_hermes_persisted_output_with_file_stat(
+    text: str | None,
+    hermes_home: str | None = None,  # fork: betterlcm — which host home to trust (p06 I2)
+) -> tuple[str, dict[str, int]] | None:
     """Recover Hermes host `<persisted-output>` content when the backing file is safe.
 
     Recovery is intentionally conservative: the marker must include Hermes'
-    character count, the file path must be an absolute basename under a
-    `hermes-results` temp directory, the target must be a regular non-symlink
+    character count, the file path must be an absolute basename directly under one of the
+    host's persisted-output directories (the `hermes-results` temp directory or
+    `$HERMES_HOME/cache/spillover`), the target must be a regular non-symlink
     file, and the recovered character count must match the marker. If any check
     fails, callers should keep the marker/preview instead of claiming lossless
     recovery from an unsafe or stale file.
@@ -570,7 +606,7 @@ def recover_hermes_persisted_output_with_file_stat(text: str | None) -> tuple[st
     if raw_path is None:
         return None
     path = Path(raw_path)
-    safe_path = _safe_temp_hermes_results_file(path)
+    safe_path = _safe_temp_hermes_results_file(path, hermes_home)
     if safe_path is None:
         return None
     recovered_with_stat = _read_regular_file_no_symlink(safe_path)
@@ -585,8 +621,8 @@ def recover_hermes_persisted_output_with_file_stat(text: str | None) -> tuple[st
     return recovered, file_stat
 
 
-def recover_hermes_persisted_output(text: str | None) -> str | None:
-    recovered_with_stat = recover_hermes_persisted_output_with_file_stat(text)
+def recover_hermes_persisted_output(text: str | None, hermes_home: str | None = None) -> str | None:
+    recovered_with_stat = recover_hermes_persisted_output_with_file_stat(text, hermes_home)
     if recovered_with_stat is None:
         return None
     recovered, _file_stat = recovered_with_stat

@@ -1,0 +1,62 @@
+"""fork: betterlcm — Hermes writes oversized tool results to $HERMES_HOME/cache/spillover,
+names that path in the marker, and deletes the file after 24 hours. Recovery accepted only the
+older <tmp>/hermes-results directory, so on the deployed configuration LCM stored the preview
+and let the complete output expire: unrecoverable loss on the default setup (audit p06 I2)."""
+import hashlib
+import os
+
+import pytest
+
+from hermes_lcm import ingest_protection
+
+
+def _marker(path, content, preview_chars=120):
+    """The host's own <persisted-output> shape (tools/tool_result_storage.py)."""
+    preview = content[:preview_chars]
+    has_more = len(content) > preview_chars
+    return (
+        "<persisted-output>\n"
+        f"This tool result was too large ({len(content):,} characters, "
+        f"{len(content) / 1024:.1f} KB).\n"
+        f"Full output saved to: {path}\n"
+        "Use the read_file tool with offset and limit to access specific sections of this output.\n"
+        "Recovery: page through the saved file with read_file (offset/limit) or "
+        "process it with execute_code — do NOT re-request the same data from the "
+        "remote API; the full result is already on disk.\n\n"
+        f"Preview (first {len(preview)} chars):\n"
+        + preview + ("\n..." if has_more else "")
+        + "\n</persisted-output>"
+    )
+
+
+def _spillover(tmp_path):
+    directory = tmp_path / "hermes-home" / "cache" / "spillover"
+    directory.mkdir(parents=True)
+    os.chmod(tmp_path / "hermes-home", 0o700)
+    return directory
+
+
+def test_a_marker_pointing_at_the_host_spillover_directory_is_recovered(tmp_path):
+    directory = _spillover(tmp_path)
+    content = "DECISION: cancel the launch\n" + ("payload " * 5000)
+    target = directory / "tool_result_call7.txt"
+    target.write_text(content, encoding="utf-8")
+
+    marker = _marker(target, content)
+    recovered = ingest_protection.recover_hermes_persisted_output(
+        marker, str(tmp_path / "hermes-home")
+    )
+    assert recovered == content, "the complete host output was not recovered"
+
+
+def test_a_marker_pointing_anywhere_else_is_still_refused(tmp_path):
+    elsewhere = tmp_path / "somewhere"
+    elsewhere.mkdir()
+    content = "not a host directory " * 500
+    target = elsewhere / "leak.txt"
+    target.write_text(content, encoding="utf-8")
+
+    marker = _marker(target, content)
+    assert ingest_protection.recover_hermes_persisted_output(
+        marker, str(tmp_path / "hermes-home")
+    ) is None
