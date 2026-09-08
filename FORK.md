@@ -14,6 +14,22 @@ in `docs/fork-design.md`. Two rules govern every change:
 2. **Pure optimizations** — loss removal, throughput, index quality — apply at every window
    and must leave the 256k DAG identical to upstream's.
 
+### The four configured exceptions to the no-loss rule
+
+Every other path either keeps the content or marks what it removed. These four are operator
+policies that deliberately do not, so they are named here rather than discovered later
+(audit verify-4 #19). None is on by default except the auxiliary one.
+
+| exception | what is not recoverable | how to turn it off |
+|---|---|---|
+| `ignore_message_patterns` | a matching message is never stored; the active context keeps a hash placeholder | leave the setting empty (default) |
+| sensitive redaction (`sensitive_patterns_enabled`) | the redacted span is replaced before storage, and two different secrets can produce the same placeholder | leave it disabled (default) |
+| ignored / stateless / auxiliary sessions | the conversation is bounded but never stored at all | `ignore_session_patterns` / `stateless_session_patterns` empty; auxiliary (subagent) sessions are excluded by design |
+| trajectory protection | the protected payload is redacted in place before hashing | do not enable the trajectory subsystem |
+
+If an operator needs those sessions or spans archived, the fork's answer today is: do not use
+the exception. Preserving originals behind protection is a design decision, not a bug fix.
+
 ## How to upgrade from upstream (for the next maintainer)
 ```
 git fetch upstream

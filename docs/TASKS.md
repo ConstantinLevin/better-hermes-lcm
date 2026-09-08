@@ -69,6 +69,78 @@ the reproduction. Every row has a fork test that fails without the change.
 | p04 DG1 | Every `summary_nodes` read was `SELECT *`, decoded positionally. | One explicit projection, including the two FTS joins. |
 | p02 T04/T16 | Expansion returned an assistant turn's tool calls as empty content; `lcm_recent` returned a bare `[]` for an unscannable window. | Tool calls are paged into the expansion; `complete`/`incomplete_reason` on recent. |
 
+## Third pass — the four verification audits (commits `b832ea2`…`376b4e9`)
+
+Four Codex astra auditors re-ran against the second pass: **verify-1** checked every claimed
+fix, **verify-2** hunted regressions the pass introduced, **verify-3** asked whether the plugin
+is finished on "every defect and every clear, definite optimization", **verify-4** audited the
+whole plugin against the single no-unmarked-loss rule. Their reports are
+`docs/claw-comparison/v1.0.0-verify-*.md`. All four said "not finished"; what they found and
+what was done:
+
+**Regressions the second pass introduced (verify-2) — all fixed**
+
+| id | regression | fix |
+|---|---|---|
+| #1 | recovery used the engine's hermes_home on replay but not on ingest, so the two identities disagreed and a tool result dropped out of a leaf's sources | one home through every recovery call |
+| #2 | protecting the bypass receipt made the NEWEST message the next removal candidate | whole-message removal stops before the live request; character trimming shrinks older messages first; the receipt gives way to its compact form before the request does |
+| #5 | frontier recovery took the MAXIMUM source id as proof of coverage | only a proven contiguous covered prefix advances the frontier |
+| #6 | the daemon pool called CPython private APIs; Python 3.14 changed them, so every parallel leaf pass at 1M crashed | the fork's own bounded daemon pool (found by the end-to-end run, not the suite) |
+| #7 | the condensation cap counted groups, so the 256k anchor condensed only the first depth | the cap counts traversals of the depth loop, exactly upstream's single pass |
+| #9 | an expand hint containing a bracket made the assembled prefix look like the sender's text, and it was stored as raw | the trailer is recognised as the whole last line |
+| #10 | the index-shape gate rejected summaries that merely BEGIN with a refusal phrase | the phrase counts only when almost nothing follows it |
+| #12 | a full ordered page was reported as an incomplete scan | completeness distinguishes "the rows ran out" from "the cap stopped us" |
+| #13 | the leaf publication rebuilt its source set per source id | built once |
+| #14 | snippets ran an ignore-case regex per term over the whole text | matched on the original text without the per-term rescan |
+| #15 | an explicit date plus any relative expression was called ambiguous | only a relative expression that resolves to a DIFFERENT day conflicts |
+
+**No-unmarked-loss violations (verify-4) — fixed**
+
+| id | violation | fix |
+|---|---|---|
+| #3 | publication accepted a PARTIAL source mapping and advanced past the unmapped rows | every consumed row must map, or the leaf is refused |
+| #4 | a KeyboardInterrupt left publication and cleanup transactions open for a later commit | rollback protection covers BaseException, commit included |
+| #5 | a sanitised key could still displace another in one insertion order; duplicate JSON keys collapsed | the original keyspace is reserved first; duplicate-key arguments are cleaned as raw text |
+| #6 | typed text blocks dropped their outcome siblings; a block with both `text` and `content` lost one stream | both are kept, with the outcome fields |
+| #7 | removals inside tool arguments and self-closing injected tags were unmarked | a compact marker inside arguments; self-closing tags marked like any other |
+| #8 | a condensed parent lost its children's loss receipts | the parent inherits them |
+| #9 | the assembly omission receipt was the first thing dropped under budget pressure | it degrades to a one-line form, then to `last_assembly_omission_note` in status |
+| #10 | orphan tool results were dropped with a log line; the stub for a missing result claimed a summary covered it | orphans are named with their call id and head; the stub says the result is in the raw store |
+| #11 | a failed current-turn ingest was followed by a search reporting `complete: true` | `lcm_grep` reports the ingest failure and is incomplete |
+| #12 | the raw-message scan's candidate cap was invisible | `MessageStore.search` reports progress; grep reports it as a bounded scan |
+| #13 | a closed/unavailable summary database read as an empty window | `lcm_recent` reports it as incomplete |
+| #14 | a truncated index block named a continuation that returned subtree metadata | `lcm_describe(index_offset=…)` pages the stored index block |
+| #15 | an unreadable source row vanished from an expansion | `missing_source_store_ids` and `complete: false` |
+| #16 | a node with more parents than the reverse-edge cap hid its retained parent | reachability asks for the current session's parents first |
+| #17 | receipt counts were computed before later trimming, and compaction was not idempotent | counts are restated from the final result; both receipt forms parse |
+| #18 | recovered spillover bytes were discarded when the durable copy failed | the bytes are stored inline instead |
+
+**Also from verify-1/verify-3**: `add_node_with_meta`'s commit is inside its rollback
+protection; the DAG LIKE fallback orders by the clock the ranking uses; `append_batch` never
+loses a message to a short estimate list; every exact-id read is batched under SQLite's
+variable ceiling; `lcm_recent`'s work-cap signal is no longer swallowed by the helper's own
+handler; tool-call expansion is charged to the budget and continues from a `tool_calls_offset`;
+window_scaling indexes its immutable metadata once; the test harness keeps its own controls.
+
+### Still open after the third pass
+
+- **verify-4 #2 — an edited already-ingested position loses the correction.** A cursor-side
+  heuristic was tried and REVERTED: the active context legitimately reshapes after a
+  compaction, so "this position differs from last turn" produced duplicate rows. The fix
+  belongs in reconciliation (occurrence identity and revision hashes), i.e. the message
+  envelope task below, and duplicating rows would be its own corruption.
+- **verify-4 #1 — the raw store is still a projection.** `name`, `reasoning_content` and other
+  host envelope fields are not persisted. This is the message-envelope task.
+- **verify-4 #19 — filters, redaction and bypassed sessions are deliberate exceptions.** An
+  ignored message becomes a hash placeholder with no stored row; a stateless session stores
+  nothing; sensitive redaction is irreversible. These are operator policies, not defects, but
+  they ARE exceptions to the no-loss rule and are now written down as such in FORK.md.
+- **verify-4 #20–#24 and verify-3 #14–#28** — the opt-in subsystems (rollups, assertions,
+  adaptive retrieval, evidence packs, trajectory, embeddings, query views) certify incomplete
+  or stale evidence in several places. All are default-off; they are the next block of work.
+- **verify-3 #4 / p05 RS02** — reset and rebind are still unfenced against in-flight
+  compaction; it needs a session generation carried through publication.
+
 ### Deliberately not changed (and why)
 
 - **p05 MA01** (a genuine "Acknowledged." is skipped as synthetic noise): the message is stored
