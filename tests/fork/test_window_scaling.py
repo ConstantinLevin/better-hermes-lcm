@@ -1,16 +1,8 @@
 """Step 1 — the weighting curve. At 256k every value is upstream's; at 1M the design's."""
-import os
-import sys
-
 import pytest
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
-if ROOT not in sys.path:
-    sys.path.insert(0, ROOT)
-
-import window_scaling as ws  # noqa: E402
-from config import LCMConfig  # noqa: E402
+from hermes_lcm import window_scaling as ws
+from hermes_lcm.config import LCMConfig
 
 K = 1024
 W256, W1M = 262_144, 1_000_000

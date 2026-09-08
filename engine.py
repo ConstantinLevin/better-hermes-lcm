@@ -128,6 +128,7 @@ from .reconcile import ReconcileMixin, _PRESERVED_OBJECTIVE_CONTEXT_PREFIX
 from .compaction import CompactionMixin
 from .reset_state import ResetStateMixin
 from .bypass import BypassMixin
+from .window_scaled_mixin import WindowScaledSettingsMixin  # fork: betterlcm
 from .lifecycle_state import LifecycleStateStore
 from .message_content import (
     normalize_content_value,
@@ -369,7 +370,7 @@ def _normalize_total_compactions(value: Any) -> int:
     return value
 
 
-class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessionMixin, PlaceholderLedgerMixin, BypassMixin, ContextEngine):
+class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessionMixin, PlaceholderLedgerMixin, BypassMixin, WindowScaledSettingsMixin, ContextEngine):
     """Lossless Context Management engine.
 
     Automatic LCM compaction is routine background maintenance. Hosts that
@@ -489,6 +490,7 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             else "manual_or_default"
         )
         self._context_threshold_autoraised: dict[str, float] | None = None
+        self._init_window_scaled_settings()  # fork: betterlcm (upstream values until a window is known)
         self.last_prompt_tokens = 0
         self.last_completion_tokens = 0
         self.last_total_tokens = 0
@@ -948,6 +950,7 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                 self._runtime_context_threshold(model=model, provider=provider)
             )
             self.threshold_percent = self.context_threshold
+            self._resolve_window_scaled_settings()  # fork: betterlcm (reset to upstream values)
             return True
         self.raw_context_length = parsed_context_length
         effective_context_length, cap, reason = self._effective_context_length(
@@ -969,6 +972,7 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         self.threshold_tokens = self._effective_threshold_tokens(
             context_threshold_tokens
         )
+        self._resolve_window_scaled_settings()  # fork: betterlcm (curve for the capped window)
         return True
 
     def _session_metadata_matches_active_runtime(

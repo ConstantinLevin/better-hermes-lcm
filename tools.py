@@ -6522,6 +6522,7 @@ def lcm_status(args: Dict[str, Any], **kwargs) -> str:
             "skipped": int(getattr(engine, "_proactive_recall_skipped_count", 0) or 0),
             "timeout": int(getattr(engine, "_proactive_recall_timeout_count", 0) or 0),
         },
+        "window_scaling": engine.window_scaling_status(),  # fork: betterlcm
         "config_sources": config_sources,
         "config_source_warnings": config_source_warnings,
         "ignored_config_yaml_lcm_keys": ignored_config_yaml_lcm_keys,

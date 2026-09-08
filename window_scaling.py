@@ -166,6 +166,14 @@ def explicit_override(config: Any, anchor: Anchor,
     key = _env_key_for(anchor.field)
     if key and key in environ:
         return True, "env"
+    # A config built directly (LCMConfig(context_threshold=0.9), presets, tests) carries no
+    # tracked source. If its value differs from upstream's default it was set on purpose.
+    if anchor.low is not THRESHOLD and not anchor.low_is_fraction and value is not None:
+        try:
+            if anchor.cast(value) != anchor.cast(anchor.low):
+                return True, "manual"
+        except (TypeError, ValueError):
+            pass
     return False, "default"
 
 

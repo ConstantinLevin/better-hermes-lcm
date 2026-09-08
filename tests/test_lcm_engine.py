@@ -405,7 +405,7 @@ def test_update_model_updates_runtime_metadata_and_context_window(engine):
     assert engine.provider == "opencode-go"
     assert engine.api_mode == "anthropic_messages"
     assert engine.context_length == 1_000_000
-    assert engine.threshold_tokens == int(1_000_000 * engine._config.context_threshold)
+    assert engine.threshold_tokens == int(1_000_000 * engine.context_threshold)  # fork: resolved (curved) threshold
 
 
 def test_codex_gpt55_uses_route_cap_and_hermes_autoraise_threshold(tmp_path):
@@ -694,7 +694,7 @@ def test_session_start_does_not_overwrite_update_model_context_length_with_stale
 
     assert engine.model == "deepseek-v4-flash"
     assert engine.context_length == 1_000_000
-    assert engine.threshold_tokens == int(1_000_000 * engine._config.context_threshold)
+    assert engine.threshold_tokens == int(1_000_000 * engine.context_threshold)  # fork: resolved (curved) threshold
 
 
 def test_session_start_accepts_raw_context_length_for_capped_codex_runtime(tmp_path, caplog):
@@ -819,7 +819,7 @@ def test_session_start_does_not_overwrite_update_model_with_stale_runtime_identi
     assert engine.model == "deepseek-v4-flash"
     assert engine.provider == "opencode-go"
     assert engine.context_length == 1_000_000
-    assert engine.threshold_tokens == int(1_000_000 * engine._config.context_threshold)
+    assert engine.threshold_tokens == int(1_000_000 * engine.context_threshold)  # fork: resolved (curved) threshold
 
 
 def test_session_start_does_not_overwrite_update_model_identity_when_context_length_matches(engine):
@@ -969,7 +969,7 @@ def test_missing_session_start_context_length_does_not_clear_authoritative_updat
     assert engine.model == "resolver-window-model"
     assert engine.provider == "resolver-provider"
     assert engine.context_length == 1_000_000
-    assert engine.threshold_tokens == int(1_000_000 * engine._config.context_threshold)
+    assert engine.threshold_tokens == int(1_000_000 * engine.context_threshold)  # fork: resolved (curved) threshold
     assert engine._context_length_source == "update_model"
 
 
@@ -1001,7 +1001,7 @@ def test_missing_session_start_context_length_preserves_update_model_window_with
     assert engine.provider == "resolver-provider"
     assert engine.api_mode == "chat_completions"
     assert engine.context_length == 1_000_000
-    assert engine.threshold_tokens == int(1_000_000 * engine._config.context_threshold)
+    assert engine.threshold_tokens == int(1_000_000 * engine.context_threshold)  # fork: resolved (curved) threshold
     assert engine._context_length_source == "update_model"
 
 
