@@ -70,6 +70,7 @@ class WindowScaledSettingsMixin:
         self._window_scaled = dict(resolved)
         self._apply_curved_threshold(resolved)
         self._retune_summary_guards()
+        self._apply_runtime_caches()
 
     # -- lookup ----------------------------------------------------------------------------
 
@@ -118,6 +119,27 @@ class WindowScaledSettingsMixin:
             self.threshold_tokens = self._effective_threshold_tokens(
                 int(window * self.context_threshold)
             )
+
+    def _apply_runtime_caches(self) -> None:
+        """SQLite page cache (KiB) on the store/DAG connections and the token LRU size."""
+        cache_kib = int(self._effective("sqlite_cache_kib") or 0)
+        if cache_kib > 0:
+            for owner in ("_store", "_dag"):
+                conn = getattr(getattr(self, owner, None), "connection", None)
+                if conn is None:
+                    continue
+                try:
+                    conn.execute(f"PRAGMA cache_size=-{cache_kib}")
+                except Exception:  # pragma: no cover - a closed connection is not an error here
+                    pass
+        try:
+            from .tokens import set_token_cache_size
+        except ImportError:  # pragma: no cover
+            from tokens import set_token_cache_size  # type: ignore
+        try:
+            set_token_cache_size(int(self._effective("token_cache_size") or 0))
+        except Exception:  # pragma: no cover
+            pass
 
     def _retune_summary_guards(self) -> None:
         """Push the curved limits into the guard objects built in ``__init__``."""

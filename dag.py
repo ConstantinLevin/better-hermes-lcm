@@ -422,6 +422,25 @@ class SummaryDAG:
             self._conn.commit()
         return moved
 
+    def get_frontier_token_total(self, session_id: str) -> int:
+        """fork: betterlcm — SUM(token_count) over the session's uncondensed nodes, in SQL.
+
+        Same set as ``get_uncondensed_at_depth`` unioned over depths; avoids decoding every
+        node row just to add up one column (``_summary_frontier_tokens`` is polled per pass).
+        """
+        with self._db_lock:
+            row = self._conn.execute(
+                """SELECT COALESCE(SUM(n.token_count), 0) FROM summary_nodes n
+                   WHERE n.session_id = ?
+                   AND n.node_id NOT IN (
+                       SELECT json_each.value FROM summary_nodes p,
+                       json_each(p.source_ids)
+                       WHERE p.session_id = ? AND p.source_type = 'nodes'
+                   )""",
+                (session_id, session_id),
+            ).fetchone()
+        return int(row[0] or 0) if row else 0
+
     def get_session_depths(self, session_id: str) -> List[int]:
         """fork: betterlcm — the distinct depths present for a session, ascending."""
         with self._db_lock:

@@ -459,3 +459,21 @@ sweep's fallback pair-condensation on the pressure ratio; leave the fork checkou
 - Depth labels past 2 keep upstream's `Depth-<n>` (same regex).
 - `lcm_expand` default page = `effective_expand_page_tokens` (4000 at 256k → 32000 at 1M);
   `hydrate=true` returns externalized tool outputs inline in node mode.
+### Step 8 — non-sweep path
+- Chunk boundaries are tool-group aligned already here (plan listed it under step 10) because
+  40k chunks at 1M appear with this step; the pre-slicer of step 10 reuses
+  `_select_oldest_leaf_chunk_aligned`.
+- The wall clock applies to both paths from the same `leaf_deadline`; at 256k the non-sweep
+  path runs exactly one pass (cap 1) so the clock never changes upstream behaviour there.
+- Sweep pass budget moved to `config.sweep_max_passes` (12); its time budget is the curved
+  `leaf_loop_max_seconds` (120 s at 256k = upstream's constant). README's "120 seconds
+  between calls" is wrong upstream: it is the total budget for one sweep.
+### Step 9 / 9a — condensation and hot paths
+- Selection policy cannot be interpolated, so it follows the trigger: while the budget term is
+  0 (t = 0) the upstream depth loop runs verbatim (256k DAG identical); once the budget is
+  positive the regime is "oldest frontier material first, one fanin group at a time, until
+  the frontier is back under budget", bounded by the compress() clock. The switch is driven
+  by a continuously weighted value, and at W just above 256k the budget is so small that the
+  gate is practically always open.
+- `journal_size_limit` stays upstream's 64 MiB (not a bottleneck); `cache_size` and the
+  token LRU are weighted.

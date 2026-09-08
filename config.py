@@ -425,6 +425,12 @@ ENV_FIELD_SPECS: tuple[_EnvFieldSpec, ...] = (
     _EnvFieldSpec("token_cache_size", "LCM_TOKEN_CACHE_SIZE", int),
     _EnvFieldSpec("summary_failure_cooldown_seconds", "LCM_SUMMARY_FAILURE_COOLDOWN_SECONDS", float),
     _EnvFieldSpec("assembly_max_nodes_per_depth", "LCM_ASSEMBLY_MAX_NODES_PER_DEPTH", int),
+    _EnvFieldSpec("sweep_max_passes", "LCM_SWEEP_MAX_PASSES", int),
+    _EnvFieldSpec("leaf_summary_ratio", "LCM_LEAF_SUMMARY_RATIO", float),
+    _EnvFieldSpec("leaf_summary_min_tokens", "LCM_LEAF_SUMMARY_MIN_TOKENS", int),
+    _EnvFieldSpec("leaf_summary_max_tokens", "LCM_LEAF_SUMMARY_MAX_TOKENS", int),
+    _EnvFieldSpec("condensation_ratio", "LCM_CONDENSATION_RATIO", float),
+    _EnvFieldSpec("condensation_min_tokens", "LCM_CONDENSATION_MIN_TOKENS", int),
 )
 
 _PARSER_BY_TYPE = {
@@ -816,6 +822,16 @@ class LCMConfig:
     # Assembly renders every uncondensed node per depth up to this cap (upstream: 100,
     # silently). A cap hit is marked in the prefix (marked_loss.py).
     assembly_max_nodes_per_depth: int = 100_000
+    # Threshold full sweep (flag-on path): pass budget shared by leaf + condensation work
+    # (upstream: module constant 12). Its time budget is the curved leaf_loop_max_seconds
+    # (120 s at 256k, exactly upstream's constant).
+    sweep_max_passes: int = 12
+    # Summary size rules (upstream literals, now configurable; defaults unchanged).
+    leaf_summary_ratio: float = 0.20          # leaf budget = clamp(ratio*source, min, max)
+    leaf_summary_min_tokens: int = 2000
+    leaf_summary_max_tokens: int = 12000
+    condensation_ratio: float = 0.40          # condensation budget = max(min, ratio*source)
+    condensation_min_tokens: int = 1000
 
     @classmethod
     def from_env(cls) -> "LCMConfig":

@@ -24,9 +24,12 @@ from .message_content import text_content_for_pattern_matching
 from .sanitize import _contains_sensitive_redaction
 from .tokens import count_message_tokens, count_messages_tokens, count_tokens
 from .errors import SummaryUnavailableError  # fork: betterlcm
+from .message_analysis import _tool_call_id  # fork: betterlcm
 
 logger = logging.getLogger(__name__)
 
+# fork: betterlcm — kept as the documented upstream defaults; the loop reads
+# ``config.sweep_max_passes`` and the curved ``effective_leaf_loop_max_seconds``.
 _THRESHOLD_FULL_SWEEP_MAX_PASSES = 12
 _THRESHOLD_FULL_SWEEP_MAX_SECONDS = 120.0
 
@@ -367,6 +370,61 @@ class CompactionMixin:
             working = min(ceiling, working * 2)
         return working
 
+    def _non_sweep_drain_stop_tokens(self) -> int:
+        """fork: betterlcm — where the non-sweep loop stops draining (wire units).
+
+        The curve's low anchor is the resolved context threshold (upstream stopped the
+        moment it was under it); at 1M it is 0.30*W.
+        """
+        window = int(self.context_length or 0)
+        if window <= 0:
+            return int(self.threshold_tokens or 0)
+        fraction = float(self.effective_drain_stop_fraction or 0.0)
+        if fraction <= 0:
+            return int(self.threshold_tokens or 0)
+        return int(window * fraction)
+
+    def _non_sweep_should_continue(
+        self,
+        estimated_active_tokens: int,
+        *,
+        force_overflow: bool,
+        deferred_maintenance_active: bool,
+    ) -> bool:
+        """fork: betterlcm — after a non-dynamic pass, run another only while over the stop."""
+        if force_overflow or deferred_maintenance_active:
+            return False
+        stop = self._non_sweep_drain_stop_tokens()
+        if stop <= 0:
+            return False
+        return int(estimated_active_tokens or 0) > stop
+
+    def _select_oldest_leaf_chunk_aligned(
+        self,
+        candidate_raw: List[Dict[str, Any]],
+        working_leaf_chunk_tokens: int,
+    ) -> List[Dict[str, Any]]:
+        """fork: betterlcm — token-greedy oldest chunk, extended so it never ends between an
+        assistant tool call and the tool results that answer it (mirrors fresh_tail.py)."""
+        selected = self._select_oldest_leaf_chunk(candidate_raw, working_leaf_chunk_tokens)
+        if not selected or len(selected) >= len(candidate_raw):
+            return selected
+        end = len(selected)
+        last = selected[-1]
+        if last.get("role") == "assistant" and last.get("tool_calls"):
+            call_ids = {_tool_call_id(tc) for tc in (last.get("tool_calls") or [])}
+            while end < len(candidate_raw):
+                following = candidate_raw[end]
+                if following.get("role") == "tool" and str(following.get("tool_call_id") or "").strip() in call_ids:
+                    end += 1
+                    continue
+                break
+        elif last.get("role") == "tool":
+            # ends inside a result run: take the rest of that run
+            while end < len(candidate_raw) and candidate_raw[end].get("role") == "tool":
+                end += 1
+        return candidate_raw[:end]
+
     def _select_oldest_leaf_chunk(
         self,
         candidate_raw: List[Dict[str, Any]],
@@ -507,7 +565,13 @@ class CompactionMixin:
             and self.threshold_tokens > 0
             and estimated_active_tokens >= self.threshold_tokens
         )
-        sweep_deadline = time.monotonic() + _THRESHOLD_FULL_SWEEP_MAX_SECONDS
+        # fork: betterlcm — one wall budget for the whole leaf loop on BOTH paths
+        # (120 s at 256k = upstream's sweep constant; 200 s at 1M). Upstream bounded only
+        # the sweep; the non-sweep path ran a single pass so it needed no clock.
+        leaf_loop_max_seconds = float(self.effective_leaf_loop_max_seconds or _THRESHOLD_FULL_SWEEP_MAX_SECONDS)
+        sweep_max_passes = max(1, int(getattr(self._config, "sweep_max_passes", 0) or _THRESHOLD_FULL_SWEEP_MAX_PASSES))
+        sweep_deadline = time.monotonic() + leaf_loop_max_seconds
+        leaf_deadline = sweep_deadline
         # fork: curved. Explicit summary_prefix_target_tokens wins; otherwise the curve, whose low
         # anchor is leaf_chunk_tokens exactly like upstream's fallback.
         sweep_target_tokens = max(1, int(self.effective_sweep_target_tokens))
@@ -557,10 +621,13 @@ class CompactionMixin:
             critical_budget_pressure=critical_budget_pressure,
             working_messages=working_messages,
         )
-        base_max_leaf_passes = 4 if self._config.dynamic_leaf_chunk_enabled else 1
+        # fork: betterlcm — non-dynamic pass cap is curved (1 at 256k = upstream; 64 at 1M)
+        base_max_leaf_passes = (
+            4 if self._config.dynamic_leaf_chunk_enabled else max(1, int(self.effective_leaf_pass_cap or 1))
+        )
         max_leaf_passes = base_max_leaf_passes
         if threshold_full_sweep_active:
-            max_leaf_passes = _THRESHOLD_FULL_SWEEP_MAX_PASSES
+            max_leaf_passes = sweep_max_passes
         if deferred_maintenance_active:
             max_leaf_passes = max(1, self._config.deferred_maintenance_max_passes)
 
@@ -573,8 +640,11 @@ class CompactionMixin:
         preexisting_dependent_reply_records = self._load_generated_ignored_dependent_reply_records()
 
         while leaf_passes < max_leaf_passes:
-            if threshold_full_sweep_active and time.monotonic() >= sweep_deadline:
-                sweep_stop_reason = "time_budget_exhausted"
+            if time.monotonic() >= leaf_deadline:
+                if threshold_full_sweep_active:
+                    sweep_stop_reason = "time_budget_exhausted"
+                else:
+                    noop_reason = "leaf loop time budget exhausted"  # fork: non-sweep clock
                 break
             fresh_tail_start = self._fresh_tail_start(pressure_messages)
 
@@ -620,6 +690,8 @@ class CompactionMixin:
                 kept_pressure: list[Dict[str, Any]] = []
                 dropped_ignored_backlog = False
                 drop_dependent_reply = False
+                # fork: betterlcm — one metadata read per pass, not one per message
+                generated_placeholder_hashes = self._load_generated_ignored_placeholder_hashes()
                 for working_msg, pressure_msg in compactable_pairs:
                     role = str(working_msg.get("role") or "")
                     content_text = text_content_for_pattern_matching(working_msg.get("content")) or ""
@@ -631,7 +703,7 @@ class CompactionMixin:
                     generated_volatile_placeholder = (
                         self._is_volatile_ignored_quarantine_placeholder(working_msg, content_text)
                         and volatile_digest is not None
-                        and volatile_digest in self._load_generated_ignored_placeholder_hashes()
+                        and volatile_digest in generated_placeholder_hashes
                     )
                     if (
                         self._matches_ignore_message_patterns(working_msg)
@@ -735,7 +807,13 @@ class CompactionMixin:
                             "raw backlog outside fresh tail is below leaf chunk threshold"
                         )
                         break
-                to_compact = candidate_raw
+                # fork: betterlcm — curved chunk: the whole backlog at 256k (upstream), 0.04*W
+                # at 1M; chunk boundaries never split an assistant/tool group.
+                curved_chunk_tokens = int(self.effective_leaf_chunk_tokens or 0)
+                if force_overflow or curved_chunk_tokens <= 0 or raw_tokens_outside_tail <= curved_chunk_tokens:
+                    to_compact = candidate_raw
+                else:
+                    to_compact = self._select_oldest_leaf_chunk_aligned(candidate_raw, curved_chunk_tokens)
 
             if not to_compact:
                 noop_reason = "no eligible leaf chunk selected"
@@ -876,7 +954,19 @@ class CompactionMixin:
                 continue
 
             if not self._config.dynamic_leaf_chunk_enabled:
-                break
+                # fork: betterlcm — keep draining toward the curved stop (at 256k the pass
+                # cap is 1, so this is upstream's single pass exactly).
+                if not self._non_sweep_should_continue(
+                    estimated_active_tokens,
+                    force_overflow=force_overflow,
+                    deferred_maintenance_active=deferred_maintenance_active,
+                ):
+                    break
+                leading_anchor_count = self._leading_anchor_count(working_messages)
+                remaining_fresh_tail_start = self._fresh_tail_start(pressure_messages)
+                if not working_messages[leading_anchor_count:remaining_fresh_tail_start]:
+                    break
+                continue
 
             if not force_overflow:
                 if (not deferred_maintenance_active) and self.threshold_tokens > 0 and estimated_active_tokens < self.threshold_tokens:
@@ -988,7 +1078,7 @@ class CompactionMixin:
             if sweep_raw_drained:
                 remaining_passes = max(
                     0,
-                    _THRESHOLD_FULL_SWEEP_MAX_PASSES - leaf_passes,
+                    sweep_max_passes - leaf_passes,
                 )
                 condensation_passes, sweep_stop_reason = (
                     self._run_threshold_sweep_condensation(
@@ -1004,6 +1094,7 @@ class CompactionMixin:
                 leaf_compacted_this_turn=True,
                 force_overflow=force_overflow,
                 critical_budget_pressure=critical_budget_pressure,
+                deadline=leaf_deadline,  # fork: budget-regime condensation shares the clock
             )
 
         # Step 7: Assemble new active context

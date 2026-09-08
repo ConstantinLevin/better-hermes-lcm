@@ -123,13 +123,28 @@ def _count_tokens_core(text) -> int:
     return len(text) // _CHARS_PER_TOKEN + 1
 
 
-@lru_cache(maxsize=2048)
-def _count_tokens_cached(text: str, generation: int) -> int:
+def _count_tokens_keyed(text: str, generation: int) -> int:
     # tiktoken encoding is the dominant per-turn cost: assembly and preflight
     # re-count the same content many times per turn. The counting function is
     # stable within one encoder generation (see _encoder_generation), so a
     # (content, generation) key is stable.
     return _count_tokens_core(text)
+
+
+DEFAULT_TOKEN_CACHE_SIZE = 2048
+_count_tokens_cached = lru_cache(maxsize=DEFAULT_TOKEN_CACHE_SIZE)(_count_tokens_keyed)
+
+
+def set_token_cache_size(maxsize: int) -> None:
+    """fork: betterlcm — resize the memo (window-weighted: 2048 at 256k, 8192 at 1M).
+
+    Rebuilds the LRU only when the size changes; the cache is emptied on resize.
+    """
+    global _count_tokens_cached
+    size = max(64, int(maxsize or DEFAULT_TOKEN_CACHE_SIZE))
+    if _count_tokens_cached.cache_info().maxsize == size:
+        return
+    _count_tokens_cached = lru_cache(maxsize=size)(_count_tokens_keyed)
 
 
 # Cap what the LRU may retain by reference. Very large strings are the ones

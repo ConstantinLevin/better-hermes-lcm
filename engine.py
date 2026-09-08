@@ -1700,8 +1700,12 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                 for message in attempt_chunk
                 if id(message) in self._current_compress_store_ids_by_message_id
             ))
-            token_budget = max(2000, int(source_tokens * 0.20))
-            token_budget = min(token_budget, 12000)
+            # fork: betterlcm — upstream's literals (2000 / 0.20 / 12000) now come from config
+            token_budget = max(
+                int(self._config.leaf_summary_min_tokens),
+                int(source_tokens * float(self._config.leaf_summary_ratio)),
+            )
+            token_budget = min(token_budget, int(self._config.leaf_summary_max_tokens))
 
             try:
                 timeout_seconds = self.effective_summary_timeout_ms / 1000  # fork: curved
@@ -5635,6 +5639,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         leaf_compacted_this_turn: bool = False,
         force_overflow: bool = False,
         critical_budget_pressure: bool = False,
+        deadline: Optional[float] = None,  # fork: betterlcm (budget regime only)
     ) -> None:
         """Check if any depth level has enough nodes for condensation."""
         self._last_condensation_suppressed_reason = ""
@@ -5642,6 +5647,23 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         max_depth = self.effective_incremental_max_depth  # fork: curved
         if max_depth == 0:
             return  # condensation disabled
+
+        # fork: betterlcm — interpolated trigger: count >= fanin AND frontier > t*0.20*W.
+        # The budget term is 0 at 256k (upstream's count rule below runs verbatim); once it
+        # is positive the pile is left alone until it exceeds the budget, then the OLDEST
+        # frontier material is condensed first, one group at a time, until back under.
+        frontier_budget = int(self.effective_condense_budget_tokens or 0)
+        if frontier_budget > 0:
+            self._maybe_condense_under_budget(
+                frontier_budget,
+                max_depth=max_depth,
+                focus_topic=focus_topic,
+                leaf_compacted_this_turn=leaf_compacted_this_turn,
+                force_overflow=force_overflow,
+                critical_budget_pressure=critical_budget_pressure,
+                deadline=deadline,
+            )
+            return
 
         # When max_depth is -1 (unlimited), derive the upper bound from
         # the deepest existing node + 1, so condensation can always
@@ -5693,6 +5715,81 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         if not condensed_any and leaf_compacted_this_turn and self._config.cache_friendly_condensation_enabled:
             self._last_condensation_suppressed_reason = suppression_reason
 
+    def _select_oldest_condensation_group(self, fanin: int, max_depth: int) -> List[SummaryNode]:
+        """fork: betterlcm — the fanin oldest same-depth frontier nodes around the oldest
+        frontier node (by ``earliest_at``, else ``created_at``), skipping depths at the cap."""
+        frontier = self._summary_frontier_nodes()
+        if not frontier:
+            return []
+
+        def age(node: SummaryNode) -> float:
+            return float(node.earliest_at if node.earliest_at is not None else node.created_at or 0.0)
+
+        by_depth: dict[int, list[SummaryNode]] = {}
+        for node in frontier:
+            by_depth.setdefault(node.depth, []).append(node)
+        for depth in by_depth:
+            by_depth[depth].sort(key=age)
+        for node in sorted(frontier, key=age):
+            if max_depth >= 0 and node.depth >= max_depth:
+                continue
+            same_depth = by_depth[node.depth]
+            if len(same_depth) >= fanin:
+                return same_depth[:fanin]
+        return []
+
+    def _maybe_condense_under_budget(
+        self,
+        frontier_budget: int,
+        *,
+        max_depth: int,
+        focus_topic: Optional[str],
+        leaf_compacted_this_turn: bool,
+        force_overflow: bool,
+        critical_budget_pressure: bool,
+        deadline: Optional[float],
+    ) -> None:
+        """fork: betterlcm — condense oldest-first while the frontier exceeds its budget."""
+        fanin = max(1, self._config.condensation_fanin)
+        frontier_tokens = self._summary_frontier_tokens()
+        if frontier_tokens <= frontier_budget:
+            self._last_condensation_suppressed_reason = "frontier_within_budget"
+            return
+        condensed_any = False
+        for _ in range(256):  # hard bound; the deadline and the budget stop it long before
+            if deadline is not None and time.monotonic() >= deadline:
+                self._last_condensation_suppressed_reason = "time_budget_exhausted"
+                break
+            group = self._select_oldest_condensation_group(fanin, max_depth)
+            if not group:
+                if not condensed_any:
+                    self._last_condensation_suppressed_reason = "no_same_depth_condensation_group"
+                break
+            allow, reason = self._should_allow_follow_on_condensation(
+                uncondensed_count=len(group),
+                leaf_compacted_this_turn=leaf_compacted_this_turn,
+                force_overflow=force_overflow,
+                critical_budget_pressure=critical_budget_pressure,
+            )
+            if not allow:
+                self._last_condensation_suppressed_reason = reason
+                break
+            depth = group[0].depth
+            source_tokens, summary_tokens, level = self._condense_summary_nodes(
+                group,
+                focus_topic=focus_topic,
+                deadline=deadline,
+            )
+            condensed_any = True
+            frontier_tokens = max(0, frontier_tokens - source_tokens + summary_tokens)
+            logger.info(
+                "LCM condensation (budget %d): d%d × %d → d%d (L%d, %d→%d tokens, frontier now %d)",
+                frontier_budget, depth, len(group), depth + 1, level,
+                source_tokens, summary_tokens, frontier_tokens,
+            )
+            if frontier_tokens <= frontier_budget:
+                break
+
     def _condense_summary_nodes(
         self,
         nodes: List[SummaryNode],
@@ -5708,7 +5805,10 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
             raise ValueError("condensation requires same-depth summary nodes")
         combined_text = "\n\n---\n\n".join(node.summary for node in nodes)
         source_tokens = sum(node.token_count for node in nodes)
-        token_budget = max(1000, int(source_tokens * 0.40))
+        token_budget = max(  # fork: betterlcm — upstream's literals (1000 / 0.40) from config
+            int(self._config.condensation_min_tokens),
+            int(source_tokens * float(self._config.condensation_ratio)),
+        )
         timeout_seconds = self.effective_summary_timeout_ms / 1000  # fork: curved
         if deadline is not None:
             remaining_seconds = deadline - time.monotonic()
@@ -5769,6 +5869,10 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         return [node for node in all_nodes if node.node_id not in referenced]
 
     def _summary_frontier_tokens(self) -> int:
+        # fork: betterlcm — SQL projection (identical to summing the decoded frontier)
+        projected = getattr(self._dag, "get_frontier_token_total", None)
+        if projected is not None:
+            return int(projected(self._session_id))
         return sum(node.token_count for node in self._summary_frontier_nodes())
 
     def _select_threshold_sweep_condensation_group(self) -> List[SummaryNode]:
