@@ -291,6 +291,8 @@ class RetrievalRound:
     tool_provenance: dict[str, Any] = field(default_factory=dict)
     tool_metrics: dict[str, Any] = field(default_factory=dict)
     result_truncated: bool = False
+    # fork: betterlcm — why the round was incomplete, when the TOOL said so (verify-4 #21)
+    incomplete_reason: str = ""
 
     def public_dict(self) -> dict[str, Any]:
         return {
@@ -306,6 +308,7 @@ class RetrievalRound:
             "tool_provenance": self.tool_provenance,
             "tool_metrics": self.tool_metrics,
             "result_truncated": self.result_truncated,
+            **({"incomplete_reason": self.incomplete_reason} if self.incomplete_reason else {}),
         }
 
 
@@ -1079,7 +1082,24 @@ class AdaptiveRetrievalRegistry:
             latency_ms = round((time.perf_counter() - started) * 1_000.0, 3)
 
             new_items: list[ExactEvidence] = []
-            result_truncated = False
+            # fork: betterlcm — the TOOL's own incompleteness counts as truncation of this
+            # round. A search that returned complete:false, bounded_scans or has_more became an
+            # adaptive round with result_truncated=false and no continuation lead, so the round
+            # read as an exhaustive look at the archive (verify-4 #21).
+            result_truncated = bool(
+                payload.get("complete") is False
+                or payload.get("has_more") is True
+                or payload.get("bounded_scans")
+                or payload.get("search_failures")
+                or payload.get("truncated") is True
+            ) if isinstance(payload, Mapping) else False
+            upstream_incomplete_reason = ""
+            if isinstance(payload, Mapping) and result_truncated:
+                upstream_incomplete_reason = str(
+                    payload.get("search_note")
+                    or payload.get("incomplete_reason")
+                    or "the retrieval tool reported an incomplete result"
+                )[:300]
             for candidate in extracted:
                 if candidate.citation in state.candidates:
                     continue
@@ -1140,6 +1160,7 @@ class AdaptiveRetrievalRegistry:
                     tool_provenance=tool_provenance,
                     tool_metrics=tool_metrics,
                     result_truncated=result_truncated,
+                    incomplete_reason=upstream_incomplete_reason,
                 )
             )
             state.updated_at = self._now()
