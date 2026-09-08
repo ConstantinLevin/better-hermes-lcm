@@ -25,6 +25,30 @@ from .db_bootstrap import (
 )
 from .sqlite_util import _is_sqlite_locked_error
 
+@contextmanager
+def _sqlite_savepoint_if_possible(conn: sqlite3.Connection):
+    """fork: betterlcm — read a rollup and its lineage inside one consistent snapshot.
+
+    A deferred read transaction is enough: SQLite gives every statement in it the same view.
+    If the connection is already in a transaction (the caller owns one) this is a no-op.
+    """
+    if conn.in_transaction:
+        yield
+        return
+    try:
+        conn.execute("BEGIN DEFERRED")
+    except sqlite3.Error:  # pragma: no cover - another transaction started first
+        yield
+        return
+    try:
+        yield
+    finally:
+        try:
+            conn.execute("COMMIT")
+        except sqlite3.Error:  # pragma: no cover - nothing to commit
+            pass
+
+
 logger = logging.getLogger(__name__)
 
 # How long a ``building`` row's lease is valid. A build that outlives its lease
@@ -146,15 +170,20 @@ class RollupStore:
         period_start: str,
         scope: str,
     ) -> dict[str, object] | None:
-        row = self._conn.execute(
-            """
-            SELECT *
-            FROM lcm_rollups
-            WHERE period_kind = ? AND period_start = ? AND scope = ?
-            """,
-            (period_kind, period_start, scope),
-        ).fetchone()
-        return self._row_to_rollup(row)
+        # fork: betterlcm — the row and its lineage are read in ONE snapshot. Reading them in
+        # two statements let a concurrent rebuild land in between, so a returned "ready" rollup
+        # carried generation one's text and fingerprint with generation two's source ids: a
+        # summary attributed to sources it was not built from (verify-4 #20).
+        with _sqlite_savepoint_if_possible(self._conn):
+            row = self._conn.execute(
+                """
+                SELECT *
+                FROM lcm_rollups
+                WHERE period_kind = ? AND period_start = ? AND scope = ?
+                """,
+                (period_kind, period_start, scope),
+            ).fetchone()
+            return self._row_to_rollup(row)
 
     def upsert_building(
         self, period_kind: str, period_start: str, scope: str
@@ -744,7 +773,8 @@ class RollupStore:
             """,
             (period_kind, start, end, scope),
         ).fetchall()
-        return [self._row_to_rollup(row) for row in rows]
+        with _sqlite_savepoint_if_possible(self._conn):  # fork: one snapshot (verify-4 #20)
+            return [self._row_to_rollup(row) for row in rows]
 
     def get_cursor(self, period_kind: str, scope: str = "") -> str | None:
         row = self._conn.execute(

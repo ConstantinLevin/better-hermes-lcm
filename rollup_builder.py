@@ -91,12 +91,23 @@ def _stable_hash(value: object) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+class RollupSourcesUnavailable(RuntimeError):
+    """fork: betterlcm — the summary database could not be read for this scope.
+
+    Distinct from "this scope has no content": an unavailable database used to read as an
+    empty frontier, and a day with no sources RESOLVES — which deleted a previously ready
+    rollup because its sources could not be loaded (verify-4 #20).
+    """
+
+
 def _scope_frontier(dag: SummaryDAG, scope: str) -> list[dict[str, object]]:
     """Load a scope frontier without retaining its TEMP-staging snapshot."""
     with dag._db_lock:
         connection = dag.connection
         if connection is None:
-            return []
+            raise RollupSourcesUnavailable(
+                "the summary database is not available; the scope frontier was not read"
+            )
         with _sqlite_savepoint(connection):
             return _scope_frontier_staged(dag, scope)
 
