@@ -3,9 +3,34 @@
 Patches the plugin modules so they can be imported both as a package
 (relative imports during plugin loading) and directly during testing.
 """
+import os as _bootstrap_os
 import sys
 import importlib
+import tempfile as _bootstrap_tempfile
 from pathlib import Path
+
+# fork: betterlcm — isolate the run from live storage BEFORE anything imports the plugin
+# (audit E, E07). A test that builds an LCMEngine without an explicit database_path resolves
+# to $HERMES_HOME/lcm.db, and inherited LCM_* variables would silently change what is being
+# tested. Nothing here is a claim that the suite currently writes to live data; it removes
+# the possibility.
+# Stash the real home for the one test that reads a COPY of the live database. Kept in the
+# environment (and set once) so a second import of this module cannot overwrite it with the
+# isolated home it just installed.
+_bootstrap_os.environ.setdefault("LCM_TESTS_ORIGINAL_HOME", _bootstrap_os.path.expanduser("~"))
+ORIGINAL_HOME = Path(_bootstrap_os.environ["LCM_TESTS_ORIGINAL_HOME"])
+_TEST_HOME = Path(_bootstrap_tempfile.mkdtemp(prefix="lcm-tests-home-"))
+(_TEST_HOME / ".hermes").mkdir(parents=True, exist_ok=True)
+_bootstrap_os.chmod(_TEST_HOME, 0o700)
+_bootstrap_os.chmod(_TEST_HOME / ".hermes", 0o700)
+_bootstrap_os.environ["HOME"] = str(_TEST_HOME)
+_bootstrap_os.environ["HERMES_HOME"] = str(_TEST_HOME / ".hermes")
+for _inherited in [
+    name for name in _bootstrap_os.environ
+    if name.startswith("LCM_") and name != "LCM_TESTS_ORIGINAL_HOME"
+]:
+    _bootstrap_os.environ.pop(_inherited, None)
+assert str(Path.home()) == str(_TEST_HOME), "tests must not resolve HOME to the live account"
 
 # Make the repo root importable (for agent.context_engine etc.)
 repo_root = str(Path(__file__).resolve().parent.parent.parent.parent)

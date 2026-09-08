@@ -97,3 +97,19 @@ def test_backup_is_fsynced_before_success_is_reported(tmp_path, monkeypatch):
         assert len(synced) >= 2, "success was reported for cached-only bytes"
     finally:
         store.close()
+
+
+def test_the_suite_cannot_reach_live_storage(tmp_path):
+    """fork: betterlcm (audit E, E07) — an engine built without an explicit database_path must
+    resolve inside the test home, never $HOME/.hermes of the live account."""
+    import os
+    from pathlib import Path
+    from hermes_lcm.config import LCMConfig
+
+    hermes_home = os.environ.get("HERMES_HOME", "")
+    assert hermes_home and "lcm-tests-home-" in hermes_home
+    assert "lcm-tests-home-" in str(Path.home())
+    # only the stash conftest keeps for the live-database compatibility test may remain
+    assert [name for name in os.environ if name.startswith("LCM_")] == ["LCM_TESTS_ORIGINAL_HOME"]
+    default = LCMConfig()
+    assert default.database_path == "" or "lcm-tests-home-" in default.database_path

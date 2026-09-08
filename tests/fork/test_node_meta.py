@@ -4,6 +4,8 @@ import sqlite3
 import time
 from pathlib import Path
 
+import os
+
 import pytest
 
 from hermes_lcm import node_meta
@@ -156,9 +158,15 @@ def test_rotate_marker_records_marker_level(tmp_path):
         e.shutdown()
 
 
-@pytest.mark.skipif(not Path("~/.hermes/lcm.db").expanduser().exists(), reason="no pre-existing lcm.db on this box")
+# fork: betterlcm — the suite runs with an isolated HOME (audit E, E07), so this one test,
+# which deliberately reads a COPY of the live database to prove bootstrap compatibility with a
+# pre-existing file, asks conftest for the real home instead of expanding "~".
+_LIVE_DB = Path(os.environ.get("LCM_TESTS_ORIGINAL_HOME", "~")).expanduser() / ".hermes" / "lcm.db"
+
+
+@pytest.mark.skipif(not _LIVE_DB.exists(), reason="no pre-existing lcm.db on this box")
 def test_bootstrap_against_a_copy_of_the_preexisting_db(tmp_path):
-    src = Path("~/.hermes/lcm.db").expanduser()
+    src = _LIVE_DB
     dst = tmp_path / "copy.db"
     shutil.copy2(src, dst)
     before = sqlite3.connect(str(dst))
