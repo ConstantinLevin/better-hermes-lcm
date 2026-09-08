@@ -56,6 +56,18 @@ report carries the citations and the reproduction.
   several planned tasks; the prompt rewrite must come *after* source completeness and the
   generation contract; the host fabricates `finish_reason`, so B1 needs a host contract.
 - **audit C** — the message envelope and a durable ingest receipt keyed by host event identity.
+- **audit E (unfiltered claw sweep)** — 37 items, none previously planned. It states that the
+  "does it change a guarantee" filter applied to the first claw comparison was an invalid
+  reason to reject candidates. Nine are cheap and valuable (test-home isolation, prompt-prefix
+  divergence diagnostics, release-commit validation, payload-reference disambiguators, a
+  script-aware token estimator, prompt inspection commands, copied-reference parsing, shadow-
+  install/drift detection, release fragments); six are capability-level decisions
+  (`context_items` projection, operator TUI, persistent focus briefs, delegated retrieval
+  workers, richer maintenance debt, a paged expansion-cost manifest).
+- **audit D (regressions vs upstream)** — still running.
+
+Tracked as tasks #1-#12 in this session's task list; the ~375 ranked findings across the nine
+partition reports are not yet individually triaged.
 
 ## Phase 0 — the summariser prompt, designed this time
 | id | task | acceptance | status |
