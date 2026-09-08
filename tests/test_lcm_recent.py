@@ -752,7 +752,9 @@ def test_recent_fallback_releases_transaction_on_lineage_exception(
         raise RuntimeError("forced recent lineage failure")
 
     monkeypatch.setattr(tools_module, "load_source_lineage", fail_lineage)
-    assert tools_module._recent_leaf_sections(
-        engine, window, "conversation", 10
-    ) == []
+    # fork: betterlcm — a failed read is not an empty window: the helper raises so the caller
+    # can report complete:false instead of certifying an exhaustive negative (audit p02 T16).
+    # The transaction must still be released.
+    with pytest.raises(tools_module._RecentIncomplete):
+        tools_module._recent_leaf_sections(engine, window, "conversation", 10)
     assert connection.in_transaction is False

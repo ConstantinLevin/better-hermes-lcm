@@ -1079,6 +1079,16 @@ LCM_EXPAND = {
                 "description": "Character offset used to continue an oversized raw message, externalized payload, or store_id-mode message. Use next_content_offset from the previous response.",
                 "default": 0,
             },
+            "tool_calls_offset": {
+                "type": "integer",
+                "description": (
+                    "fork: betterlcm — character offset used to continue an oversized rendering "
+                    "of an assistant turn's tool CALLS in node_id mode. Use "
+                    "next_tool_calls_offset (or tool_calls_continue_with) from the previous "
+                    "response; store_id mode does not render tool calls."
+                ),
+                "default": 0,
+            },
             "include_exact_ref": {
                 "type": "boolean",
                 "description": (

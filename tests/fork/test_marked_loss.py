@@ -686,6 +686,51 @@ def test_user_text_quoting_a_summary_header_is_still_stored(tmp_path):
         e.shutdown()
 
 
+def test_paged_tool_calls_are_charged_to_the_budget_and_can_be_continued(tmp_path):
+    """verify-1 on p02 T04: the rendered tool calls were not charged to the expansion budget,
+    so every call-only row got the whole remaining allowance, and the advertised continuation
+    pointed at raw-store expansion, which does not render tool calls at all."""
+    import json
+    from hermes_lcm import tools as lcm_tools
+    from hermes_lcm.tokens import count_tokens
+    e = _engine(tmp_path, "t04page.db", incremental_max_depth=0)
+    try:
+        e.on_session_start("t4", platform="cli", context_length=200_000)
+        store_ids = []
+        for index in range(3):
+            store_ids.append(e._store.append("t4", {
+                "role": "assistant", "content": "",
+                "tool_calls": [{"id": f"c{index}", "type": "function", "function": {
+                    "name": "terminal",
+                    "arguments": json.dumps({"command": f"deploy-{index} " + "x" * 3000})}}],
+            }, source="cli"))
+        e._store.commit()
+        node_id = e._dag.add_node_with_meta(SummaryNode(
+            session_id="t4", depth=0, summary="three deploys\n[Expand for details: deploys]",
+            token_count=5, source_token_count=900, source_ids=store_ids,
+            source_type="messages", created_at=time.time()), level=1)
+
+        payload = json.loads(lcm_tools.lcm_expand({"node_id": node_id, "max_tokens": 40}, engine=e))
+        returned = sum(count_tokens(str(m.get("content") or "")) + count_tokens(str(m.get("tool_calls") or ""))
+                       for m in payload["expanded"])
+        assert returned <= 40 * 3, f"the budget was multiplied: {returned} tokens for 40"
+        assert payload["pagination"]["has_more"] is True
+
+        # and the continuation really returns the rest of the calls
+        first = payload["expanded"][0]
+        assert first.get("tool_calls_truncated") is True
+        continuation = first["tool_calls_continue_with"]
+        assert continuation["tool"] == "lcm_expand" and continuation["node_id"] == node_id
+        second = json.loads(lcm_tools.lcm_expand(
+            {k: v for k, v in continuation.items() if k != "tool"} | {"max_tokens": 400},
+            engine=e,
+        ))
+        assert second["expanded"][0]["tool_calls"], "the continuation returned no tool calls"
+        assert second["expanded"][0]["tool_calls_offset"] == continuation["tool_calls_offset"]
+    finally:
+        e.shutdown()
+
+
 def test_expansion_returns_the_tool_calls_an_assistant_made(tmp_path):
     """Audit p02 T04 / audit A #11: an assistant turn that is mostly tool-call arguments
     expanded as EMPTY content with has_more:false — a recovery path reporting success while
@@ -835,5 +880,32 @@ def test_every_row_a_leaf_consumes_becomes_a_source_of_it(tmp_path, monkeypatch,
         if consumed:
             assert "NOT summarised" in node.summary
             assert "dependent reply" not in node.summary, "excluded content stays out of the text"
+    finally:
+        e.shutdown()
+
+
+def test_recent_reports_a_real_work_cap_hit_not_an_empty_window(tmp_path):
+    """verify-1 on p02 T16: the work-cap signal was raised inside the helper and then caught
+    by the helper's own broad handler, so a 4,097-node window still reported complete:true
+    with zero sections. The signal has to reach the caller."""
+    import json
+    from hermes_lcm import tools as lcm_tools
+    e = _engine(tmp_path, "recentcap.db", incremental_max_depth=0)
+    try:
+        e.on_session_start("rc", platform="cli", context_length=200_000)
+        cap = lcm_tools._LCM_RECENT_FRONTIER_WORK_LIMIT
+        now = time.time()
+        nodes = [
+            SummaryNode(session_id="rc", depth=0, summary=f"leaf {index}", token_count=3,
+                        source_token_count=9, source_ids=[], source_type="messages",
+                        created_at=now, earliest_at=now, latest_at=now)
+            for index in range(cap + 1)
+        ]
+        for node in nodes:
+            e._dag.add_node(node)
+
+        payload = json.loads(lcm_tools.lcm_recent({"period": "today"}, engine=e))
+        assert payload["complete"] is False
+        assert str(cap) in payload["incomplete_reason"]
     finally:
         e.shutdown()

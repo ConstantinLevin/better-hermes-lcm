@@ -1260,10 +1260,13 @@ def _pagination_payload(
     next_source_offset: int | None,
     next_content_offset: int,
     has_more: bool,
+    tool_calls_offset: int = 0,          # fork: betterlcm — see _expand_message_sources
+    next_tool_calls_offset: int = 0,
 ) -> dict[str, Any]:
     if not has_more:
         next_source_offset = None
         next_content_offset = 0
+        next_tool_calls_offset = 0
     remaining_sources = 0
     if has_more and next_source_offset is not None:
         remaining_sources = max(0, total_sources - next_source_offset)
@@ -1275,6 +1278,8 @@ def _pagination_payload(
         "total_sources": total_sources,
         "next_source_offset": next_source_offset,
         "next_content_offset": next_content_offset,
+        "tool_calls_offset": tool_calls_offset,
+        "next_tool_calls_offset": next_tool_calls_offset,
         "has_more": has_more,
         "remaining_sources": remaining_sources,
     }
@@ -1288,6 +1293,7 @@ def _expand_message_sources(
     source_offset: int = 0,
     source_limit: int | None = None,
     content_offset: int = 0,
+    tool_calls_offset: int = 0,  # fork: betterlcm — resume a paged tool-call rendering
     hydrate_externalized_content: bool = False,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     from .tokens import count_tokens
@@ -1300,6 +1306,7 @@ def _expand_message_sources(
     else:
         source_limit = min(max(0, source_limit), remaining_source_count)
     content_offset = max(0, content_offset)
+    tool_calls_offset = max(0, tool_calls_offset)
     source_ids = node.source_ids[source_offset:source_offset + source_limit]
     stored_by_id = engine._store.get_batch(source_ids)
 
@@ -1307,6 +1314,7 @@ def _expand_message_sources(
     budget_used = 0
     next_source_offset: int | None = source_offset
     next_content_offset = content_offset
+    next_tool_calls_offset = 0
     has_more = source_offset < total_sources
 
     for relative_index, store_id in enumerate(source_ids):
@@ -1369,17 +1377,27 @@ def _expand_message_sources(
         # the agent actually did (audit p02 T04 / audit A #11). The arguments are counted
         # against the same budget and paged with their own offset rather than dumped whole.
         stored_tool_calls = stored.get("tool_calls")
+        call_slice = None
         if stored_tool_calls:
             rendered = json.dumps(stored_tool_calls, ensure_ascii=False, default=str)
-            call_slice = _slice_content_for_response(rendered, max(0, remaining_tokens - sliced["content_returned_chars"] // 4), 0)
+            call_start = tool_calls_offset if source_index == source_offset else 0
+            call_budget = max(0, remaining_tokens - count_tokens(sliced["content"]))
+            call_slice = _slice_content_for_response(rendered, call_budget, call_start)
             expanded["tool_calls"] = call_slice["content"]
             expanded["tool_calls_chars"] = call_slice["content_chars"]
+            expanded["tool_calls_offset"] = call_start
             expanded["tool_calls_returned_chars"] = call_slice["content_returned_chars"]
             if call_slice["content_truncated"]:
                 expanded["tool_calls_truncated"] = True
                 expanded["tool_calls_next_offset"] = call_slice["next_content_offset"]
+                # fork: the continuation must come back to THIS node with the call offset;
+                # raw-store expansion does not render tool calls at all (verify-1 on T04).
                 expanded["tool_calls_continue_with"] = {
-                    "tool": "lcm_expand", "store_id": int(stored["store_id"]),
+                    "tool": "lcm_expand",
+                    "node_id": int(node.node_id),
+                    "source_offset": source_index,
+                    "source_limit": 1,
+                    "tool_calls_offset": call_slice["next_content_offset"],
                 }
         if stored.get("tool_call_id") and stored.get("role") == "tool":
             expanded["tool_call_id"] = stored.get("tool_call_id")
@@ -1418,10 +1436,19 @@ def _expand_message_sources(
                         expanded["externalized"] = externalized
                         break
         messages.append(expanded)
+        # fork: betterlcm — the rendered tool calls are charged to the SAME budget. Leaving
+        # them out gave every call-only row the whole remaining allowance and let a bounded
+        # expansion return several times its budget (verify-1 on T04).
         budget_used += count_tokens(sliced["content"])
-        if sliced["has_more"]:
+        if call_slice is not None:
+            budget_used += count_tokens(call_slice["content"])
+        if sliced["has_more"] or (call_slice is not None and call_slice["content_truncated"]):
             next_source_offset = source_index
             next_content_offset = sliced["next_content_offset"]
+            next_tool_calls_offset = (
+                call_slice["next_content_offset"]
+                if call_slice is not None and call_slice["content_truncated"] else 0
+            )
             has_more = True
             break
         next_source_offset = source_index + 1
@@ -1440,6 +1467,8 @@ def _expand_message_sources(
         returned_sources=len(messages),
         next_source_offset=next_source_offset,
         next_content_offset=next_content_offset,
+        tool_calls_offset=tool_calls_offset,
+        next_tool_calls_offset=next_tool_calls_offset,
         has_more=has_more,
     )
     return messages, pagination
@@ -2326,12 +2355,17 @@ def _recent_leaf_sections_staged(
                 [int(row[0]) for row in rows],
                 limit=_LCM_RECENT_FRONTIER_WORK_LIMIT,
             )
-    except Exception:
-        logger.debug(
-            "LCM recent fallback or transitive lineage read failed closed",
-            exc_info=True,
+    except _RecentIncomplete:
+        # fork: betterlcm — the work-cap signal must reach the caller. The broad handler below
+        # swallowed it and returned [], so an unscannable window was reported as an empty one
+        # again (audit p02 T16; verify-1 found the surviving path).
+        raise
+    except Exception as exc:
+        logger.warning(
+            "LCM recent fallback or transitive lineage read failed: %s", exc, exc_info=True
         )
-        return []
+        # fork: a failed read is not an empty window either.
+        raise _RecentIncomplete(f"recent-history read failed: {exc}") from exc
 
     candidates: list[CoverageNode] = []
     by_id: dict[int, "object"] = {}
@@ -5566,6 +5600,7 @@ def lcm_expand(args: Dict[str, Any], **kwargs) -> str:
     source_limit_arg = args.get("source_limit")
     source_limit = _parse_positive_int(source_limit_arg, 0) if source_limit_arg is not None else None
     content_offset = _parse_non_negative_int(args.get("content_offset", 0), 0)
+    tool_calls_offset = _parse_non_negative_int(args.get("tool_calls_offset", 0), 0)  # fork
     raw_include_exact_ref = args.get("include_exact_ref", False)
     if not isinstance(raw_include_exact_ref, bool):
         return json.dumps({"error": "include_exact_ref must be a boolean"})
@@ -5690,6 +5725,7 @@ def lcm_expand(args: Dict[str, Any], **kwargs) -> str:
             source_offset=source_offset,
             source_limit=source_limit,
             content_offset=content_offset,
+            tool_calls_offset=tool_calls_offset,  # fork: resume paged tool calls
             hydrate_externalized_content=hydrate_externalized,  # fork
         )
         return json.dumps(

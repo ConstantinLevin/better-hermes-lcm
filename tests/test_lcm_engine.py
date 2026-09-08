@@ -23632,6 +23632,9 @@ class TestEngineTools:
             "total_sources": 5,
             "next_source_offset": 3,
             "next_content_offset": 0,
+            # fork: betterlcm — an assistant turn's tool calls are paged too (audit p02 T04)
+            "tool_calls_offset": 0,
+            "next_tool_calls_offset": 0,
             "has_more": True,
             "remaining_sources": 2,
         }
