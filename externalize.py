@@ -2103,6 +2103,7 @@ def maybe_externalize_payload(
     hermes_home: str = "",
     force: bool = False,
     metadata: Dict[str, Any] | None = None,
+    ignore_enabled_flag: bool = False,  # fork: betterlcm — see below
 ) -> Dict[str, Any] | None:
     """Externalize one normalized payload if configured.
 
@@ -2110,8 +2111,14 @@ def maybe_externalize_payload(
     or ``None`` when disabled, below threshold and not forced, or storage is
     unavailable. On storage failure callers should keep the original content so
     there is no silent data loss.
+
+    fork: betterlcm — ``ignore_enabled_flag`` is for content that would otherwise be LOST
+    rather than merely large: an oversized tool result recovered from the host's expiring
+    spillover directory. The opt-in generic externalization flag governs whether ordinary
+    large outputs move out of the transcript; it must not decide whether the archive keeps
+    the only remaining copy of something the host is about to delete (audit p06 I2).
     """
-    if not getattr(config, "large_output_externalization_enabled", False):
+    if not ignore_enabled_flag and not getattr(config, "large_output_externalization_enabled", False):
         return None
 
     threshold = max(1, int(getattr(config, "large_output_externalization_threshold_chars", 0) or 0))

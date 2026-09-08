@@ -6030,17 +6030,24 @@ class TestIngestExternalization:
 
         engine._ingest_messages(messages)
         stored = engine._store.get_session_messages("ingest-session")
-        assert stored[0]["content"].startswith(marker.removesuffix("</persisted-output>"))
-        assert "[LCM persisted-output file generation:" in stored[0]["content"]
-        assert stored[0]["content"].endswith("</persisted-output>")
-        assert not output_dir.exists()
+        # fork: betterlcm — the host deletes its spillover file after 24 hours, so the archive
+        # keeps a DURABLE copy even with generic externalization disabled, and the row becomes
+        # the expandable reference to that copy rather than a preview of a file that will
+        # vanish (audit p06 I2). Upstream kept the marker inline because there was no copy.
+        assert stored[0]["content"].startswith("[Externalized tool output:")
+        assert output_dir.exists()
+        payloads = list(output_dir.rglob("*.json"))
+        assert payloads and full_result in payloads[0].read_text(encoding="utf-8")
 
+        # replaying the same marker is the same tool result: with a durable copy behind it the
+        # row is recognised, so nothing is appended (upstream appended a second row because the
+        # inline marker was all it had)
         replay_with_file = LCMEngine(config=engine._config, hermes_home=str(tmp_path / "hermes"))
         replay_with_file._session_id = "ingest-session"
         replay_with_file._ingest_cursor_needs_reconcile = True
         replay_with_file._ingest_messages(messages)
 
-        assert replay_with_file._store.get_session_count("ingest-session") == 2
+        assert replay_with_file._store.get_session_count("ingest-session") == 1
 
         from dataclasses import replace
         enabled_config = replace(engine._config, large_output_externalization_enabled=True)
@@ -6049,15 +6056,21 @@ class TestIngestExternalization:
         replay_enabled_with_file._ingest_cursor_needs_reconcile = True
         replay_enabled_with_file._ingest_messages(messages)
 
-        assert replay_enabled_with_file._store.get_session_count("ingest-session") == 3
+        assert replay_enabled_with_file._store.get_session_count("ingest-session") == 1
 
+        # and once the host has deleted its file, the durable copy is still what the archive
+        # holds: the replay resolves against it instead of appending an unrecoverable marker
         persisted_path.unlink()
         replay = LCMEngine(config=engine._config, hermes_home=str(tmp_path / "hermes"))
         replay._session_id = "ingest-session"
         replay._ingest_cursor_needs_reconcile = True
         replay._ingest_messages(messages)
 
-        assert replay._store.get_session_count("ingest-session") == 4
+        assert replay._store.get_session_count("ingest-session") == 2
+        surviving = replay._store.get_session_messages("ingest-session")[0]["content"]
+        assert surviving.startswith("[Externalized tool output:")
+        payloads = list(output_dir.rglob("*.json"))
+        assert any(full_result in path.read_text(encoding="utf-8") for path in payloads)
 
     def test_replay_reconciles_redacted_inline_persisted_marker_when_externalization_disabled(self, tmp_path, monkeypatch):
         import tempfile
@@ -6089,15 +6102,22 @@ class TestIngestExternalization:
 
         engine._ingest_messages(messages)
         stored = engine._store.get_session_messages("ingest-session")
+        # fork: betterlcm — the durable copy is made even with generic externalization
+        # disabled (audit p06 I2), so the row is the reference to it. The redaction still
+        # applies: it is the REDACTED text that was copied.
         assert "INLINESECRET" not in stored[0]["content"]
-        assert "[LCM sensitive redaction:" in stored[0]["content"]
-        assert not output_dir.exists()
+        assert stored[0]["content"].startswith("[Externalized tool output:")
+        payloads = list(output_dir.rglob("*.json"))
+        assert payloads
+        payload_text = payloads[0].read_text(encoding="utf-8")
+        assert "INLINESECRET" not in payload_text
+        assert "[LCM sensitive redaction:" in payload_text
 
         replay_with_file = LCMEngine(config=engine._config, hermes_home=str(tmp_path / "hermes"))
         replay_with_file._session_id = "ingest-session"
         replay_with_file._ingest_cursor_needs_reconcile = True
         replay_with_file._ingest_messages(messages)
-        assert replay_with_file._store.get_session_count("ingest-session") == 2
+        assert replay_with_file._store.get_session_count("ingest-session") == 1
 
         persisted_path.unlink()
         replay = LCMEngine(config=engine._config, hermes_home=str(tmp_path / "hermes"))
@@ -6105,7 +6125,7 @@ class TestIngestExternalization:
         replay._ingest_cursor_needs_reconcile = True
         replay._ingest_messages(messages)
 
-        assert replay._store.get_session_count("ingest-session") == 3
+        assert replay._store.get_session_count("ingest-session") == 2
 
     def test_replay_appends_externalization_disabled_retry_that_only_differs_inside_lossy_redaction(self, tmp_path, monkeypatch):
         import os
@@ -6152,6 +6172,8 @@ class TestIngestExternalization:
         replay_same._session_id = "ingest-session"
         replay_same._ingest_cursor_needs_reconcile = True
         replay_same._ingest_messages(original_messages)
+        # a LOSSY redaction cannot prove identity, so the replay still appends rather than
+        # assume two different outputs were the same one
         assert replay_same._store.get_session_count("ingest-session") == 4
 
         persisted_path.write_text(new_result, encoding="utf-8")
@@ -6166,7 +6188,11 @@ class TestIngestExternalization:
         replay_retry._ingest_cursor_needs_reconcile = True
         replay_retry._ingest_messages(retry_messages)
         assert replay_retry._store.get_session_count("ingest-session") == 6
-        assert not output_dir.exists()
+        # fork: betterlcm — and every one of those host outputs has a durable copy, because the
+        # host deletes its spillover files after 24 hours (audit p06 I2). Upstream asserted the
+        # opposite — that no payload directory existed — when nothing else held the output.
+        payload_texts = [path.read_text(encoding="utf-8") for path in output_dir.rglob("*.json")]
+        assert payload_texts and all("SECRET" not in text for text in payload_texts)
 
     def test_ingest_recovers_persisted_output_with_crlf_newlines(self, tmp_path, monkeypatch):
         import tempfile

@@ -60,3 +60,39 @@ def test_a_marker_pointing_anywhere_else_is_still_refused(tmp_path):
     assert ingest_protection.recover_hermes_persisted_output(
         marker, str(tmp_path / "hermes-home")
     ) is None
+
+
+def test_the_recovered_output_is_copied_durably_even_with_externalization_disabled(tmp_path):
+    """The point of recovery: the host deletes its spillover file after 24 hours. Upstream's
+    generic externalization flag is off by default, so the recovered bytes were never copied
+    and the archive kept a preview of an output that no longer existed (audit p06 I2)."""
+    from hermes_lcm.config import LCMConfig
+    from hermes_lcm.engine import LCMEngine
+
+    home = tmp_path / "hermes-home"
+    directory = _spillover(tmp_path)
+    content = "DECISION: cancel the launch\n" + ("payload " * 5000)
+    target = directory / "tool_result_call9.txt"
+    target.write_text(content, encoding="utf-8")
+
+    cfg = LCMConfig(database_path=str(home / "lcm.db"),
+                    large_output_externalization_enabled=False)
+    engine = LCMEngine(config=cfg, hermes_home=str(home))
+    try:
+        engine.on_session_start("po", platform="cli", context_length=200_000)
+        engine._ingest_messages([
+            {"role": "user", "content": "read the log"},
+            {"role": "assistant", "content": "reading", "tool_calls": [
+                {"id": "call9", "type": "function",
+                 "function": {"name": "read_file", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "call9", "content": _marker(target, content)},
+        ])
+        # the host's file expires
+        target.unlink()
+
+        payloads = list(home.rglob("*.json"))
+        assert payloads, "no durable copy was made; the output expires with the host file"
+        texts = [path.read_text(encoding="utf-8") for path in payloads]
+        assert any("DECISION: cancel the launch" in text for text in texts), texts[0][:400]
+    finally:
+        engine.shutdown()

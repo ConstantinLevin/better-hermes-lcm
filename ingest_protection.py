@@ -1418,6 +1418,10 @@ def protect_message_for_ingest(
             }
             if persisted_output_preview_sha256:
                 persisted_output_metadata["persisted_output_preview_sha256"] = persisted_output_preview_sha256
+            # fork: betterlcm — the durable copy does not depend on the opt-in generic
+            # externalization flag. The host deletes its spillover file after 24 hours, so
+            # with the flag off (the default) the archive kept a preview of an output that
+            # no longer existed anywhere (audit p06 I2).
             recovered_externalized = maybe_externalize_payload(
                 normalized_recovered_content,
                 kind="tool_result",
@@ -1428,6 +1432,9 @@ def protect_message_for_ingest(
                 hermes_home=hermes_home,
                 force=True,
                 metadata=persisted_output_metadata,
+                ignore_enabled_flag=bool(
+                    getattr(config, "persisted_output_recovery_copy_enabled", True)
+                ),
             )
 
     # A host-side truncation marker without durable recovered storage is not

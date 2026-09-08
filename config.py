@@ -358,6 +358,7 @@ ENV_FIELD_SPECS: tuple[_EnvFieldSpec, ...] = (
     _EnvFieldSpec("large_output_active_replay_stubbing_enabled", "LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUBBING_ENABLED", bool),
     _EnvFieldSpec("large_output_active_replay_stub_threshold_tokens", "LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUB_THRESHOLD_TOKENS", int),
     _EnvFieldSpec("large_output_transcript_gc_enabled", "LCM_LARGE_OUTPUT_TRANSCRIPT_GC_ENABLED", bool),
+    _EnvFieldSpec("persisted_output_recovery_copy_enabled", "LCM_PERSISTED_OUTPUT_RECOVERY_COPY_ENABLED", bool),  # fork
     _EnvFieldSpec("summary_model", "LCM_SUMMARY_MODEL", str),
     _EnvFieldSpec("summary_circuit_breaker_failure_threshold", "LCM_SUMMARY_CIRCUIT_BREAKER_FAILURE_THRESHOLD", int),
     _EnvFieldSpec("summary_circuit_breaker_cooldown_seconds", "LCM_SUMMARY_CIRCUIT_BREAKER_COOLDOWN_SECONDS", int),
@@ -599,6 +600,13 @@ class LCMConfig:
     # When enabled, already-externalized summarized tool-result transcript rows may
     # be rewritten to compact GC placeholders after successful leaf compaction.
     large_output_transcript_gc_enabled: bool = False
+    # fork: betterlcm — keep a DURABLE copy of an oversized tool result that the host wrote to
+    # its own expiring spillover directory and named in a <persisted-output> marker. The host
+    # deletes those files after 24 hours, so without this the archive keeps a preview of an
+    # output that no longer exists anywhere (audit p06 I2). This is archival duty, not the
+    # opt-in generic externalization above, so it does NOT require that flag; the copy is the
+    # same size the host already wrote. Set false to accept the expiry.
+    persisted_output_recovery_copy_enabled: bool = True
 
     # -- Models ---
     summary_model: str = ""       # empty = use Hermes auxiliary model
