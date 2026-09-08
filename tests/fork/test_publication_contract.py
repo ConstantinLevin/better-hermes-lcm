@@ -39,6 +39,28 @@ def test_a_node_and_its_sidecar_are_published_together(tmp_path):
         finally:
             dag.node_meta.write_statement = original
         assert [n.node_id for n in dag.get_session_nodes("s")] == [node_id]
+
+        # a refused COMMIT must not leave the transaction open for a later, unrelated commit
+        # to publish the node that failed (verify-1 on CP03)
+        class _RefusingCommit:
+            def __init__(self, connection):
+                self._connection = connection
+
+            def __getattr__(self, name):
+                return getattr(self._connection, name)
+
+            def commit(self):
+                raise sqlite3.OperationalError("disk full")
+
+        real_connection = dag._conn
+        dag._conn = _RefusingCommit(real_connection)
+        try:
+            with pytest.raises(sqlite3.OperationalError):
+                dag.add_node_with_meta(_node(summary="third"), level=1)
+        finally:
+            dag._conn = real_connection
+        dag._conn.commit()
+        assert [n.node_id for n in dag.get_session_nodes("s")] == [node_id]
     finally:
         dag.close()
 

@@ -109,7 +109,10 @@ def test_the_suite_cannot_reach_live_storage(tmp_path):
     hermes_home = os.environ.get("HERMES_HOME", "")
     assert hermes_home and "lcm-tests-home-" in hermes_home
     assert "lcm-tests-home-" in str(Path.home())
-    # only the stash conftest keeps for the live-database compatibility test may remain
-    assert [name for name in os.environ if name.startswith("LCM_")] == ["LCM_TESTS_ORIGINAL_HOME"]
+    # plugin configuration is scrubbed; the harness's own LCM_TESTS_* controls survive
+    assert not [
+        name for name in os.environ
+        if name.startswith("LCM_") and not name.startswith("LCM_TESTS_")
+    ]
     default = LCMConfig()
     assert default.database_path == "" or "lcm-tests-home-" in default.database_path

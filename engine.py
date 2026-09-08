@@ -5803,9 +5803,12 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         fanin = max(1, self._config.condensation_fanin)
         # fork: betterlcm — one compress() may publish up to `leaf_pass_cap` leaves at a large
         # window; upstream's single pass of the depth loop was matched to its one-leaf-per-call
-        # rate, so keeping it let leaves accumulate faster than they were merged. The cap is 1
-        # at the low anchor (upstream exactly) and scales with production. The budget gate and
-        # the shared deadline are rechecked between groups. (audit D #3)
+        # rate, so keeping it let leaves accumulate faster than they were merged. The cap counts
+        # TRAVERSALS of the depth loop, exactly what upstream did once: at the low anchor it is
+        # 1, so one group at each eligible depth is condensed, and it scales with production.
+        # (Counting individual groups instead changed the low-anchor topology — with eligible
+        # groups at d0 and d1, only d0 was condensed; verify-2 regression #7.)
+        # The budget gate and the shared deadline are rechecked between traversals. (audit D #3)
         group_cap = max(1, int(self.effective_condense_group_cap or 1))
         groups_published = 0
 
@@ -5860,11 +5863,9 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
 
                 if leaf_compacted_this_turn and self._config.cache_friendly_condensation_enabled:
                     break
-                if groups_published >= group_cap:
-                    break
 
-            if published_this_pass == 0 or groups_published >= group_cap:
-                break  # nothing eligible remains, or the per-call capacity is spent
+            if published_this_pass == 0:
+                break  # nothing eligible remains
 
         if not condensed_any and leaf_compacted_this_turn and self._config.cache_friendly_condensation_enabled:
             self._last_condensation_suppressed_reason = suppression_reason

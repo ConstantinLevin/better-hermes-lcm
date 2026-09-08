@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any, Dict, Mapping, Optional
 
 DEFAULT_SCALE_LOW_WINDOW = 262_144
@@ -180,34 +181,46 @@ def interpolate(anchor: Anchor, context_length: int, t: float, *,
     return anchor.cast(value)
 
 
-def _env_key_for(field: str) -> Optional[str]:
+@lru_cache(maxsize=1)
+def _env_keys_by_field() -> Mapping[str, str]:
+    """fork: betterlcm — the env-spec list is immutable; index it once.
+
+    Every resolved setting used to walk the whole specification list, and every explicitness
+    check walked the dataclass fields, on every resolve (audit verify-3 O9).
+    """
     try:
         from .config import ENV_FIELD_SPECS  # type: ignore
     except ImportError:  # pragma: no cover - package-less import (tests / standalone)
         from config import ENV_FIELD_SPECS  # type: ignore
-    for spec in ENV_FIELD_SPECS:
-        if spec.name == field:
-            return spec.env_key
-    return None
+    return {spec.name: spec.env_key for spec in ENV_FIELD_SPECS}
+
+
+def _env_key_for(field: str) -> Optional[str]:
+    return _env_keys_by_field().get(field)
 
 
 _NO_DEFAULT = object()
 
 
-def _field_default(config: Any, field_name: str) -> Any:
-    """The dataclass default for ``field_name``, or ``_NO_DEFAULT``."""
+@lru_cache(maxsize=8)
+def _field_defaults_for(config_type: type) -> Mapping[str, Any]:
+    """fork: betterlcm — dataclass defaults for one config type, computed once (verify-3 O9)."""
+    defaults: dict[str, Any] = {}
     try:
         import dataclasses
-        for field in dataclasses.fields(type(config)):
-            if field.name == field_name:
-                if field.default is not dataclasses.MISSING:
-                    return field.default
-                if field.default_factory is not dataclasses.MISSING:  # type: ignore[misc]
-                    return field.default_factory()  # type: ignore[misc]
-                return _NO_DEFAULT
-    except Exception:
-        pass
-    return _NO_DEFAULT
+        for field in dataclasses.fields(config_type):
+            if field.default is not dataclasses.MISSING:
+                defaults[field.name] = field.default
+            elif field.default_factory is not dataclasses.MISSING:  # type: ignore[misc]
+                defaults[field.name] = field.default_factory()  # type: ignore[misc]
+    except Exception:  # pragma: no cover - not a dataclass
+        return {}
+    return defaults
+
+
+def _field_default(config: Any, field_name: str) -> Any:
+    """The dataclass default for ``field_name``, or ``_NO_DEFAULT``."""
+    return _field_defaults_for(type(config)).get(field_name, _NO_DEFAULT)
 
 
 def explicit_override(config: Any, anchor: Anchor,

@@ -25,9 +25,11 @@ _bootstrap_os.chmod(_TEST_HOME, 0o700)
 _bootstrap_os.chmod(_TEST_HOME / ".hermes", 0o700)
 _bootstrap_os.environ["HOME"] = str(_TEST_HOME)
 _bootstrap_os.environ["HERMES_HOME"] = str(_TEST_HOME / ".hermes")
+# LCM_TESTS_* are the harness's own controls (the real-summariser switch, the stashed home),
+# not plugin configuration: scrubbing them disabled the documented real-summary mode.
 for _inherited in [
     name for name in _bootstrap_os.environ
-    if name.startswith("LCM_") and name != "LCM_TESTS_ORIGINAL_HOME"
+    if name.startswith("LCM_") and not name.startswith("LCM_TESTS_")
 ]:
     _bootstrap_os.environ.pop(_inherited, None)
 assert str(Path.home()) == str(_TEST_HOME), "tests must not resolve HOME to the live account"

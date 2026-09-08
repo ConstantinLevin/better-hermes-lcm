@@ -319,10 +319,16 @@ class SummaryDAG:
                     node_id, level=level,
                     summary=node.summary if summary is None else summary,
                 )
+                # the COMMIT is inside the protection too: a refused commit used to leave the
+                # transaction open, and the next unrelated commit then published the node that
+                # had supposedly failed (verify-1 / verify-3 on CP03).
+                self._conn.commit()
             except Exception:
-                self._conn.rollback()
+                try:
+                    self._conn.rollback()
+                except Exception:  # pragma: no cover - a dead connection cannot roll back
+                    logger.warning("LCM could not roll back a failed node publication", exc_info=True)
                 raise
-            self._conn.commit()
             node.node_id = node_id
             return node_id
 
@@ -886,7 +892,13 @@ class SummaryDAG:
             # newest of an arbitrary page: with 100 matching summaries, sort="recency" limit=1
             # returned #50. This path is not exotic — CJK and emoji queries are routed here by
             # design, not only a broken FTS index.
-            order_sql = "ORDER BY created_at DESC, node_id DESC" if self._is_recency_sort(sort) else ""
+            # fork: betterlcm — order by the SAME clock the Python ranking uses. Selecting by
+            # created_at and then ranking by latest_at dropped the newest-content node before
+            # ranking ever saw it (verify-3: "LIKE ordering is fixed" → partially).
+            order_sql = (
+                "ORDER BY COALESCE(latest_at, created_at) DESC, node_id DESC"
+                if self._is_recency_sort(sort) else ""
+            )
             with self._db_lock:
                 rows = self._conn.execute(
                     f"""SELECT {_NODE_SELECT_COLUMNS} FROM summary_nodes

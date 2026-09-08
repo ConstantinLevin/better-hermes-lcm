@@ -245,3 +245,30 @@ def test_dynamic_chunking_selects_through_the_aligned_selector(tmp_path, monkeyp
         assert aligned_calls, "the dynamic branch bypassed the tool-group-aligned selector"
     finally:
         e.shutdown()
+
+
+def test_the_low_anchor_condenses_one_group_at_every_eligible_depth(tmp_path, mock_summariser):
+    """verify-2 regression #7: the fork's per-call cap counted individual GROUPS, so at the
+    256k anchor (cap 1) only the first depth was condensed. Upstream's single pass traversed
+    every eligible depth, and the low anchor must reproduce upstream exactly."""
+    e = _engine(tmp_path, W256, condensation_fanin=2, incremental_max_depth=3,
+                cache_friendly_condensation_enabled=False)
+    try:
+        assert int(e.effective_condense_group_cap) == 1
+        base = time.time()
+        for index in range(4):                      # d0 material: two groups of two
+            _leaf(e, 100, earliest=base + index)
+        for depth, count in ((1, 2), (2, 2)):       # already-condensed depths
+            for index in range(count):
+                e._dag.add_node(SummaryNode(
+                    session_id=e._session_id, depth=depth, summary=f"d{depth} {index}",
+                    token_count=100, source_token_count=500, source_ids=[],
+                    source_type="nodes", created_at=base + index,
+                    earliest_at=base + index, latest_at=base + index + 1))
+
+        e._maybe_condense(leaf_compacted_this_turn=False)
+
+        published = {n.depth for n in e._dag.get_session_nodes(e._session_id) if n.depth > 0}
+        assert {1, 2, 3} <= published, f"one pass must reach every eligible depth, got {published}"
+    finally:
+        e.shutdown()
