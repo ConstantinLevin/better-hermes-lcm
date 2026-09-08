@@ -50,7 +50,7 @@ from .search_query import (
     sanitize_like_query,
     should_apply_directness_rank_adjustment,
 )
-from .store import _normalize_source_value, _UNKNOWN_SOURCE, _legacy_blank_source_clause
+from .store import _SQLITE_MAX_BOUND_VARIABLES, _normalize_source_value, _UNKNOWN_SOURCE, _legacy_blank_source_clause
 
 
 logger = logging.getLogger(__name__)
@@ -942,14 +942,21 @@ class SummaryDAG:
         """Get the immediate child nodes of a summary node."""
         if node.source_type != "nodes" or not node.source_ids:
             return []
-        placeholders = ",".join("?" * len(node.source_ids))
-        rows = self._conn.execute(
-            f"""SELECT {_NODE_SELECT_COLUMNS} FROM summary_nodes
-                WHERE node_id IN ({placeholders})
-                ORDER BY created_at""",
-            node.source_ids,
-        ).fetchall()
-        return [self._row_to_node(r) for r in rows]
+        # fork: betterlcm — batched under SQLite's bound-variable ceiling (verify-3 p04 ST5)
+        rows = []
+        ids = [int(source_id) for source_id in node.source_ids]
+        for start in range(0, len(ids), _SQLITE_MAX_BOUND_VARIABLES):
+            chunk = ids[start:start + _SQLITE_MAX_BOUND_VARIABLES]
+            placeholders = ",".join("?" * len(chunk))
+            rows.extend(self._conn.execute(
+                f"""SELECT {_NODE_SELECT_COLUMNS} FROM summary_nodes
+                    WHERE node_id IN ({placeholders})
+                    ORDER BY created_at""",
+                chunk,
+            ).fetchall())
+        nodes = [self._row_to_node(r) for r in rows]
+        nodes.sort(key=lambda item: (item.created_at or 0.0, item.node_id))
+        return nodes
 
     def source_message_ids(self, node_id: int, *, limit: int) -> List[int]:
         """Resolve a node to the store_ids of the messages underneath it.
@@ -1044,19 +1051,29 @@ class SummaryDAG:
     def get_source_time_window(self, node_ids: List[int]) -> tuple[float | None, float | None]:
         if not node_ids:
             return None, None
-        placeholders = ",".join("?" * len(node_ids))
+        # fork: betterlcm — batched under SQLite's bound-variable ceiling (verify-3 p04 ST5)
+        ids = [int(node_id) for node_id in node_ids]
+        earliest: float | None = None
+        latest: float | None = None
         with self._db_lock:
-            row = self._conn.execute(
-                f"""SELECT
-                        MIN(COALESCE(earliest_at, created_at)),
-                        MAX(COALESCE(latest_at, created_at))
-                    FROM summary_nodes
-                    WHERE node_id IN ({placeholders})""",
-                node_ids,
-            ).fetchone()
-        if not row:
-            return None, None
-        return row[0], row[1]
+            for start in range(0, len(ids), _SQLITE_MAX_BOUND_VARIABLES):
+                chunk = ids[start:start + _SQLITE_MAX_BOUND_VARIABLES]
+                placeholders = ",".join("?" * len(chunk))
+                row = self._conn.execute(
+                    f"""SELECT
+                            MIN(COALESCE(earliest_at, created_at)),
+                            MAX(COALESCE(latest_at, created_at))
+                        FROM summary_nodes
+                        WHERE node_id IN ({placeholders})""",
+                    chunk,
+                ).fetchone()
+                if not row:
+                    continue
+                if row[0] is not None:
+                    earliest = row[0] if earliest is None else min(earliest, row[0])
+                if row[1] is not None:
+                    latest = row[1] if latest is None else max(latest, row[1])
+        return earliest, latest
 
     def describe_subtree(self, node_id: int) -> Dict[str, Any]:
         """Return metadata about a node's subtree without loading content."""

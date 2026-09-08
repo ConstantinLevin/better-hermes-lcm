@@ -324,6 +324,11 @@ def build_message_fts_spec() -> ExternalContentFtsSpec:
     )
 
 
+# fork: betterlcm — a safe batch size for "WHERE x IN (?, ?, …)" reads. SQLite's compile-time
+# SQLITE_MAX_VARIABLE_NUMBER is 999 on older builds and 32,766 on newer ones; 900 is under both.
+_SQLITE_MAX_BOUND_VARIABLES = 900
+
+
 class MessageStore:
     """SQLite-backed immutable message store."""
 
@@ -532,6 +537,18 @@ class MessageStore:
         """
         if token_estimates is None:
             token_estimates = [0] * len(messages)
+        elif len(token_estimates) != len(messages):
+            # fork: betterlcm — zip() stopped at the shorter list, so a caller that passed
+            # fewer estimates than messages silently stored only that many rows: ingest LOSS
+            # from a bookkeeping mismatch (verify-3 #30 / p04 ST2). Estimates are advisory;
+            # messages are not.
+            logger.warning(
+                "LCM append_batch received %d token estimate(s) for %d message(s); "
+                "storing every message and estimating the remainder as 0",
+                len(token_estimates), len(messages),
+            )
+            token_estimates = list(token_estimates)[:len(messages)]
+            token_estimates += [0] * (len(messages) - len(token_estimates))
 
         ids = []
         with self._write_lock, self._conn:
@@ -663,11 +680,19 @@ class MessageStore:
         """
         if not store_ids:
             return {}
-        placeholders = ",".join("?" for _ in store_ids)
-        rows = self._conn.execute(
-            f"SELECT {_MESSAGE_SELECT_COLUMNS} FROM messages WHERE store_id IN ({placeholders})",
-            store_ids,
-        ).fetchall()
+        # fork: betterlcm — SQLite refuses more bound variables than SQLITE_MAX_VARIABLE_NUMBER
+        # (999 on older builds), and a node summarising thousands of rows really does ask for
+        # thousands of ids: the whole lookup used to raise and the caller saw "no sources"
+        # (verify-3 #30 / p04 ST5). Read in batches instead.
+        rows = []
+        ids = [int(store_id) for store_id in store_ids]
+        for start in range(0, len(ids), _SQLITE_MAX_BOUND_VARIABLES):
+            chunk = ids[start:start + _SQLITE_MAX_BOUND_VARIABLES]
+            placeholders = ",".join("?" for _ in chunk)
+            rows.extend(self._conn.execute(
+                f"SELECT {_MESSAGE_SELECT_COLUMNS} FROM messages WHERE store_id IN ({placeholders})",
+                chunk,
+            ).fetchall())
         return {row[0]: self._row_to_dict(row) for row in rows}
 
     def scan_evidence_rows(self, *, limit: int = 4096) -> Dict[str, Any]:
@@ -1057,14 +1082,26 @@ class MessageStore:
     def get_time_bounds(self, store_ids: List[int]) -> tuple[float | None, float | None]:
         if not store_ids:
             return None, None
-        placeholders = ",".join("?" * len(store_ids))
-        row = self._conn.execute(
-            f"SELECT MIN(timestamp), MAX(timestamp) FROM messages WHERE store_id IN ({placeholders})",
-            store_ids,
-        ).fetchone()
-        if not row:
-            return None, None
-        return row[0], row[1]
+        # fork: betterlcm — batched under SQLite's bound-variable ceiling; a leaf over
+        # thousands of rows used to raise here and lose its time bounds (verify-3 p04 ST5).
+        ids = [int(store_id) for store_id in store_ids]
+        earliest: float | None = None
+        latest: float | None = None
+        for start in range(0, len(ids), _SQLITE_MAX_BOUND_VARIABLES):
+            chunk = ids[start:start + _SQLITE_MAX_BOUND_VARIABLES]
+            placeholders = ",".join("?" * len(chunk))
+            row = self._conn.execute(
+                f"SELECT MIN(timestamp), MAX(timestamp) FROM messages "
+                f"WHERE store_id IN ({placeholders})",
+                chunk,
+            ).fetchone()
+            if not row:
+                continue
+            if row[0] is not None:
+                earliest = row[0] if earliest is None else min(earliest, row[0])
+            if row[1] is not None:
+                latest = row[1] if latest is None else max(latest, row[1])
+        return earliest, latest
 
     # -- Metadata key/value JSON --------------------------------------------
 

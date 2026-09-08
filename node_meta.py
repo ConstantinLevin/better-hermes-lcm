@@ -145,12 +145,17 @@ class NodeMetaStore:
         ids = [int(node_id) for node_id in node_ids]
         if not ids:
             return
-        placeholders = ",".join("?" for _ in ids)
-        try:
-            conn.execute(f"DELETE FROM {NODE_META_TABLE} WHERE node_id IN ({placeholders})", ids)
-        except sqlite3.OperationalError:
-            # Table absent: a connection that bypassed the DAG bootstrap. Nothing to cascade.
-            pass
+        # fork: betterlcm — batched under SQLite's bound-variable ceiling (verify-3 p04 ST5)
+        for start in range(0, len(ids), 900):
+            chunk = ids[start:start + 900]
+            placeholders = ",".join("?" for _ in chunk)
+            try:
+                conn.execute(
+                    f"DELETE FROM {NODE_META_TABLE} WHERE node_id IN ({placeholders})", chunk
+                )
+            except sqlite3.OperationalError:
+                # Table absent: a connection that bypassed the DAG bootstrap. Nothing to cascade.
+                return
 
 
 def level_header_tag(level: Optional[int]) -> str:

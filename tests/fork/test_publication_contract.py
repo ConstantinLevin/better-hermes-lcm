@@ -109,3 +109,39 @@ def test_the_frontier_never_steps_over_a_row_no_node_covers(tmp_path):
         assert engine._last_compacted_store_id == 0, "row 1 is covered by nothing"
     finally:
         engine.shutdown()
+
+
+def test_a_short_estimate_list_never_costs_a_message(tmp_path):
+    """verify-3 #30 (p04 ST2): append_many zipped messages against token estimates, so a
+    caller that supplied fewer estimates than messages silently stored only that many rows."""
+    from hermes_lcm.store import MessageStore
+    store = MessageStore(tmp_path / "short.db")
+    try:
+        ids = store.append_batch(
+            "s",
+            [{"role": "user", "content": "first"}, {"role": "user", "content": "second"}],
+            token_estimates=[7],
+        )
+        store.commit()
+        assert len(ids) == 2
+        contents = [row["content"] for row in store.get_session_messages("s")]
+        assert contents == ["first", "second"]
+    finally:
+        store.close()
+
+
+def test_a_node_with_thousands_of_sources_can_still_be_read(tmp_path):
+    """verify-3 #30 (p04 ST5): the exact-id read bound one variable per id, so a node
+    summarising more rows than SQLite's variable ceiling raised instead of returning them."""
+    from hermes_lcm.store import MessageStore
+    store = MessageStore(tmp_path / "many.db")
+    try:
+        ids = store.append_batch(
+            "s", [{"role": "user", "content": f"m{index}"} for index in range(2500)]
+        )
+        store.commit()
+        fetched = store.get_batch(ids)
+        assert len(fetched) == 2500
+        assert fetched[ids[-1]]["content"] == "m2499"
+    finally:
+        store.close()
