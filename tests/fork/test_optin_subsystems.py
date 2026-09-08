@@ -70,3 +70,55 @@ def test_truncated_evidence_refs_cannot_close_a_computation(tmp_path):
             assert payload["completeness"]["product_verified"] is False
     finally:
         store.close()
+
+
+def test_a_default_state_query_applies_the_validity_window(tmp_path):
+    """verify-4 #23: without an explicit as_of the validity window was not applied at all, so
+    an assertion whose valid_to had passed still came back as current state."""
+    import time
+    from hermes_lcm.assertion_store import AssertionCandidate, AssertionStore
+    from hermes_lcm.assertion_state import query_assertion_state
+    from hermes_lcm.store import MessageStore
+
+    db_path = tmp_path / "assertions.db"
+    messages = MessageStore(db_path)
+    assertions = AssertionStore(db_path)
+    try:
+        content = "I am on the payments team."
+        store_id = messages.append("s", {"role": "user", "content": content}, source="cli")
+        messages.commit()
+        snapshot = assertions.snapshot_source(store_id)
+        quote = "on the payments team"
+        start = content.index(quote)
+        expired = AssertionCandidate(
+            source_span_start=start,
+            source_span_end=start + len(quote),
+            subject_key="user",
+            predicate_key="team",
+            object_value="payments",
+            value_text="payments",
+            kind="fact",
+            event_at=None,
+            valid_from=None,
+            valid_to=time.time() - 3600,   # it stopped being true an hour ago
+        )
+        live = AssertionCandidate(
+            source_span_start=start,
+            source_span_end=start + len(quote),
+            subject_key="user",
+            predicate_key="team",
+            object_value="platform",
+            value_text="platform",
+            kind="fact",
+            event_at=None,
+            valid_from=None,
+            valid_to=time.time() + 3600,   # still true
+        )
+        assertions.publish_source(snapshot, [expired, live])
+
+        now = query_assertion_state(assertions, subject_key="user")
+        values = {str(row.get("value_text")) for row in now.assertions}
+        assert values == {"platform"}, values
+    finally:
+        assertions.close()
+        messages.close()

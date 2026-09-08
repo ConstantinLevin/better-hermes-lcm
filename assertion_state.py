@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import time
 from typing import Any, Iterable
 
 from .assertion_store import AssertionStore
@@ -101,6 +102,12 @@ def query_assertion_state(
     normalized_subject = str(subject_key or "").strip()
     if not normalized_subject:
         raise ValueError("subject_key is required for a bounded state query")
+    if as_of is None:
+        # fork: betterlcm — "what is the state" is a question about NOW. Without an explicit
+        # instant the validity window was not applied at all, so an assertion whose valid_to
+        # had passed still came back active and current (verify-4 #23). An explicit as_of is
+        # still honoured, including one in the past.
+        as_of = time.time()
     rows = store.query_assertions(
         subject_key=normalized_subject,
         predicate_key=predicate_key,
