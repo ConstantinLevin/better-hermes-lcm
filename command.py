@@ -2040,8 +2040,14 @@ def _delete_clean_candidates_atomically(engine, session_ids: set[str]) -> dict[s
             lifecycle_deleted += cur.rowcount if cur.rowcount is not None else 0
         lifecycle_skipped = scoped_count - lifecycle_deleted
         conn.commit()
-    except Exception:
-        conn.rollback()
+    except BaseException:
+        # fork: betterlcm — BaseException, not Exception: a KeyboardInterrupt or a host
+        # cancellation mid-cleanup left the deletion transaction open, and a later unrelated
+        # commit made those deletes permanent (verify-4 #4).
+        try:
+            conn.rollback()
+        except Exception:  # pragma: no cover - a dead connection cannot roll back
+            logger.warning("LCM could not roll back an interrupted cleanup", exc_info=True)
         raise
 
     return {

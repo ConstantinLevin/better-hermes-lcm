@@ -1045,17 +1045,28 @@ class CompactionMixin:
             ]
             source_store_ids = self._get_store_ids_for_messages(source_lineage_chunk)
             source_store_ids = sorted(dict.fromkeys(source_store_ids))
-            if source_lineage_chunk and not source_store_ids:
-                # fork: betterlcm — a summary with no provenance is exactly the thing this
-                # engine exists to prevent: unexpandable, unverifiable, and indistinguishable
-                # from an invented one. It happened when an earlier attempt had already
-                # advanced the raw cursor, so the mapping found nothing. Refuse to publish and
-                # let the raw stay in place.
-                noop_reason = "selected leaf chunk lost its raw store lineage"
+            # fork: betterlcm — a summary with no provenance is exactly the thing this engine
+            # exists to prevent: unexpandable, unverifiable, and indistinguishable from an
+            # invented one. Refusing only a mapping of ZERO was not enough: a PARTIAL mapping
+            # published a node over some of the consumed rows, advanced the frontier past all
+            # of them, and left the unmapped rows belonging to no summary at all while the
+            # text claimed to cover them (verify-4 #3). Every consumed row must map.
+            mapped_by_message_id = self._get_store_id_map_for_messages(source_lookup_chunk)
+            unmapped = [
+                message for message in source_lookup_chunk
+                if id(message) not in mapped_by_message_id
+            ]
+            if source_lookup_chunk and unmapped:
+                noop_reason = (
+                    "selected leaf chunk lost its raw store lineage"
+                    if len(unmapped) == len(source_lookup_chunk)
+                    else "selected leaf chunk maps only part of its consumed rows"
+                )
                 self._last_leaf_summary_error = noop_reason
                 logger.warning(
-                    "LCM refusing to publish a leaf with no source lineage (%d message(s) in chunk)",
-                    len(source_lineage_chunk),
+                    "LCM refusing to publish a leaf: %d of %d consumed message(s) have no raw "
+                    "store lineage",
+                    len(unmapped), len(source_lookup_chunk),
                 )
                 break
             consumed_store_ids = self._get_store_ids_for_messages(source_lookup_chunk)

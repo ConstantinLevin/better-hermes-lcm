@@ -145,3 +145,29 @@ def test_a_node_with_thousands_of_sources_can_still_be_read(tmp_path):
         assert fetched[ids[-1]]["content"] == "m2499"
     finally:
         store.close()
+
+
+def test_an_interrupted_publication_cannot_be_committed_by_a_later_one(tmp_path):
+    """verify-4 #4: rollback protection caught Exception only, so a KeyboardInterrupt (or a
+    host cancellation) left the node insert pending and the NEXT successful publication
+    committed it — without its sidecar."""
+    dag = SummaryDAG(str(tmp_path / "interrupt.db"))
+    try:
+        original = dag.node_meta.write_statement
+
+        def interrupt(*a, **k):
+            raise KeyboardInterrupt()
+
+        dag.node_meta.write_statement = interrupt
+        try:
+            with pytest.raises(KeyboardInterrupt):
+                dag.add_node_with_meta(_node(summary="interrupted"), level=1)
+        finally:
+            dag.node_meta.write_statement = original
+
+        good = dag.add_node_with_meta(_node(summary="the next one"), level=1)
+        summaries = [n.summary for n in dag.get_session_nodes("s")]
+        assert summaries == ["the next one"], summaries
+        assert dag.node_meta.read(good)["level"] == 1
+    finally:
+        dag.close()

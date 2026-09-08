@@ -321,9 +321,11 @@ class SummaryDAG:
                 )
                 # the COMMIT is inside the protection too: a refused commit used to leave the
                 # transaction open, and the next unrelated commit then published the node that
-                # had supposedly failed (verify-1 / verify-3 on CP03).
+                # had supposedly failed (verify-1 / verify-3 on CP03). BaseException, because a
+                # KeyboardInterrupt or a host cancellation left the insert pending just as
+                # effectively (verify-4 #4).
                 self._conn.commit()
-            except Exception:
+            except BaseException:
                 try:
                     self._conn.rollback()
                 except Exception:  # pragma: no cover - a dead connection cannot roll back

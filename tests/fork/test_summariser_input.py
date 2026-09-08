@@ -163,3 +163,23 @@ def test_a_failed_tool_result_does_not_read_like_a_successful_one():
         {"type": "text", "text": "compare these"},
     ])
     assert "×2" in two_images and "compare these" in two_images
+
+
+def test_no_tool_argument_value_is_lost_to_a_key_collision_or_a_duplicate_key():
+    """verify-4 #5: the sanitised keyspace could still collide in one insertion order, and
+    re-serialising parsed JSON dropped one of two values a provider really sent."""
+    from hermes_lcm.extraction import (
+        sanitize_pre_compaction_tool_arguments as clean_args,
+        _sanitize_json_like,
+    )
+    collided = _sanitize_json_like(
+        {"a<active_memory>x</active_memory>": "FIRST", "a": "SECOND"}
+    )
+    assert sorted(collided.values()) == ["FIRST", "SECOND"], collided
+    reversed_order = _sanitize_json_like(
+        {"a": "SECOND", "a<active_memory>x</active_memory>": "FIRST"}
+    )
+    assert sorted(reversed_order.values()) == ["FIRST", "SECOND"], reversed_order
+
+    duplicated = clean_args('{"k":"FIRST","k":"SECOND"}')
+    assert "FIRST" in duplicated and "SECOND" in duplicated

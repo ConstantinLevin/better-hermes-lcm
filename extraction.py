@@ -372,22 +372,27 @@ def strip_injected_context_blocks(text: str, *, mark: bool = False) -> str:
 def _sanitize_json_like(value: Any) -> Any:
     if isinstance(value, dict):
         # fork: betterlcm — a sanitised key may never take another key's place. Upstream
-        # rebuilt the dict from sanitised keys, so two keys that became identical collapsed
-        # and the first value was dropped outright: {"a<active_memory>x</active_memory>":
-        # "FIRST", "a": "SECOND"} became {"a": "SECOND"} — a whole tool argument gone with no
-        # marker (audit p05 EX04). Keys are still cleaned of payloads; a collision keeps the
-        # original key instead, so every value survives.
-        sanitized: Dict[Any, Any] = {}
-        for key, val in value.items():
-            clean_key = key
-            if isinstance(key, str):
-                candidate = strip_injected_context_blocks(_sanitize_string_media(key))
-                if candidate not in sanitized or candidate == key:
-                    clean_key = candidate
-            if clean_key in sanitized:
-                clean_key = key
-            sanitized[clean_key] = _sanitize_json_like(val)
-        return sanitized
+        # rebuilt the dict from sanitised keys, so two keys that became identical collapsed and
+        # the first value was dropped outright: {"a<active_memory>x</active_memory>": "FIRST",
+        # "a": "SECOND"} became {"a": "SECOND"} — a whole tool argument gone with no marker
+        # (audit p05 EX04). The whole ORIGINAL keyspace is reserved first, so a sanitised name
+        # is used only when nothing else — sanitised or original — already claims it, in either
+        # insertion order (verify-4 #5).
+        original_keys = {key for key in value if isinstance(key, str)}
+        taken: set = set()
+        renamed: dict = {}
+        for key in value:
+            if not isinstance(key, str):
+                renamed[key] = key
+                continue
+            candidate = strip_injected_context_blocks(_sanitize_string_media(key))
+            if candidate != key and (candidate in original_keys or candidate in taken):
+                candidate = key  # the clean spelling is somebody else's; keep our own
+            if candidate in taken:
+                candidate = key
+            taken.add(candidate)
+            renamed[key] = candidate
+        return {renamed[key]: _sanitize_json_like(val) for key, val in value.items()}
     if isinstance(value, list):
         return [_sanitize_json_like(item) for item in value]
     if isinstance(value, str):
@@ -411,9 +416,26 @@ def sanitize_pre_compaction_tool_arguments(arguments: Any) -> str:
         return json.dumps(_sanitize_json_like(arguments), ensure_ascii=False)
     if not isinstance(arguments, str):
         return sanitize_pre_compaction_content(arguments)
+    # fork: betterlcm — duplicate JSON keys are collapsed by json.loads, so re-serialising a
+    # parsed copy silently dropped one of two values a provider had really sent
+    # ({"k":"FIRST","k":"SECOND"} became {"k":"SECOND"}; verify-4 #5). Detect that and clean
+    # the raw text instead, which keeps both.
+    duplicate_keys = False
+
+    def _note_duplicates(pairs):
+        nonlocal duplicate_keys
+        seen: set = set()
+        for key, _value in pairs:
+            if key in seen:
+                duplicate_keys = True
+            seen.add(key)
+        return dict(pairs)
+
     try:
-        parsed = json.loads(arguments)
+        parsed = json.loads(arguments, object_pairs_hook=_note_duplicates)
     except Exception:
+        return sanitize_pre_compaction_content(arguments)
+    if duplicate_keys:
         return sanitize_pre_compaction_content(arguments)
     return json.dumps(_sanitize_json_like(parsed), ensure_ascii=False)
 
