@@ -909,3 +909,29 @@ def test_recent_reports_a_real_work_cap_hit_not_an_empty_window(tmp_path):
         assert str(cap) in payload["incomplete_reason"]
     finally:
         e.shutdown()
+
+
+def test_an_orphan_tool_result_is_named_not_dropped(tmp_path):
+    """verify-4 #10: an orphan result was dropped with only a log line, and a missing result
+    got a stub claiming it was covered by "the context summary above" — with an empty DAG."""
+    e = _engine(tmp_path, "orphan.db")
+    try:
+        messages = [
+            {"role": "user", "content": "what happened?"},
+            {"role": "tool", "tool_call_id": "gone", "content": "ACTION FAILED: disk full"},
+        ]
+        sanitized = e._sanitize_tool_pairs([dict(m) for m in messages])
+        rendered = "\n".join(str(m.get("content") or "") for m in sanitized)
+        assert "answered no call in this replay window" in rendered
+        assert "ACTION FAILED" in rendered
+        assert "lcm_grep" in rendered
+
+        unanswered = e._sanitize_tool_pairs([
+            {"role": "assistant", "tool_calls": [
+                {"id": "c1", "type": "function", "function": {"name": "t", "arguments": "{}"}}]},
+        ])
+        stub = next(m for m in unanswered if m.get("role") == "tool")
+        assert "not in the replayed window" in stub["content"]
+        assert "context summary above" not in stub["content"]
+    finally:
+        e.shutdown()

@@ -2696,6 +2696,15 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
     results: list[Dict[str, Any]] = []
     search_failures: list[Dict[str, str]] = []  # fork: betterlcm — see the except blocks below
     bounded_scans: list[Dict[str, Any]] = []  # fork: scans that stopped at a work cap
+    # fork: betterlcm — if the current turn could not be stored, this search cannot see it.
+    # The engine logged the failure and the tool still answered "no matching history"
+    # (verify-4 #11): a false exhaustive negative over content that just reached the plugin.
+    consecutive_ingest_failures = int(getattr(engine, "_consecutive_ingest_failures", 0) or 0)
+    if consecutive_ingest_failures:
+        search_failures.append({
+            "source": "current_turn_ingest",
+            "error": str(getattr(engine, "_last_ingest_error", "") or "ingest failed")[:300],
+        })
 
     if content_scope in {"history", "both"}:
         try:

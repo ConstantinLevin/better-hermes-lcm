@@ -22210,8 +22210,15 @@ class TestAssemblyToolPairGuardrail:
         self._assert_provider_tool_sequence_valid(result)
         assert result[1]["role"] == "tool"
         assert result[1]["tool_call_id"] == "call_late"
-        assert "earlier conversation" in result[1]["content"]
+        # fork: betterlcm — the stub says what is true (the result is in the raw store), not
+        # that a summary above covers it, and the late result itself is named rather than
+        # dropped in silence (verify-4 #10)
+        assert "not in the replayed window" in result[1]["content"]
+        assert "lcm_expand" in result[1]["content"]
         assert all(msg.get("content") != "late result" for msg in result)
+        rendered = "\n".join(str(msg.get("content") or "") for msg in result)
+        assert "answered no call in this replay window" in rendered
+        assert "late result" in rendered  # its head, inside the marker
 
     def test_sanitize_tool_pairs_drops_duplicate_late_result(self, tmp_path):
         instance = self._make_engine(tmp_path, "lcm_duplicate_tool_result.db")

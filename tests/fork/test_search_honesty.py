@@ -98,3 +98,24 @@ def test_grep_says_which_query_tokens_it_did_not_search_for(tmp_path):
         assert "query_interpretation" not in plain, "nothing was dropped, so nothing to report"
     finally:
         e.shutdown()
+
+
+def test_a_search_after_a_failed_ingest_is_not_reported_as_complete(tmp_path):
+    """verify-4 #11: the engine logged that the current turn could not be stored and the tool
+    still answered "no matching history" — a false exhaustive negative over content that had
+    just reached the plugin."""
+    from hermes_lcm import tools as lcm_tools
+    cfg = LCMConfig(database_path=str(tmp_path / "ingestfail.db"))
+    e = LCMEngine(config=cfg, hermes_home=str(tmp_path))
+    try:
+        e.on_session_start("if", platform="cli", context_length=200_000)
+        clean = json.loads(lcm_tools.lcm_grep({"query": "LATEST"}, engine=e))
+        assert clean["complete"] is True
+
+        e._record_ingest_failure("test", RuntimeError("database is locked"))
+        payload = json.loads(lcm_tools.lcm_grep({"query": "LATEST"}, engine=e))
+        assert payload["complete"] is False
+        assert any(item["source"] == "current_turn_ingest" for item in payload["search_failures"])
+        assert "database is locked" in json.dumps(payload["search_failures"])
+    finally:
+        e.shutdown()

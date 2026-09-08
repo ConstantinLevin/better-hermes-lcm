@@ -139,6 +139,38 @@ ASSEMBLY_OMISSION_MARKER_HEADER = (
 )
 
 
+def missing_tool_result_stub(tool_call_id: str) -> str:
+    """Stand in for a tool result the replay window does not contain.
+
+    fork: betterlcm — upstream's stub said the result was "in the context summary above", which
+    was a claim about a summary nobody had verified: with an empty DAG the reader was sent to
+    something that did not exist (verify-4 #10). This says what is true and how to get it.
+    """
+    return (
+        "[LCM: this call's result is not in the replayed window. It is in the raw store — "
+        f"lcm_grep or lcm_expand for tool_call_id={tool_call_id or '?'}]"
+    )
+
+
+def orphan_tool_results_marker(results: List[dict]) -> str:
+    """Name tool results that answered no call in the replayed window.
+
+    They cannot be replayed as ``tool`` messages without their call — the provider contract
+    forbids it — but they are real content, and dropping them silently is exactly the loss
+    this fork removes (verify-4 #10).
+    """
+    parts = []
+    for result in results[:10]:
+        call_id = str(result.get("tool_call_id") or "?")
+        head = content_head(str(result.get("content") or ""), limit=120)
+        parts.append(f"tool_call_id={call_id}: {head}")
+    more = f" (+{len(results) - 10} more)" if len(results) > 10 else ""
+    return (
+        f"[LCM: {len(results)} tool result(s) answered no call in this replay window and are "
+        f"not replayed here; they are stored — lcm_grep / lcm_expand. {'; '.join(parts)}{more}]"
+    )
+
+
 def injected_context_marker(removed_chars: int) -> str:
     """Name a span of host-injected context removed from the summariser's input.
 

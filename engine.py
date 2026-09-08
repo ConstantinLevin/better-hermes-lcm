@@ -5650,6 +5650,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         sanitized: List[Dict[str, Any]] = []
         dropped_tool_results = 0
         inserted_stub_results = 0
+        orphaned: List[Dict[str, Any]] = []  # fork: betterlcm — results with no call here
 
         i = 0
         while i < len(messages):
@@ -5657,6 +5658,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
 
             if msg.get("role") == "tool":
                 dropped_tool_results += 1
+                orphaned.append(msg)  # fork: real content; named below, never silent
                 i += 1
                 continue
 
@@ -5695,7 +5697,10 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                     if insert_missing_tool_stubs:
                         sanitized.append({
                             "role": "tool",
-                            "content": "[Result from earlier conversation — see context summary above]",
+                            # fork: betterlcm — say what is true. The old stub claimed the
+                            # result was in the summary above, with nothing establishing that
+                            # any summary covered it (verify-4 #10).
+                            "content": marked_loss.missing_tool_result_stub(expected_id),
                             "tool_call_id": expected_id,
                         })
                         inserted_stub_results += 1
@@ -5703,21 +5708,31 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                 # Anything left over answers no call in this window. It is still real content:
                 # count it as dropped from the PROVIDER view (it cannot be replayed without its
                 # call) — the raw row and its DAG lineage are untouched and remain expandable.
-                leftover = sum(len(queue) for queue in pending.values())
-                if leftover:
-                    dropped_tool_results += leftover
+                leftover_results = [result for queue in pending.values() for result in queue]
+                if leftover_results:
+                    dropped_tool_results += len(leftover_results)
+                    orphaned.extend(leftover_results)
                     logger.debug(
                         "LCM tool-pair repair: %d result(s) answered no call in this window",
-                        leftover,
+                        len(leftover_results),
                     )
                 i = run_end - 1
 
                 while i + 1 < len(messages) and messages[i + 1].get("role") == "tool":
                     dropped_tool_results += 1
+                    orphaned.append(messages[i + 1])
                     i += 1
 
             i += 1
 
+        if orphaned:
+            # fork: betterlcm — a result that answers no call in this window cannot be replayed
+            # as a `tool` message (the provider contract forbids it), but it is real content:
+            # name it and say where it lives instead of dropping it silently (verify-4 #10).
+            sanitized.append({
+                "role": "user",
+                "content": marked_loss.orphan_tool_results_marker(orphaned),
+            })
         if dropped_tool_results:
             logger.info(
                 "LCM tool-pair guardrail: dropped %d late/orphan/duplicate tool result(s)",
