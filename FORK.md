@@ -41,6 +41,21 @@ touch, is in `docs/fork-touchpoints.md` — read it before resolving a conflict:
 whether a conflicting hunk is a hook (keep ours, re-apply on top of theirs) or a behavioural
 change upstream also made (reconcile). Every fork-only test lives under `tests/fork/`.
 
+## Tracking lossless-claw (the second maintenance duty)
+The fork was inspired by [lossless-claw](https://github.com/Martian-Engineering/lossless-claw)
+(OpenClaw, TypeScript). On **every lossless-claw release**:
+1. Clone the release tag to a temp dir (`git clone --depth 1 --branch vX.Y.Z … /tmp/lossless-claw-vX.Y.Z`).
+2. Compare it deeply against this fork, one agent per aspect, code-level with citations on both
+   sides: (1) compaction/DAG algorithm, (2) loss avoidance/provenance/recovery, (3) summariser
+   prompts/index quality/evaluation, (4) retrieval tools/host integration/operability. The
+   prompts used for v1.0.0 are in `docs/claw-comparison/prompts/`; reuse them.
+3. Keep only findings where claw is genuinely better *for this fork's purpose* (no loss; 1M
+   without degrading 256k) or fixes something the hermes-lcm base does badly. Port them into
+   the fork modules, with tests under `tests/fork/`, and record each ported item (and each
+   rejected one, with the reason) in `docs/claw-comparison/vX.Y.Z.md`.
+4. The same two hard rules apply as for upstream merges: 256k DAG structure stays upstream's,
+   and nothing drops content without a marker.
+
 ## Fork configuration reference
 Every fork setting has a dataclass field, an env var and (for the weighted ones) an anchor in
 `window_scaling.py`. `0` / `0.0` means "no override — use the curve"; `lcm_status` →
