@@ -619,7 +619,7 @@ def test_non_codex_gpt55_keeps_host_context_window(engine):
     assert engine.raw_context_length == 400_000
     assert engine.context_length == 400_000
     assert engine.effective_context_length_cap is None
-    assert engine.threshold_tokens == int(400_000 * engine._config.context_threshold)
+    assert engine.threshold_tokens == int(400_000 * engine.context_threshold)  # fork: resolved (curved) threshold
 
 
 @pytest.mark.parametrize(
@@ -850,7 +850,7 @@ def test_session_start_does_not_overwrite_update_model_identity_when_context_len
     assert engine.provider == "new-provider"
     assert engine.api_mode == "chat_completions"
     assert engine.context_length == 204_800
-    assert engine.threshold_tokens == int(204_800 * engine._config.context_threshold)
+    assert engine.threshold_tokens == int(204_800 * engine.context_threshold)  # fork: resolved (curved) threshold
 
 
 def test_session_start_does_not_clear_or_repopulate_update_model_identity_when_optional_fields_are_empty(engine):
@@ -919,7 +919,7 @@ def test_session_start_can_initialize_context_length_without_update_model(engine
 
     assert engine.model == "minimax-m2.7"
     assert engine.context_length == 204_800
-    assert engine.threshold_tokens == int(204_800 * engine._config.context_threshold)
+    assert engine.threshold_tokens == int(204_800 * engine.context_threshold)  # fork: resolved (curved) threshold
 
 
 def test_session_start_clears_previous_session_context_window_when_new_window_is_missing(engine):
@@ -1125,7 +1125,7 @@ def test_positive_session_start_context_length_replaces_consumed_update_model_wi
     assert engine.model == "session-only-model"
     assert engine.provider == "session-provider"
     assert engine.context_length == 204_800
-    assert engine.threshold_tokens == int(204_800 * engine._config.context_threshold)
+    assert engine.threshold_tokens == int(204_800 * engine.context_threshold)  # fork: resolved (curved) threshold
     assert engine._context_length_source == "session_start"
 
 
@@ -13357,7 +13357,7 @@ class TestSessionRollover:
         )
         engine.update_model("foreground-model", 200000)
         assert engine.context_length == 200000
-        assert engine.threshold_tokens == int(200000 * config.context_threshold)
+        assert engine.threshold_tokens == int(200000 * engine.context_threshold)  # fork: resolved (curved) threshold
 
         HostAgentFrame(
             session_id="background-review-session",
@@ -13365,7 +13365,7 @@ class TestSessionRollover:
         ).update_context_engine(engine)
 
         assert engine.context_length == 200000
-        assert engine.threshold_tokens == int(200000 * config.context_threshold)
+        assert engine.threshold_tokens == int(200000 * engine.context_threshold)  # fork: resolved (curved) threshold
 
     def test_state_db_only_child_session_can_rebind_as_foreground_branch(self, tmp_path):
         hermes_home = tmp_path / "hermes-home"
@@ -15832,7 +15832,7 @@ class TestSessionRollover:
         assert not engine._thread_context_has_auxiliary_session("foreground-branch-session")
         branch.update_model(engine, 300000)
         assert engine.context_length == 300000
-        assert engine.threshold_tokens == int(300000 * config.context_threshold)
+        assert engine.threshold_tokens == int(300000 * engine.context_threshold)  # fork: resolved (curved) threshold
         branch.should_compress_preflight(engine, [
             {"role": "user", "content": "foreground branch must persist"},
         ])

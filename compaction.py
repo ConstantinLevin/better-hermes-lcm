@@ -473,13 +473,9 @@ class CompactionMixin:
             and estimated_active_tokens >= self.threshold_tokens
         )
         sweep_deadline = time.monotonic() + _THRESHOLD_FULL_SWEEP_MAX_SECONDS
-        configured_sweep_target = int(self._config.summary_prefix_target_tokens)
-        sweep_target_tokens = max(
-            1,
-            configured_sweep_target
-            if configured_sweep_target > 0
-            else int(self._config.leaf_chunk_tokens),
-        )
+        # fork: curved. Explicit summary_prefix_target_tokens wins; otherwise the curve, whose low
+        # anchor is leaf_chunk_tokens exactly like upstream's fallback.
+        sweep_target_tokens = max(1, int(self.effective_sweep_target_tokens))
         sweep_summary_prefix_before = (
             self._summary_frontier_tokens() if threshold_full_sweep_active else 0
         )

@@ -1699,7 +1699,7 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             token_budget = min(token_budget, 12000)
 
             try:
-                timeout_seconds = self._config.summary_timeout_ms / 1000
+                timeout_seconds = self.effective_summary_timeout_ms / 1000  # fork: curved
                 if deadline is not None:
                     remaining_seconds = deadline - time.monotonic()
                     if remaining_seconds <= 0:
@@ -1715,7 +1715,7 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                     circuit_breaker=self._summary_circuit_breaker,
                     spend_guard=self._summary_spend_guard,
                     timeout=timeout_seconds,
-                    l2_budget_ratio=self._config.l2_budget_ratio,
+                    l2_budget_ratio=self.effective_l2_budget_ratio,  # fork: curved
                     l3_truncate_tokens=self._config.l3_truncate_tokens,
                     focus_topic=focus_topic or "",
                     custom_instructions=self._config.custom_instructions,
@@ -2038,8 +2038,8 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
     def _fresh_tail_boundary(self, messages: List[Dict[str, Any]]) -> FreshTailBoundary:
         return resolve_fresh_tail_boundary(
             messages,
-            fresh_tail_count=self._config.fresh_tail_count,
-            fresh_tail_max_tokens=self._config.fresh_tail_max_tokens,
+            fresh_tail_count=self.effective_fresh_tail_count,  # fork: curved
+            fresh_tail_max_tokens=self.effective_fresh_tail_max_tokens,
         )
 
     def _fresh_tail_start(self, messages: List[Dict[str, Any]]) -> int:
@@ -2053,14 +2053,14 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
     ) -> tuple[List[Dict[str, Any]], FreshTailBoundary]:
         """Load and resolve a stored tail, expanding backward for tool pairing."""
         total_count = int(self._store.get_session_count(session_id))
-        configured_count = max(minimum_count, int(self._config.fresh_tail_count or 0))
-        if self._config.fresh_tail_max_tokens > 0:
+        configured_count = max(minimum_count, int(self.effective_fresh_tail_count or 0))  # fork: curved
+        if self.effective_fresh_tail_max_tokens > 0:
             configured_count = max(1, configured_count)
         if total_count <= 0 or configured_count <= 0:
             return [], resolve_fresh_tail_boundary(
                 [],
                 fresh_tail_count=configured_count,
-                fresh_tail_max_tokens=self._config.fresh_tail_max_tokens,
+                fresh_tail_max_tokens=self.effective_fresh_tail_max_tokens,
             )
 
         load_limit = min(total_count, configured_count)
@@ -2069,7 +2069,7 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             boundary = resolve_fresh_tail_boundary(
                 rows,
                 fresh_tail_count=configured_count,
-                fresh_tail_max_tokens=self._config.fresh_tail_max_tokens,
+                fresh_tail_max_tokens=self.effective_fresh_tail_max_tokens,
             )
             selected = rows[boundary.start:]
             unresolved_tool_boundary = bool(
@@ -4939,7 +4939,7 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                 timeout=(
                     timeout_seconds
                     if timeout_seconds is not None
-                    else self._config.summary_timeout_ms / 1000
+                    else self.effective_summary_timeout_ms / 1000  # fork: curved
                 ),
             )
         except Exception as e:
@@ -5384,11 +5384,7 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         threshold = max(
             1,
             int(
-                getattr(
-                    self._config,
-                    "large_output_active_replay_stub_threshold_tokens",
-                    25_000,
-                )
+                getattr(self, "effective_stub_threshold_tokens", 25_000)  # fork: curved
                 or 0
             ),
         )
@@ -5571,7 +5567,7 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         """Check if any depth level has enough nodes for condensation."""
         self._last_condensation_suppressed_reason = ""
 
-        max_depth = self._config.incremental_max_depth
+        max_depth = self.effective_incremental_max_depth  # fork: curved
         if max_depth == 0:
             return  # condensation disabled
 
@@ -5641,7 +5637,7 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         combined_text = "\n\n---\n\n".join(node.summary for node in nodes)
         source_tokens = sum(node.token_count for node in nodes)
         token_budget = max(1000, int(source_tokens * 0.40))
-        timeout_seconds = self._config.summary_timeout_ms / 1000
+        timeout_seconds = self.effective_summary_timeout_ms / 1000  # fork: curved
         if deadline is not None:
             remaining_seconds = deadline - time.monotonic()
             if remaining_seconds <= 0:
@@ -5657,7 +5653,7 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             circuit_breaker=self._summary_circuit_breaker,
             spend_guard=self._summary_spend_guard,
             timeout=timeout_seconds,
-            l2_budget_ratio=self._config.l2_budget_ratio,
+            l2_budget_ratio=self.effective_l2_budget_ratio,  # fork: curved
             l3_truncate_tokens=self._config.l3_truncate_tokens,
             focus_topic=focus_topic or "",
             custom_instructions=self._config.custom_instructions,
@@ -5710,7 +5706,7 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         if not by_depth:
             return []
         fanin = max(2, self._config.condensation_fanin)
-        preferred_max_depth = self._config.incremental_max_depth
+        preferred_max_depth = self.effective_incremental_max_depth  # fork: curved
         for depth in sorted(by_depth):
             nodes = by_depth[depth]
             within_preferred_depth = preferred_max_depth < 0 or depth < preferred_max_depth
@@ -6548,7 +6544,7 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         if self._session_stateless:
             return {"ok": False, "reason": "session_stateless", "session_id": session_id}
 
-        fresh_tail_count = max(1, int(self._config.fresh_tail_count))
+        fresh_tail_count = max(1, int(self.effective_fresh_tail_count))  # fork: curved
         total_count = int(self._store.get_session_count(session_id))
         tail, fresh_tail_boundary = self._get_session_fresh_tail(
             session_id,
@@ -6565,7 +6561,7 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             "conversation_id": conversation_id,
             "total_message_count": total_count,
             "fresh_tail_count": fresh_tail_count,
-            "fresh_tail_max_tokens": self._config.fresh_tail_max_tokens,
+            "fresh_tail_max_tokens": self.effective_fresh_tail_max_tokens,  # fork: curved
             "effective_fresh_tail_count": effective_fresh_tail_count,
             "effective_fresh_tail_tokens": fresh_tail_boundary.tokens,
             "fresh_tail_token_limited": fresh_tail_boundary.token_limited,

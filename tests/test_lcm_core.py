@@ -7647,8 +7647,8 @@ class TestLCMEngineCloning:
             assert clone.context_length == 400_000
             assert clone.effective_context_length_cap is None
             assert clone.effective_context_length_reason == ""
-            assert clone.context_threshold == clone._config.context_threshold
-            assert clone.threshold_tokens == int(400_000 * clone._config.context_threshold)
+            assert clone.context_threshold == clone.effective_context_threshold  # fork: resolved (curved) threshold
+            assert clone.threshold_tokens == int(400_000 * clone.context_threshold)  # fork: resolved (curved) threshold
         finally:
             prototype.shutdown()
             shutdown = getattr(clone, "shutdown", None)

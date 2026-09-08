@@ -61,6 +61,16 @@ class WindowScaledSettingsMixin:
         resolved = resolve_window_scaled(self._config, int(self.context_length or 0))
         self._apply_window_scaled(resolved)
         self._apply_curved_threshold(resolved)
+        self._retune_summary_guards()
+
+    def _retune_summary_guards(self) -> None:
+        """Push the curved limits into the guard objects built in ``__init__``."""
+        guard = getattr(self, "_summary_spend_guard", None)
+        if guard is not None and hasattr(guard, "max_calls"):
+            guard.max_calls = int(self.effective_summary_spend_max_calls)
+        breaker = getattr(self, "_summary_circuit_breaker", None)
+        if breaker is not None and hasattr(breaker, "failure_threshold"):
+            breaker.failure_threshold = int(self.effective_summary_circuit_breaker_failure_threshold)
 
     # -- internals -------------------------------------------------------------------------
 

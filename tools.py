@@ -5729,7 +5729,7 @@ def lcm_expand_query(args: Dict[str, Any], **kwargs) -> str:
         return json.dumps(payload)
 
     model = engine._config.expansion_model or engine._config.summary_model or ""
-    timeout = engine._config.expansion_timeout_ms / 1000
+    timeout = engine.effective_expansion_timeout_ms / 1000  # fork: curved
     try:
         answer = _synthesize_expansion_answer(
             prompt=prompt,
@@ -6275,7 +6275,7 @@ def lcm_inspect(args: Dict[str, Any], **kwargs) -> str:
     min_store_id = store_totals_row[1] if store_totals_row else None
     max_store_id = store_totals_row[2] if store_totals_row else None
     estimated_tokens = int(store_totals_row[3] or 0) if store_totals_row else 0
-    fresh_tail_count = max(0, int(engine._config.fresh_tail_count or 0))
+    fresh_tail_count = max(0, int(engine.effective_fresh_tail_count or 0))  # fork: curved
     fresh_tail_rows, fresh_tail_boundary = engine._get_session_fresh_tail(session_id)
     fresh_tail_display_rows = fresh_tail_rows[-limit:]
     fresh_tail_items = [

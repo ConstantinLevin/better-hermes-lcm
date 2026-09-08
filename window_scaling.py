@@ -30,6 +30,8 @@ DEFAULT_SCALE_HIGH_WINDOW = 1_000_000
 
 # Sentinel for "same as the resolved context_threshold" (drain stop's low anchor).
 THRESHOLD = object()
+# Sentinel for "same as config.leaf_chunk_tokens" (sweep target's low anchor: upstream falls back to it).
+LEAF_CHUNK = object()
 
 
 @dataclass(frozen=True)
@@ -74,7 +76,7 @@ WINDOW_SCALED_DEFAULTS: tuple[Anchor, ...] = (
     Anchor("condense_budget_tokens", "summary_budget_fraction", 0, 0.20,
            high_is_fraction=True, cast=int, unset=0.0),
     # Sweep-flag condensation target: upstream falls back to leaf_chunk_tokens (20k).
-    Anchor("sweep_target_tokens", "summary_prefix_target_tokens", 20_000, 0.20,
+    Anchor("sweep_target_tokens", "summary_prefix_target_tokens", LEAF_CHUNK, 0.20,
            high_is_fraction=True, cast=int, unset=0),
     Anchor("incremental_max_depth", "incremental_max_depth", 3, 5, cast=int),
     Anchor("summary_concurrency", "summary_concurrency", 1, 6, cast=int, unset=0),
@@ -126,12 +128,15 @@ def _anchor_value(raw: Any, is_fraction: bool, context_length: int) -> float:
 
 
 def interpolate(anchor: Anchor, context_length: int, t: float, *,
-                threshold_value: Optional[float] = None) -> Any:
+                threshold_value: Optional[float] = None,
+                leaf_chunk_tokens: Optional[int] = None) -> Any:
     """Curve value for ``anchor`` at ``t``. ``threshold_value`` resolves the THRESHOLD sentinel."""
     low = anchor.low
     if low is THRESHOLD:
         low = threshold_value if threshold_value is not None else 0.0
         low_val = float(low)          # already a fraction of W
+    elif low is LEAF_CHUNK:
+        low_val = float(leaf_chunk_tokens if leaf_chunk_tokens is not None else 20_000)
     else:
         low_val = _anchor_value(low, anchor.low_is_fraction, context_length)
     high_val = _anchor_value(anchor.high, anchor.high_is_fraction, context_length)
@@ -168,7 +173,7 @@ def explicit_override(config: Any, anchor: Anchor,
         return True, "env"
     # A config built directly (LCMConfig(context_threshold=0.9), presets, tests) carries no
     # tracked source. If its value differs from upstream's default it was set on purpose.
-    if anchor.low is not THRESHOLD and not anchor.low_is_fraction and value is not None:
+    if anchor.low is not THRESHOLD and anchor.low is not LEAF_CHUNK and not anchor.low_is_fraction and value is not None:
         try:
             if anchor.cast(value) != anchor.cast(anchor.low):
                 return True, "manual"
@@ -221,13 +226,16 @@ def resolve_window_scaled(config: Any, context_length: int,
             # No window: upstream behaviour. Fraction lows without a window resolve to 0.
             if anchor.low is THRESHOLD:
                 value = threshold
+            elif anchor.low is LEAF_CHUNK:
+                value = int(getattr(config, "leaf_chunk_tokens", 20_000) or 20_000)
             elif anchor.low_is_fraction:
                 value = 0
             else:
                 value = anchor.cast(anchor.low)
             out[anchor.name] = Resolved(anchor.name, value, "upstream(no window)", 0.0)
             continue
-        value = interpolate(anchor, W, t, threshold_value=threshold)
+        value = interpolate(anchor, W, t, threshold_value=threshold,
+                            leaf_chunk_tokens=int(getattr(config, "leaf_chunk_tokens", 20_000) or 20_000))
         out[anchor.name] = Resolved(anchor.name, value, f"curve@t={t:.2f}", t)
     return out
 
