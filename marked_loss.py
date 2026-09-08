@@ -214,6 +214,56 @@ def excluded_reply_marker(store_ids: List[int]) -> str:
     )
 
 
+RECEIPT_LINE_PREFIX = "[LCM:"
+
+
+def inherited_receipts(summaries: Iterable[str]) -> List[str]:
+    """Every ``[LCM: …]`` receipt line found in these summaries, de-duplicated in order.
+
+    fork: betterlcm — a condensed parent is written by the summariser, which has no obligation
+    to reproduce a receipt its sources carried. Merging them into the parent keeps the record
+    of what was excluded attached to the node that now stands for it (verify-4 #8).
+    """
+    seen: List[str] = []
+    for summary in summaries:
+        for line in str(summary or "").splitlines():
+            stripped = line.strip()
+            if stripped.startswith(RECEIPT_LINE_PREFIX) and stripped not in seen:
+                seen.append(stripped)
+    return seen
+
+
+def compact_assembly_omission_marker(
+    *,
+    omitted_node_ids: List[int],
+    depth_cap_hits: List[int],
+    omitted_tail_messages: int,
+    dropped_internal_turns: int = 0,
+) -> str:
+    """The one-line form, for a summary budget that cannot hold the full receipt.
+
+    fork: betterlcm — the receipt is what tells the reader something is missing, so it must
+    survive a budget that the full sentence does not fit into (verify-4 #9). The counts are
+    what matter; ``lcm_status`` and the log carry the ids.
+    """
+    counts = []
+    if omitted_node_ids:
+        counts.append(f"{len(omitted_node_ids)} summary node(s)")
+    if depth_cap_hits:
+        counts.append(f"{len(depth_cap_hits)} depth cap(s)")
+    if omitted_tail_messages:
+        counts.append(f"{omitted_tail_messages} tail message(s)")
+    if dropped_internal_turns:
+        counts.append(f"{dropped_internal_turns} internal-only turn(s)")
+    if not counts:
+        return ""
+    return (
+        "[LCM assembly omissions — not rendered this turn: "
+        + ", ".join(counts)
+        + "; nothing is deleted — lcm_status / lcm_expand]"
+    )
+
+
 def assembly_omission_marker(
     *,
     omitted_node_ids: List[int],

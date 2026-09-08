@@ -580,6 +580,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         # cleanup during boundary cooldown without running summary work.
         self._preflight_cleanup_only_due_to_boundary_cooldown = False
         self._preflight_cleanup_only_below_threshold = False  # fork: betterlcm
+        self._last_assembly_omission_note = ""  # fork: betterlcm (verify-4 #9)
         self._leaf_lookahead = None  # fork: betterlcm (leaf_pipeline.LeafLookahead)
         # fork: betterlcm — construct the compaction mutex here, not on first use. Creating it
         # lazily inside compress() meant two threads arriving together could each build their
@@ -4033,6 +4034,9 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
             "threshold_tokens": self.threshold_tokens,
             "last_compression_status": self._last_compression_status,
             "last_compression_noop_reason": self._last_compression_noop_reason,
+            # fork: betterlcm — an omission receipt that could not fit the summary budget is
+            # recorded here rather than lost (verify-4 #9)
+            "last_assembly_omission_note": getattr(self, "_last_assembly_omission_note", ""),
             "threshold_full_sweep": dict(self._last_threshold_full_sweep),
             "ingest_failure_count": self._ingest_failure_count,
             "consecutive_ingest_failures": self._consecutive_ingest_failures,
@@ -5964,6 +5968,14 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         earliest_at, latest_at = self._dag.get_source_time_window(
             [node.node_id for node in nodes]
         )
+        # fork: betterlcm — carry the children's loss receipts into the parent. The summariser
+        # writes the parent's prose and has no obligation to reproduce a "[LCM: …]" line its
+        # sources carried, so the record of what was excluded used to end at the condensation
+        # boundary (verify-4 #8).
+        inherited = marked_loss.inherited_receipts(node.summary for node in nodes)
+        missing = [line for line in inherited if line not in summary_text]
+        if missing:
+            summary_text = summary_text.rstrip() + "\n" + "\n".join(missing)
         summary_tokens = count_tokens(summary_text)
         condensed_node = SummaryNode(
             session_id=self._session_id,
@@ -6479,12 +6491,42 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
             dropped_internal_turns=dropped_internal_turns,
         )
         if omission_marker:
+            # fork: betterlcm — the receipt is INDIVISIBLE: rather than dropping the one part
+            # that says what is missing, give up rendered summaries (naming each) until it
+            # fits. Dropping the marker under a small budget left the reader with a prefix
+            # that silently omitted everything (verify-4 #9).
             selected_parts = (selected_parts if summary_parts else []) + [omission_marker]
             if summary_budget is not None:
-                candidate_msg = {"role": summary_role, "content": "\n\n---\n\n".join(selected_parts)}
-                if count_message_tokens(candidate_msg) > summary_budget:
-                    selected_parts = selected_parts[:-1]
-                    logger.warning("LCM assembly omission marker did not fit the summary budget: %s", omission_marker)
+                def _fits(parts: list[str]) -> bool:
+                    return count_message_tokens(
+                        {"role": summary_role, "content": "\n\n---\n\n".join(parts)}
+                    ) <= summary_budget
+
+                if not _fits(selected_parts):
+                    # fork: betterlcm — before giving up the receipt, try its one-line form.
+                    # Upstream dropped the whole marker at the first sign of pressure, which is
+                    # exactly when something HAS been omitted (verify-4 #9).
+                    compact_marker = marked_loss.compact_assembly_omission_marker(
+                        omitted_node_ids=omitted_node_ids,
+                        depth_cap_hits=depth_cap_hits,
+                        omitted_tail_messages=omitted_tail_messages,
+                        dropped_internal_turns=dropped_internal_turns,
+                    )
+                    if compact_marker and _fits(selected_parts[:-1] + [compact_marker]):
+                        selected_parts[-1] = compact_marker
+                        omission_marker = compact_marker
+                    else:
+                        # Rendered content outranks the receipt at this point — an empty prefix
+                        # that only says "something is missing" helps nobody — but the omission
+                        # is recorded where the operator and the agent can still see it.
+                        selected_parts = selected_parts[:-1]
+                        self._last_assembly_omission_note = omission_marker
+                        logger.warning(
+                            "LCM assembly omission marker did not fit the summary budget; "
+                            "recorded in status instead: %s",
+                            omission_marker,
+                        )
+                        omission_marker = ""
         if summary_parts or omission_marker:
             if selected_parts:
                 combined = "\n\n---\n\n".join(selected_parts)

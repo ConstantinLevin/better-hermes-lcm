@@ -975,3 +975,32 @@ def test_recent_says_the_database_was_unavailable_instead_of_empty(tmp_path):
             e.shutdown()
         except Exception:
             pass
+
+
+def test_a_tight_budget_gets_the_one_line_receipt_and_never_silence(tmp_path):
+    """verify-4 #9: the receipt was the first thing dropped when the budget got tight — which
+    is exactly when something HAS been omitted. It now degrades to a one-line form, and if
+    even that cannot fit, the note is recorded in status rather than lost."""
+    e = _engine(tmp_path, "receipt.db", incremental_max_depth=0)
+    try:
+        base = time.time()
+        for index in range(6):
+            _add(e, "marked-session", 0, f"summary number {index} " + "s" * 400, base + index)
+        assembled = e._assemble_context(
+            None, [{"role": "user", "content": "tail"}], assembly_cap_override=300,
+        )
+        rendered = "\n".join(str(m.get("content") or "") for m in assembled)
+        assert "[LCM assembly omissions" in rendered, rendered[:400]
+        assert "not rendered this turn" in rendered or "did not fit" in rendered
+
+        # and under a budget too small even for the one-line form, the note survives in status
+        e._assemble_context(
+            None, [{"role": "user", "content": "tail"}], assembly_cap_override=40,
+        )
+        status = e.get_status()
+        assert (
+            "[LCM assembly omissions" in rendered
+            or "[LCM assembly omissions" in status.get("last_assembly_omission_note", "")
+        )
+    finally:
+        e.shutdown()

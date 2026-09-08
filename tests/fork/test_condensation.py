@@ -272,3 +272,29 @@ def test_the_low_anchor_condenses_one_group_at_every_eligible_depth(tmp_path, mo
         assert {1, 2, 3} <= published, f"one pass must reach every eligible depth, got {published}"
     finally:
         e.shutdown()
+
+
+def test_a_condensed_parent_inherits_its_children_s_loss_receipts(tmp_path, monkeypatch):
+    """verify-4 #8: the summariser writes the parent's prose and need not reproduce a
+    "[LCM: …]" receipt its sources carried, so the record of what had been excluded ended at
+    the condensation boundary."""
+    from hermes_lcm import escalation
+    monkeypatch.setattr(escalation, "_call_llm_for_summary",
+                        lambda *a, **k: "merged prose\nExpand for details about: merged")
+    e = _engine(tmp_path, None, condensation_fanin=2, incremental_max_depth=2)
+    try:
+        e._session_id = "inherit"
+        receipt = "[LCM: 3 repl(y/ies) to ignored host-injected message(s) are sources of this node]"
+        children = [
+            e._dag.add_node_with_meta(SummaryNode(
+                session_id="inherit", depth=0, summary=f"child {index}\n{receipt}",
+                token_count=20, source_token_count=100, source_ids=[index + 1],
+                source_type="messages", created_at=time.time() + index), level=1)
+            for index in range(2)
+        ]
+        nodes = [e._dag.get_node(node_id) for node_id in children]
+        e._condense_summary_nodes(nodes)
+        parent = next(n for n in e._dag.get_session_nodes("inherit") if n.depth == 1)
+        assert receipt in parent.summary, parent.summary
+    finally:
+        e.shutdown()
