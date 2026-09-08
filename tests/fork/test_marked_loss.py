@@ -1004,3 +1004,29 @@ def test_a_tight_budget_gets_the_one_line_receipt_and_never_silence(tmp_path):
         )
     finally:
         e.shutdown()
+
+
+def test_a_retained_child_is_reachable_past_the_reverse_edge_cap(tmp_path):
+    """verify-4 #16: the reverse-edge query stops at 256 parents, so a node whose legitimate
+    current-session parent came after the first 256 was refused as absent from the session."""
+    from hermes_lcm import tools as lcm_tools
+    e = _engine(tmp_path, "reach.db", incremental_max_depth=0)
+    try:
+        e.on_session_start("new-session", platform="cli", context_length=200_000)
+        child = e._dag.add_node(SummaryNode(
+            session_id="old-session", depth=0, summary="a child\n[Expand for details: x]",
+            token_count=5, source_token_count=50, source_ids=[1], source_type="messages",
+            created_at=time.time()))
+        for index in range(300):
+            e._dag.add_node(SummaryNode(
+                session_id="old-session", depth=1, summary=f"other parent {index}",
+                token_count=5, source_token_count=50, source_ids=[child],
+                source_type="nodes", created_at=time.time()))
+        e._dag.add_node(SummaryNode(
+            session_id="new-session", depth=1, summary="the retained parent",
+            token_count=5, source_token_count=50, source_ids=[child],
+            source_type="nodes", created_at=time.time()))
+
+        assert lcm_tools._get_session_node(e, child) is not None
+    finally:
+        e.shutdown()

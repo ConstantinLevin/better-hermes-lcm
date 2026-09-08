@@ -209,8 +209,17 @@ def _is_reachable_from_current_session(engine: "LCMEngine", node: Any, *,
         parents: list[int] = []
         for child_id in frontier:
             try:
-                parent_ids = engine._dag.get_parent_node_ids(child_id)
+                # fork: betterlcm — ask for THIS session's parents first, so a node with more
+                # parents than the reverse-edge cap cannot hide its legitimate current-session
+                # parent behind them (verify-4 #16).
+                parent_ids = engine._dag.get_parent_node_ids(child_id, session_id=current)
+                if not parent_ids:
+                    parent_ids = engine._dag.get_parent_node_ids(child_id)
             except Exception:
+                logger.warning(
+                    "LCM reachability probe failed for node %s; treating it as unreachable",
+                    child_id, exc_info=True,
+                )
                 return False
             for parent_id in parent_ids:
                 if parent_id in seen:
@@ -2726,6 +2735,7 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
 
     if content_scope in {"history", "both"}:
         try:
+            message_progress: dict[str, Any] = {}  # fork: was this raw scan exhaustive?
             msg_hits = engine._store.search(
                 query,
                 session_id=search_session_id,
@@ -2736,7 +2746,15 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
                 role=role,
                 time_from=time_from,
                 time_to=time_to,
+                progress=message_progress,
             )
+            if message_progress.get("complete") is False:
+                bounded_scans.append({
+                    "source": "messages",
+                    "scanned_rows": int(message_progress.get("scanned_rows") or 0),
+                    "candidate_cap": int(message_progress.get("candidate_cap") or 0),
+                    "path": str(message_progress.get("path") or ""),
+                })
             for hit in msg_hits:
                 results.append(
                     _shape_message_hit(

@@ -546,14 +546,31 @@ class SummaryDAG:
             end = store_id
         return end
 
-    def get_parent_node_ids(self, node_id: int, limit: int = 256) -> List[int]:
+    def get_parent_node_ids(self, node_id: int, limit: int = 256,
+                            *, session_id: Optional[str] = None) -> List[int]:
         """fork: betterlcm — nodes that record ``node_id`` as one of their sources.
 
         Used to decide whether a node is reachable from the caller's session: after ``/new``
         carries the retained depths forward, a legitimately expandable child can live in the
         previous session, so session equality is the wrong authorization test.
+
+        ``session_id`` asks the DATABASE for the parents in that session first. The plain
+        query stops at ``limit`` parents, so a node with more parents than the cap could hide
+        its one legitimate current-session parent behind 256 others and the expansion was
+        refused (verify-4 #16).
         """
         with self._db_lock:
+            rows: List[Any] = []
+            if session_id is not None:
+                rows = self._conn.execute(
+                    """SELECT DISTINCT p.node_id FROM summary_nodes p, json_each(p.source_ids)
+                       WHERE p.source_type = 'nodes' AND json_each.value = ?
+                         AND p.session_id = ?
+                       LIMIT ?""",
+                    (int(node_id), str(session_id), int(limit)),
+                ).fetchall()
+                if rows:
+                    return [int(row[0]) for row in rows]
             rows = self._conn.execute(
                 """SELECT DISTINCT p.node_id FROM summary_nodes p, json_each(p.source_ids)
                    WHERE p.source_type = 'nodes' AND json_each.value = ?

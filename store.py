@@ -1337,7 +1337,8 @@ class MessageStore:
                role: str | None = None,
                time_from: float | None = None,
                time_to: float | None = None,
-               allow_operators: bool = False) -> List[Dict[str, Any]]:
+               allow_operators: bool = False,
+               progress: Dict[str, Any] | None = None) -> List[Dict[str, Any]]:
         """FTS5 search across raw messages.
 
         Retrieval contract:
@@ -1350,7 +1351,21 @@ class MessageStore:
         - ``conversation_id`` limits rows to one gateway conversation/session key
         - ``allow_operators`` marks a query the CALLER composed as FTS5 syntax,
           keeping its bare AND/OR/NOT/NEAR. Never set it for user or agent text
+        - ``progress`` (fork: betterlcm) is filled with ``complete``, ``scanned_rows``,
+          ``candidate_cap`` and ``path``. The scan is bounded by a candidate cap and used to
+          return a capped result exactly like an exhaustive one, so "no matches" could mean
+          "your match was candidate 501" (verify-4 #12).
         """
+        def _finish(found: List[Dict[str, Any]], *, complete: bool, scanned: int,
+                    cap: int, path: str = "fts") -> List[Dict[str, Any]]:
+            if progress is not None:
+                progress.update({
+                    "complete": complete,
+                    "scanned_rows": scanned,
+                    "candidate_cap": cap,
+                    "path": path,
+                })
+            return found[:limit]
         safe_query = sanitize_fts5_query(query, allow_operators=allow_operators)
         terms = extract_search_terms(safe_query)
         phrases = extract_quoted_phrases(safe_query)
@@ -1423,6 +1438,8 @@ class MessageStore:
                 scanned_rows += len(rows)
             except sqlite3.Error as exc:
                 logger.warning("FTS message search failed, falling back to LIKE: %s", exc)
+                if progress is not None:
+                    progress["fts_error"] = str(exc)
                 return self._search_like(
                     query,
                     session_id=session_id,
@@ -1433,6 +1450,7 @@ class MessageStore:
                     role=role,
                     time_from=time_from,
                     time_to=time_to,
+                    progress=progress,
                 )
 
             raw_primary_values: list[float] = []
@@ -1449,22 +1467,25 @@ class MessageStore:
                 results.append(d)
             results.sort(key=lambda result: _fts_result_sort_key(result, sort))
 
-            if not apply_directness_adjustment or len(rows) < fetch_limit or len(results) <= limit:
-                return results[:limit]
+            rows_exhausted = len(rows) < fetch_limit
+            if not apply_directness_adjustment or rows_exhausted or len(results) <= limit:
+                return _finish(results, complete=rows_exhausted, scanned=scanned_rows,
+                               cap=candidate_cap)
 
             worst_visible_primary = _fts_primary_value(results[min(limit, len(results)) - 1], sort)
             last_fetched_primary = raw_primary_values[-1]
             best_unseen_primary = last_fetched_primary - max_rank_bonus
             if best_unseen_primary > worst_visible_primary:
-                return results[:limit]
+                # the ranking bound proves nothing unseen can enter the page
+                return _finish(results, complete=True, scanned=scanned_rows, cap=candidate_cap)
 
             if scanned_rows >= candidate_cap:
-                return results[:limit]
+                return _finish(results, complete=False, scanned=scanned_rows, cap=candidate_cap)
 
             offset += len(rows)
             remaining = candidate_cap - scanned_rows
             if remaining <= 0:
-                return results[:limit]
+                return _finish(results, complete=False, scanned=scanned_rows, cap=candidate_cap)
             fetch_limit = min(fetch_limit * 2, remaining)
 
     def _search_like(self, query: str, session_id: str | None = None,
@@ -1473,13 +1494,18 @@ class MessageStore:
                      conversation_id: str | None = None,
                      role: str | None = None,
                      time_from: float | None = None,
-                     time_to: float | None = None) -> List[Dict[str, Any]]:
+                     time_to: float | None = None,
+                     progress: Dict[str, Any] | None = None) -> List[Dict[str, Any]]:
         # LIKE keeps every character the index cannot spell (emoji, punctuation)
         # because substring matching is the only way to find those rows.
         safe_query = sanitize_like_query(query)
         terms = extract_search_terms(safe_query)
         phrases = extract_quoted_phrases(safe_query)
         if not terms:
+            # fork: a query that sanitizes to nothing was never run — say so (verify-4 #12)
+            if progress is not None:
+                progress.update({"complete": False, "scanned_rows": 0, "candidate_cap": 0,
+                                 "path": "like", "no_terms": True})
             return []
         fetch_limit = compute_search_fetch_limit(limit, terms, phrases)
 
@@ -1587,6 +1613,8 @@ class MessageStore:
             )
 
         def add_rows(rows: list[sqlite3.Row]) -> None:
+            if progress is not None:  # fork: betterlcm — how much of the cap was used
+                progress["scanned_rows"] = int(progress.get("scanned_rows") or 0) + len(rows)
             for row in rows:
                 result = self._row_to_dict(row)
                 content = result.get("content") or ""
@@ -1705,6 +1733,17 @@ class MessageStore:
         results.sort(key=lambda result: _fallback_result_sort_key(result, sort))
         for result in results:
             result.pop("_fallback_score", None)
+        if progress is not None:
+            # fork: betterlcm — the LIKE scan is bounded by the same candidate cap; say when it
+            # stopped there rather than because the matches ran out (verify-4 #12).
+            scanned = int(progress.get("scanned_rows") or 0)
+            cap = compute_search_candidate_cap(limit)
+            progress.update({
+                "complete": scanned < cap,
+                "scanned_rows": scanned,
+                "candidate_cap": cap,
+                "path": "like",
+            })
         return results[:limit]
 
     # -- Helpers ------------------------------------------------------------

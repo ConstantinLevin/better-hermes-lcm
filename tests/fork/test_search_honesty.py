@@ -119,3 +119,25 @@ def test_a_search_after_a_failed_ingest_is_not_reported_as_complete(tmp_path):
         assert "database is locked" in json.dumps(payload["search_failures"])
     finally:
         e.shutdown()
+
+
+def test_a_capped_raw_message_scan_is_reported_too(tmp_path):
+    """verify-4 #12: the DAG scan disclosed its cap but the RAW message scan did not, so a
+    capped search over 500+ matching rows still answered complete:true."""
+    from hermes_lcm import search_query
+    from hermes_lcm import tools as lcm_tools
+    cfg = LCMConfig(database_path=str(tmp_path / "rawcap.db"))
+    e = LCMEngine(config=cfg, hermes_home=str(tmp_path))
+    try:
+        e.on_session_start("rc", platform="cli", context_length=200_000)
+        cap = search_query.compute_search_candidate_cap(1)
+        e._store.append_batch(
+            "rc", [{"role": "user", "content": f"alpha match {index}"} for index in range(cap + 40)]
+        )
+        e._store.commit()
+        progress: dict = {}
+        e._store.search("alpha", session_id="rc", limit=1, sort="relevance", progress=progress)
+        assert progress["complete"] is False, progress
+        assert progress["scanned_rows"] >= progress["candidate_cap"]
+    finally:
+        e.shutdown()
