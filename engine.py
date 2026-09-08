@@ -129,6 +129,8 @@ from .compaction import CompactionMixin
 from .reset_state import ResetStateMixin
 from .bypass import BypassMixin
 from .window_scaled_mixin import WindowScaledSettingsMixin  # fork: betterlcm
+from .host_cooldown import HostCooldownMixin  # fork: betterlcm
+from .errors import SummaryUnavailableError  # fork: betterlcm
 from .lifecycle_state import LifecycleStateStore
 from .message_content import (
     normalize_content_value,
@@ -370,7 +372,7 @@ def _normalize_total_compactions(value: Any) -> int:
     return value
 
 
-class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessionMixin, PlaceholderLedgerMixin, BypassMixin, WindowScaledSettingsMixin, ContextEngine):
+class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessionMixin, PlaceholderLedgerMixin, BypassMixin, WindowScaledSettingsMixin, ContextEngine):
     """Lossless Context Management engine.
 
     Automatic LCM compaction is routine background maintenance. Hosts that
@@ -1742,7 +1744,7 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                 )
                 attempt_chunk = smaller_chunk
 
-        raise RuntimeError("adaptive leaf rescue exhausted without a valid chunk")
+        raise SummaryUnavailableError("adaptive leaf rescue exhausted without a valid chunk")  # fork: betterlcm
 
     # -- ContextEngine optional methods ------------------------------------
 

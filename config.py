@@ -423,6 +423,7 @@ ENV_FIELD_SPECS: tuple[_EnvFieldSpec, ...] = (
     _EnvFieldSpec("tool_response_char_scale", "LCM_TOOL_RESPONSE_CHAR_SCALE", float),
     _EnvFieldSpec("sqlite_cache_kib", "LCM_SQLITE_CACHE_KIB", int),
     _EnvFieldSpec("token_cache_size", "LCM_TOKEN_CACHE_SIZE", int),
+    _EnvFieldSpec("summary_failure_cooldown_seconds", "LCM_SUMMARY_FAILURE_COOLDOWN_SECONDS", float),
 )
 
 _PARSER_BY_TYPE = {
@@ -808,6 +809,9 @@ class LCMConfig:
     tool_response_char_scale: float = 0.0     # multiplier on tool response char caps
     sqlite_cache_kib: int = 0                 # SQLite cache_size (KiB) for lcm.db
     token_cache_size: int = 0                 # tokens.py lru_cache size
+    # Cooldown armed when every summariser route fails (replaces upstream's silent L3
+    # truncation). Mirrors the host's built-in summary-failure cooldown (600 s).
+    summary_failure_cooldown_seconds: float = 600.0
 
     @classmethod
     def from_env(cls) -> "LCMConfig":

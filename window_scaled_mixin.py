@@ -20,19 +20,23 @@ from typing import Any, Dict
 
 try:  # package import (installed plugin / tests register ``hermes_lcm``)
     from .window_scaling import (
+        ANCHORS_BY_NAME,
         DEFAULT_SCALE_HIGH_WINDOW,
         DEFAULT_SCALE_LOW_WINDOW,
-        WINDOW_SCALED_DEFAULTS,
+        THRESHOLD,
         Resolved,
+        explicit_override,
         resolve_window_scaled,
         status_payload,
     )
 except ImportError:  # pragma: no cover - standalone import
     from window_scaling import (  # type: ignore
+        ANCHORS_BY_NAME,
         DEFAULT_SCALE_HIGH_WINDOW,
         DEFAULT_SCALE_LOW_WINDOW,
-        WINDOW_SCALED_DEFAULTS,
+        THRESHOLD,
         Resolved,
+        explicit_override,
         resolve_window_scaled,
         status_payload,
     )
@@ -41,16 +45,20 @@ _DEFAULT_THRESHOLD_SOURCE = "manual_or_default"
 
 
 class WindowScaledSettingsMixin:
-    """Resolve and expose window-weighted settings on the engine."""
+    """Resolve and expose window-weighted settings on the engine.
+
+    ``effective_<name>`` are *properties*: an explicit value on ``self._config`` (set at
+    construction, by a preset, or mutated at runtime by a tool/test) is honoured immediately;
+    otherwise the curve value cached at the last ``_set_context_length`` is returned.
+    """
 
     _window_scaled: Dict[str, Resolved]
 
     # -- lifecycle -------------------------------------------------------------------------
 
     def _init_window_scaled_settings(self) -> None:
-        """Seed every ``effective_*`` with upstream's value: no window is known yet."""
-        self._window_scaled = {}
-        self._apply_window_scaled(resolve_window_scaled(self._config, 0))
+        """Seed the curve cache with upstream's values: no window is known yet."""
+        self._window_scaled = dict(resolve_window_scaled(self._config, 0))
 
     def _resolve_window_scaled_settings(self) -> None:
         """Re-resolve for the current (capped) ``self.context_length``.
@@ -59,27 +67,31 @@ class WindowScaledSettingsMixin:
         resets every value to upstream's rather than leaving a stale curve behind.
         """
         resolved = resolve_window_scaled(self._config, int(self.context_length or 0))
-        self._apply_window_scaled(resolved)
+        self._window_scaled = dict(resolved)
         self._apply_curved_threshold(resolved)
         self._retune_summary_guards()
 
-    def _retune_summary_guards(self) -> None:
-        """Push the curved limits into the guard objects built in ``__init__``."""
-        guard = getattr(self, "_summary_spend_guard", None)
-        if guard is not None and hasattr(guard, "max_calls"):
-            guard.max_calls = int(self.effective_summary_spend_max_calls)
-        breaker = getattr(self, "_summary_circuit_breaker", None)
-        if breaker is not None and hasattr(breaker, "failure_threshold"):
-            breaker.failure_threshold = int(self.effective_summary_circuit_breaker_failure_threshold)
+    # -- lookup ----------------------------------------------------------------------------
 
-    # -- internals -------------------------------------------------------------------------
-
-    def _apply_window_scaled(self, resolved: Dict[str, Resolved]) -> None:
-        self._window_scaled = dict(resolved)
-        for anchor in WINDOW_SCALED_DEFAULTS:
-            entry = resolved.get(anchor.name)
-            if entry is not None:
-                setattr(self, f"effective_{anchor.name}", entry.value)
+    def _effective(self, name: str) -> Any:
+        anchor = ANCHORS_BY_NAME[name]
+        config = self._config
+        explicit, _source = explicit_override(config, anchor)
+        if explicit:
+            raw = getattr(config, anchor.field)
+            if anchor.unset is not None and isinstance(anchor.unset, float) and name in (
+                "leaf_chunk_tokens", "condense_budget_tokens",
+            ):
+                return anchor.cast(round(float(raw) * max(int(self.context_length or 0), 1)))
+            return raw
+        cache = getattr(self, "_window_scaled", None)
+        if not cache:
+            cache = dict(resolve_window_scaled(config, int(getattr(self, "context_length", 0) or 0)))
+            self._window_scaled = cache
+        entry = cache.get(name)
+        if entry is None:
+            return getattr(config, anchor.field, anchor.low if anchor.low is not THRESHOLD else None)
+        return entry.value
 
     def _apply_curved_threshold(self, resolved: Dict[str, Resolved]) -> None:
         """Let the curve supply the threshold *default* only.
@@ -107,9 +119,38 @@ class WindowScaledSettingsMixin:
                 int(window * self.context_threshold)
             )
 
+    def _retune_summary_guards(self) -> None:
+        """Push the curved limits into the guard objects built in ``__init__``."""
+        guard = getattr(self, "_summary_spend_guard", None)
+        if guard is not None and hasattr(guard, "max_calls"):
+            guard.max_calls = int(self.effective_summary_spend_max_calls)
+        breaker = getattr(self, "_summary_circuit_breaker", None)
+        if breaker is not None and hasattr(breaker, "failure_threshold"):
+            breaker.failure_threshold = int(self.effective_summary_circuit_breaker_failure_threshold)
+
     # -- status ----------------------------------------------------------------------------
 
     def window_scaling_status(self) -> Dict[str, Any]:
         low = int(getattr(self._config, "scale_low_window", 0) or DEFAULT_SCALE_LOW_WINDOW)
         high = int(getattr(self._config, "scale_high_window", 0) or DEFAULT_SCALE_HIGH_WINDOW)
-        return status_payload(getattr(self, "_window_scaled", {}), int(self.context_length or 0), low, high)
+        # Report the values consumers actually see (explicit overrides included).
+        live = {
+            name: Resolved(name, self._effective(name),
+                           explicit_override(self._config, ANCHORS_BY_NAME[name])[1]
+                           if explicit_override(self._config, ANCHORS_BY_NAME[name])[0]
+                           else (getattr(self, "_window_scaled", {}).get(name).source
+                                 if getattr(self, "_window_scaled", {}).get(name) else "default"),
+                           0.0)
+            for name in ANCHORS_BY_NAME
+        }
+        return status_payload(live, int(self.context_length or 0), low, high)
+
+
+def _install_effective_properties() -> None:
+    for _name in ANCHORS_BY_NAME:
+        def _getter(self, _n=_name):
+            return self._effective(_n)
+        setattr(WindowScaledSettingsMixin, f"effective_{_name}", property(_getter))
+
+
+_install_effective_properties()

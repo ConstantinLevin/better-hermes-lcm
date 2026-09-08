@@ -741,10 +741,15 @@ class CompactionMixin:
                         **summary_kwargs,
                     )
                 except Exception as exc:
-                    if threshold_full_sweep_active and leaf_compacted_this_turn:
-                        sweep_stop_reason = "leaf_summary_error"
+                    # fork: betterlcm — a later pass failing must not discard passes already
+                    # persisted (upstream only tolerated this under the sweep flag; its
+                    # ``raise`` was unreachable while L3 guaranteed convergence).
+                    if leaf_compacted_this_turn:
+                        self._last_leaf_summary_error = str(exc)
+                        if threshold_full_sweep_active:
+                            sweep_stop_reason = "leaf_summary_error"
                         logger.warning(
-                            "LCM threshold full sweep stopped after %d persisted leaf pass(es): %s",
+                            "LCM leaf compaction stopped after %d persisted leaf pass(es): %s",
                             leaf_passes,
                             exc,
                         )

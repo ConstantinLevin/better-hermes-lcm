@@ -18,7 +18,6 @@ from hermes_lcm.config import LCMConfig
 from hermes_lcm.tokens import count_tokens, count_message_tokens, count_messages_tokens
 from hermes_lcm.store import MessageStore
 from hermes_lcm.dag import SummaryDAG, SummaryNode
-from hermes_lcm.escalation import _deterministic_truncate
 from hermes_lcm.lifecycle_state import LifecycleStateStore
 from hermes_lcm.db_bootstrap import (
     ExternalContentFtsSpec,
@@ -566,7 +565,7 @@ class TestProviderPrefixedAuxiliaryCalls:
         assert all(not thread.is_alive() for thread in threads)
         assert sum(reservations) == 3
 
-    def test_summarize_falls_to_l3_when_spend_guard_backs_off(self, monkeypatch):
+    def test_summarize_raises_when_spend_guard_backs_off(self, monkeypatch):
         from hermes_lcm import escalation
         from hermes_lcm.escalation import SummarySpendGuard
 
@@ -581,15 +580,16 @@ class TestProviderPrefixedAuxiliaryCalls:
         guard = SummarySpendGuard(max_calls=1, window_seconds=3600, backoff_seconds=3600)
         guard.record_call()
 
-        summary, level = escalation.summarize_with_escalation(
-            "source text " * 80,
-            source_tokens=200,
-            token_budget=50,
-            model="primary-model",
-            spend_guard=guard,
-        )
+        from hermes_lcm.errors import SummaryUnavailableError
 
-        assert level == 3          # deterministic fallback, no spend
+        with pytest.raises(SummaryUnavailableError):  # fork: no L3 fallback
+            escalation.summarize_with_escalation(
+                "source text " * 80,
+                source_tokens=200,
+                token_budget=50,
+                model="primary-model",
+                spend_guard=guard,
+            )
         assert calls == []         # LLM never invoked while backing off
 
     def test_extraction_call_passes_provider_and_stripped_model(self, monkeypatch):
@@ -1368,57 +1368,26 @@ class TestTokens:
         ]
         assert count_messages_tokens(msgs) > 0
 
-    def test_l3_truncate_text_to_tokens_respects_budget(self):
-        from hermes_lcm.escalation import _truncate_text_to_tokens
-
-        text = "the quick brown fox jumps over the lazy dog " * 50
-        head = _truncate_text_to_tokens(text, 20)
-        assert count_tokens(head) <= 20
-        assert text.startswith(head[: min(len(head), 10)])
-        tail = _truncate_text_to_tokens(text, 20, from_end=True)
-        assert count_tokens(tail) <= 20
-        # Short text and non-positive budgets are handled.
-        assert _truncate_text_to_tokens("short", 100) == "short"
-        assert _truncate_text_to_tokens("anything", 0) == ""
-
 
 class TestDeterministicTruncate:
-    def test_honours_token_budget_for_cjk_without_tiktoken(self, monkeypatch):
-        from hermes_lcm.escalation import _deterministic_truncate, _L3_TRUNCATION_MARKER
-        from hermes_lcm import tokens as token_module
+    """fork: betterlcm — L3 deterministic truncation was removed. Every route failing must
+    raise SummaryUnavailableError; no truncated fragment is ever produced."""
 
-        monkeypatch.setattr(token_module, "_get_encoder", lambda: None)
-        token_module._count_tokens_cached.cache_clear()
+    def test_l3_helpers_are_gone(self):
+        from hermes_lcm import escalation
 
-        # Dense CJK: tokenizes far more densely than 4 chars/token, so the old
-        # chars*4 budget overshot the token budget ~2-4x. Force the fallback
-        # counter because that path is where per-part counts are non-additive.
-        cjk = "这是一段需要压缩的中文技术文本内容。" * 200
-        for max_tokens in (80, 100, 150, 200, 512):
-            assert token_module.count_tokens(cjk) > max_tokens  # precondition: truncation happens
+        assert not hasattr(escalation, "_deterministic_truncate")
+        assert not hasattr(escalation, "_truncate_text_to_tokens")
+        assert not hasattr(escalation, "_L3_TRUNCATION_MARKER")
 
-            out = _deterministic_truncate(cjk, max_tokens)
+    def test_escalation_raises_when_every_route_fails(self, monkeypatch):
+        from hermes_lcm import escalation
+        from hermes_lcm.errors import SummaryUnavailableError
 
-            assert _L3_TRUNCATION_MARKER in out
-            assert token_module.count_tokens(out) <= max_tokens
-            assert token_module.count_tokens(out) < token_module.count_tokens(cjk)  # converged
+        monkeypatch.setattr(escalation, "_call_llm_for_summary", lambda *a, **k: None)
+        with pytest.raises(SummaryUnavailableError):
+            escalation.summarize_with_escalation("A" * 10000, source_tokens=2500, token_budget=100)
 
-    def test_ascii_truncation_converges_and_keeps_head_and_tail(self):
-        from hermes_lcm.escalation import _deterministic_truncate
-
-        text = "alpha " + ("filler word " * 500) + " omega"
-        max_tokens = 60
-        out = _deterministic_truncate(text, max_tokens)
-        assert count_tokens(out) < count_tokens(text)
-        assert count_tokens(out) <= max_tokens
-        assert out.startswith("alpha")
-        assert out.rstrip().endswith("omega")
-
-    def test_short_text_is_returned_unchanged(self):
-        from hermes_lcm.escalation import _deterministic_truncate
-
-        text = "already small enough"
-        assert _deterministic_truncate(text, 1000) == text
 
 
 class TestMessageStore:
@@ -4433,14 +4402,6 @@ class TestSummaryDAG:
 
 
 class TestEscalation:
-    def test_truncate_long(self):
-        result = _deterministic_truncate("A" * 10000, 100)
-        assert len(result) < 10000
-        assert "deterministic truncation" in result
-
-    def test_truncate_short(self):
-        assert _deterministic_truncate("hello", 1000) == "hello"
-
     def test_focus_topic_builds_structured_l1_brief(self):
         from hermes_lcm.escalation import _build_l1_prompt
         messages = _build_l1_prompt(

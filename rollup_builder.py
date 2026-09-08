@@ -12,7 +12,8 @@ from typing import Callable, Sequence
 
 from .config import LCMConfig
 from .dag import SummaryDAG
-from .escalation import _deterministic_truncate, summarize_with_escalation
+from .errors import SummaryUnavailableError  # fork: betterlcm
+from .escalation import summarize_with_escalation
 from .rollup_periods import CoverageNode, canonical_frontier, load_source_lineage
 from .rollup_store import RollupBuildToken, RollupStore
 from .sqlite_util import _sqlite_savepoint
@@ -284,8 +285,12 @@ def _summarize_capped(
         if summary_tokens <= hard_max:
             return summary, summary_tokens
         if summary_tokens >= previous_tokens:
-            truncated = _deterministic_truncate(summary, hard_max)
-            return truncated, count_tokens(truncated)
+            # fork: betterlcm — never truncate. A rollup that cannot be shrunk below its cap
+            # fails loudly for this period; the DAG and raw store are untouched.
+            raise SummaryUnavailableError(
+                f"rollup summary did not converge below {hard_max} tokens "
+                f"({summary_tokens} >= {previous_tokens})"
+            )
         candidate = summary
         previous_tokens = summary_tokens
 
