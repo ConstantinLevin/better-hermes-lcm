@@ -132,3 +132,24 @@ def test_a_shortened_focus_says_how_much_it_lost(monkeypatch):
     shortened = escalation._normalized_focus_topic(long_focus)
     assert shortened.endswith("chars shown]")
     assert str(len(" ".join(long_focus.split()))) in shortened
+
+
+def test_a_failed_tool_result_does_not_read_like_a_successful_one():
+    """Audit p05 EX03: selecting a block's `text` dropped its typed siblings, so a tool result
+    carrying is_error reached the summariser indistinguishable from a successful one, and any
+    number of attachments collapsed into a single flag."""
+    from hermes_lcm.extraction import sanitize_pre_compaction_content
+
+    failed = sanitize_pre_compaction_content(
+        {"type": "tool_result", "tool_use_id": "call_7", "is_error": True,
+         "content": "connection refused"}
+    )
+    assert "connection refused" in failed
+    assert "is_error=True" in failed and "call_7" in failed
+
+    two_images = sanitize_pre_compaction_content([
+        {"type": "image", "image_url": {"url": "data:image/png;base64," + "A" * 20}},
+        {"type": "image", "image_url": {"url": "data:image/png;base64," + "B" * 20}},
+        {"type": "text", "text": "compare these"},
+    ])
+    assert "×2" in two_images and "compare these" in two_images

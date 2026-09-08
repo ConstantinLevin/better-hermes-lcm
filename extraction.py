@@ -182,6 +182,22 @@ def _extract_structured_metadata(block: Dict[str, Any]) -> str:
     return "[Structured content: " + ", ".join(dict.fromkeys(parts)) + "]"
 
 
+_STRUCTURED_OUTCOME_KEYS = ("is_error", "status", "error_code", "tool_use_id", "tool_call_id")
+
+
+def _structured_outcome_suffix(block: Dict[str, Any]) -> str:
+    """fork: betterlcm — the outcome fields that sit BESIDE a block's text (audit p05 EX03)."""
+    parts: List[str] = []
+    for key in _STRUCTURED_OUTCOME_KEYS:
+        if key not in block:
+            continue
+        value = block.get(key)
+        if value in (None, "", False) and key != "is_error":
+            continue
+        parts.append(f"{key}={value}")
+    return f" [{', '.join(parts)}]" if parts else ""
+
+
 def _sanitize_content_block(content: Any) -> str:
     if content is None:
         return ""
@@ -189,26 +205,33 @@ def _sanitize_content_block(content: Any) -> str:
         return _sanitize_string_media(content)
     if isinstance(content, list):
         parts: List[str] = []
-        media_seen = False
+        media_count = 0  # fork: betterlcm — how many, not merely "some" (audit p05 EX03)
         for block in content:
             block_text = _sanitize_content_block(block)
             if not block_text:
                 continue
             if block_text == _MEDIA_ATTACHMENT_MARKER:
-                media_seen = True
+                media_count += 1
                 continue
             if block_text.endswith(_MEDIA_ATTACHMENT_SUFFIX):
-                media_seen = True
+                media_count += 1
                 block_text = block_text[: -len(_MEDIA_ATTACHMENT_SUFFIX)].rstrip()
                 if not block_text:
                     continue
             parts.append(block_text)
         combined = "\n".join(part for part in parts if part).strip()
         combined = re.sub(r"\n{3,}", "\n\n", combined)
-        if media_seen and combined:
-            return f"{combined}\n{_MEDIA_ATTACHMENT_SUFFIX}"
-        if media_seen:
-            return _MEDIA_ATTACHMENT_MARKER
+        media_suffix = _MEDIA_ATTACHMENT_SUFFIX
+        media_marker = _MEDIA_ATTACHMENT_MARKER
+        if media_count > 1:
+            # several attachments used to collapse into one flag, so the summariser could not
+            # tell one image from six
+            media_suffix = f"{_MEDIA_ATTACHMENT_SUFFIX[:-1]} ×{media_count}]"
+            media_marker = f"{_MEDIA_ATTACHMENT_MARKER[:-1]} ×{media_count}]"
+        if media_count and combined:
+            return f"{combined}\n{media_suffix}"
+        if media_count:
+            return media_marker
         return combined
     if isinstance(content, dict):
         block_type = str(content.get("type", "")).lower()
@@ -223,7 +246,11 @@ def _sanitize_content_block(content: Any) -> str:
             return _MEDIA_ATTACHMENT_MARKER
         for key in ("text", "content"):
             if key in content:
-                return _sanitize_content_block(content.get(key))
+                # fork: betterlcm — keep the typed siblings that change what the text MEANS.
+                # Picking out `text` dropped a tool result's failure status and identity, so a
+                # failed call read to the summariser exactly like a successful one
+                # (audit p05 EX03).
+                return _sanitize_content_block(content.get(key)) + _structured_outcome_suffix(content)
         return _extract_structured_metadata(content)
     return str(content)
 
