@@ -998,6 +998,19 @@ class CompactionMixin:
             ]
             source_store_ids = self._get_store_ids_for_messages(source_lineage_chunk)
             source_store_ids = sorted(dict.fromkeys(source_store_ids))
+            if source_lineage_chunk and not source_store_ids:
+                # fork: betterlcm — a summary with no provenance is exactly the thing this
+                # engine exists to prevent: unexpandable, unverifiable, and indistinguishable
+                # from an invented one. It happened when an earlier attempt had already
+                # advanced the raw cursor, so the mapping found nothing. Refuse to publish and
+                # let the raw stay in place.
+                noop_reason = "selected leaf chunk lost its raw store lineage"
+                self._last_leaf_summary_error = noop_reason
+                logger.warning(
+                    "LCM refusing to publish a leaf with no source lineage (%d message(s) in chunk)",
+                    len(source_lineage_chunk),
+                )
+                break
             consumed_store_ids = self._get_store_ids_for_messages(source_lookup_chunk)
             consumed_store_ids = sorted(dict.fromkeys(consumed_store_ids))
             earliest_at, latest_at = self._store.get_time_bounds(source_store_ids)
@@ -1178,13 +1191,28 @@ class CompactionMixin:
                     )
                 )
         else:
-            self._maybe_condense(
-                focus_topic=focus_topic,
-                leaf_compacted_this_turn=True,
-                force_overflow=force_overflow,
-                critical_budget_pressure=critical_budget_pressure,
-                deadline=leaf_deadline,  # fork: budget-regime condensation shares the clock
-            )
+            try:
+                self._maybe_condense(
+                    focus_topic=focus_topic,
+                    leaf_compacted_this_turn=True,
+                    force_overflow=force_overflow,
+                    critical_budget_pressure=critical_budget_pressure,
+                    deadline=leaf_deadline,  # fork: budget-regime condensation shares the clock
+                )
+            except SummaryUnavailableError as exc:
+                # fork: betterlcm — leaf passes above are already COMMITTED and the raw cursor
+                # has advanced. Letting a later condensation failure escape made compress()
+                # return the original, uncompacted prompt while the DAG had moved on; the next
+                # attempt then mapped no sources and published a leaf with empty provenance.
+                # Upstream never reached this state because its L3 fallback always converged.
+                # Publish the leaf progress that succeeded and arm the cooldown instead.
+                self._last_leaf_summary_error = str(exc)
+                logger.warning(
+                    "LCM condensation unavailable after %d persisted leaf pass(es); "
+                    "publishing leaf progress and cooling down: %s",
+                    leaf_passes,
+                    exc,
+                )
 
         # Step 7: Assemble new active context
         self._refresh_raw_backlog_debt(

@@ -234,3 +234,29 @@ def test_session_reset_clears_the_cooldown(tmp_path, monkeypatch):
         assert e.get_active_compression_failure_cooldown() is None
     finally:
         e.shutdown()
+
+
+def test_condensation_failure_publishes_leaf_progress_instead_of_discarding_it(tmp_path, monkeypatch):
+    """Audit D #1: leaf passes are already committed and the raw cursor has advanced when
+    condensation runs. Letting a condensation failure escape returned the ORIGINAL prompt while
+    the DAG had moved on, and the next attempt published a leaf with empty provenance.
+    Upstream never reached this state because its L3 fallback always converged.
+    """
+    from hermes_lcm import engine as engine_mod
+    from hermes_lcm.errors import SummaryUnavailableError
+    e = _engine(tmp_path, condensation_fanin=1, incremental_max_depth=3)
+    try:
+        monkeypatch.setattr(engine_mod, "summarize_with_escalation",
+                            lambda **kw: ("leaf summary\nExpand for details about: x", 1))
+        monkeypatch.setattr(e, "_condense_summary_nodes",
+                            lambda *a, **k: (_ for _ in ()).throw(SummaryUnavailableError("dead")))
+        msgs = _messages(6)
+        result = e.compress(msgs, current_tokens=count_messages_tokens(msgs))
+
+        leaves = [n for n in e._dag.get_session_nodes("cooldown-session") if n.depth == 0]
+        assert leaves, "the leaf that succeeded must be kept"
+        assert all(n.source_ids for n in leaves), "no node may be published without provenance"
+        assert result is not msgs, "the caller must get the compacted context, not the stale one"
+        assert e.get_active_compression_failure_cooldown() is not None
+    finally:
+        e.shutdown()

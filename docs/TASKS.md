@@ -23,6 +23,7 @@ the fork itself introduced.
 | F10 | **A failed search was returned as "no matches"** — false negative evidence over retained data. | `complete: false`, `search_failures`, and a note that absence from the results is not absence from history. |
 | F11 | **The LIKE fallback limited before ordering** (CJK/emoji queries are routed there by design): `sort="recency", limit=1` returned the 50th of 100. | `ORDER BY` in SQL before the limit. |
 | F12 | **The failure cooldown outlived its session**, blocking an unrelated one after `/new`. | Scoped to the session that failed; cleared on reset. |
+| F14 | **A failed condensation discarded committed leaf work and could publish an empty-provenance node.** Leaf passes commit and advance the raw cursor before condensation runs; letting a condensation failure escape returned the ORIGINAL uncompacted prompt while the DAG had moved on, and the retry mapped no sources and published a leaf with no provenance, resetting the cursor. Upstream never reached this state because L3 always converged (audit D #1). | Condensation failure publishes the leaf progress and arms the cooldown; a leaf whose source mapping is empty is refused, not published. |
 | F13 | **The leaf rescue's last resort was `chunk[:-1]`**, stripping a result from its call. | Cuts on a tool-group boundary; gives up rather than splitting an indivisible group. |
 
 ## Still open — from the partitioned audits
@@ -64,7 +65,13 @@ report carries the citations and the reproduction.
   install/drift detection, release fragments); six are capability-level decisions
   (`context_items` projection, operator TUI, persistent focus briefs, delegated retrieval
   workers, richer maintenance debt, a paged expansion-cost manifest).
-- **audit D (regressions vs upstream)** — still running.
+- **audit D (regressions vs upstream)** — landed. Three regressions the fork introduced: the
+  condensation-failure defect above (now fixed), the lookahead losing the host's routing
+  context / deadline / cancellation scope with an unbounded wait that can hold the compaction
+  lock, and the 1M leaf production rate (up to 64 per call) outrunning the retained
+  one-group-per-depth condensation schedule. Plus two medium: 256k structural equivalence still
+  fails on oversized/imported histories and on the dynamic-chunk path, and whole sidecar index
+  blocks now escape retrieval budgets.
 
 Tracked as tasks #1-#12 in this session's task list; the ~375 ranked findings across the nine
 partition reports are not yet individually triaged.
