@@ -37,3 +37,36 @@ def test_an_unavailable_summary_database_does_not_delete_a_ready_rollup(tmp_path
     dag.close()
     with pytest.raises(rollup_builder.RollupSourcesUnavailable):
         rollup_builder._scope_frontier(dag, "s")
+
+
+def test_truncated_evidence_refs_cannot_close_a_computation(tmp_path):
+    """verify-4 #22: with a two-reference budget over Alice=2, Bob=3 and Alice=100 the pack
+    reported a closed, product-verified difference of 1 — the discarded candidate was the one
+    that contradicted it."""
+    import json
+    from types import SimpleNamespace
+    from hermes_lcm.evidence_pack import build_evidence_pack
+    from hermes_lcm.store import MessageStore
+
+    config = LCMConfig(database_path=str(tmp_path / "pack.db"))
+    store = MessageStore(config.database_path, ingest_protection_config=config)
+    engine = SimpleNamespace(_config=config, _store=store, _assertions=None,
+                             _session_occurrence_dates={})
+    try:
+        contents = ["Alice walked 2 km.", "Bob walked 3 km.", "Alice walked 100 km."]
+        refs = []
+        for content in contents:
+            store_id = store.append("session-a", {"role": "user", "content": content})
+            refs.append({"exact_ref": f"lcm:{store_id}:0-{len(content)}", "quote": content})
+        store.commit()
+
+        payload = json.loads(build_evidence_pack({
+            "question": "What is the difference between Alice's and Bob's distance?",
+            "baseline_refs": refs,
+            "budgets": {"max_refs": 2},
+        }, engine=engine))
+        if payload.get("truncation", {}).get("refs_truncated"):
+            assert payload["completeness"]["state"] == "partial", payload["completeness"]
+            assert payload["completeness"]["product_verified"] is False
+    finally:
+        store.close()
