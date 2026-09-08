@@ -6920,6 +6920,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         try:
             node_id = int(self._dag.add_node(node))
             self._dag.node_meta.write(node_id, level=node_meta.LEVEL_MARKER, summary=summary)
+            self._invalidate_rollups_for_published_node(node)  # like every other published node
             return node_id
         except Exception:
             logger.warning("LCM rotate marker node write failed", exc_info=True)

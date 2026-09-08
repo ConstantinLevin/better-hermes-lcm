@@ -574,6 +574,17 @@ def summarize_with_escalation(
         source_provenance=source_provenance,
         source_content_token_budget=source_tokens,
     )
+    # fork: betterlcm — remember whether a route DID answer but the answer was not shorter
+    # than the source, so the raised error names the real cause (a tiny chunk, not a dead
+    # route). The loop's leaf_chunk_tokens floor keeps chunks large enough in practice.
+    rejected_for_length: list[int] = []
+
+    def _accepts(result: str) -> bool:
+        if count_tokens(result) < source_tokens:
+            return True
+        rejected_for_length.append(count_tokens(result))
+        return False
+
     l1_result = _invoke_summary_llm_chain(
         l1_prompt,
         token_budget * 2,
@@ -582,7 +593,7 @@ def summarize_with_escalation(
         timeout=timeout,
         circuit_breaker=circuit_breaker,
         spend_guard=spend_guard,
-        accepts_result=lambda result: count_tokens(result) < source_tokens,
+        accepts_result=_accepts,
     )
 
     if l1_result:
@@ -608,7 +619,7 @@ def summarize_with_escalation(
         timeout=timeout,
         circuit_breaker=circuit_breaker,
         spend_guard=spend_guard,
-        accepts_result=lambda result: count_tokens(result) < source_tokens,
+        accepts_result=_accepts,
     )
 
     if l2_result:
@@ -620,6 +631,12 @@ def summarize_with_escalation(
     # messages stay in context. ``l3_truncate_tokens`` is accepted for call-site
     # compatibility and ignored.
     del l3_truncate_tokens
+    if rejected_for_length:
+        raise SummaryUnavailableError(
+            f"summaries not shorter than the {source_tokens}-token source "
+            f"(outputs of {rejected_for_length} tokens rejected; a chunk this small is not worth "
+            f"summarising — raise leaf_chunk_tokens or leave it raw; model={model or '<default>'})"
+        )
     raise SummaryUnavailableError(
         f"summariser unavailable after L1/L2 for {source_tokens} source tokens "
         f"(model={model or '<default>'}, fallbacks={list(fallback_models or [])})"

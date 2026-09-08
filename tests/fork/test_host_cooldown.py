@@ -187,3 +187,14 @@ def test_host_call_shapes_for_the_cooldown_protocol(tmp_path, monkeypatch):
         assert float(getter(refresh=True).get("remaining_seconds")) > 0
     finally:
         e.shutdown()
+
+
+def test_length_rejection_is_named_in_the_error(monkeypatch):
+    from hermes_lcm import escalation
+    # every route answers, but never shorter than the source
+    monkeypatch.setattr(escalation, "_call_llm_for_summary", lambda *a, **k: "word " * 400)
+    with pytest.raises(SummaryUnavailableError, match="not shorter than the 20-token source"):
+        escalation.summarize_with_escalation(text="short source", source_tokens=20, token_budget=2000, depth=0)
+    monkeypatch.setattr(escalation, "_call_llm_for_summary", lambda *a, **k: None)
+    with pytest.raises(SummaryUnavailableError, match="summariser unavailable after L1/L2"):
+        escalation.summarize_with_escalation(text="short source", source_tokens=20, token_budget=2000, depth=0)

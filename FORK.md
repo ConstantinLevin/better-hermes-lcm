@@ -41,6 +41,40 @@ touch, is in `docs/fork-touchpoints.md` — read it before resolving a conflict:
 whether a conflicting hunk is a hook (keep ours, re-apply on top of theirs) or a behavioural
 change upstream also made (reconcile). Every fork-only test lives under `tests/fork/`.
 
+## Fork configuration reference
+Every fork setting has a dataclass field, an env var and (for the weighted ones) an anchor in
+`window_scaling.py`. `0` / `0.0` means "no override — use the curve"; `lcm_status` →
+`window_scaling` shows the resolved value and its source for the current window.
+
+| env var | default | field |
+|---|---|---|
+| `LCM_SCALE_LOW_WINDOW` | `262144` | `scale_low_window` — window where every weighted value equals upstream's |
+| `LCM_SCALE_HIGH_WINDOW` | `1000000` | `scale_high_window` — window where it equals the large-window design |
+| `LCM_DRAIN_STOP_FRACTION` | `0.0` | `drain_stop_fraction` (curve: threshold → 0.30 of W) |
+| `LCM_LEAF_CHUNK_FRACTION` | `0.0` | `leaf_chunk_fraction` (curve: 1.0 → 0.04 of W) |
+| `LCM_LEAF_PASS_CAP` | `0` | `leaf_pass_cap` (curve: 1 → 64) |
+| `LCM_LEAF_LOOP_MAX_SECONDS` | `0.0` | `leaf_loop_max_seconds` (curve: 120 → 200) |
+| `LCM_SUMMARY_BUDGET_FRACTION` | `0.0` | `summary_budget_fraction` (curve: 0 → 0.20 of W; condensation trigger) |
+| `LCM_SUMMARY_CONCURRENCY` | `0` | `summary_concurrency` (curve: 1 → 6) |
+| `LCM_SERIALIZE_MESSAGE_MAX_CHARS` | `0` | `serialize_message_max_chars` (curve: 3000 → 4·W) |
+| `LCM_EXPAND_PAGE_TOKENS` | `0` | `expand_page_tokens` (curve: 4000 → 32000) |
+| `LCM_TOOL_RESPONSE_CHAR_SCALE` | `0.0` | `tool_response_char_scale` (curve: 1 → 4) |
+| `LCM_SQLITE_CACHE_KIB` | `0` | `sqlite_cache_kib` (curve: 2048 → 65536) |
+| `LCM_TOKEN_CACHE_SIZE` | `0` | `token_cache_size` (curve: 2048 → 8192) |
+| `LCM_SUMMARY_FAILURE_COOLDOWN_SECONDS` | `600.0` | `summary_failure_cooldown_seconds` |
+| `LCM_ASSEMBLY_MAX_NODES_PER_DEPTH` | `100000` | `assembly_max_nodes_per_depth` (cap hit is marked in the prefix) |
+| `LCM_SWEEP_MAX_PASSES` | `12` | `sweep_max_passes` (upstream's constant) |
+| `LCM_LEAF_SUMMARY_RATIO` / `_MIN_TOKENS` / `_MAX_TOKENS` | `0.2` / `2000` / `12000` | leaf summary size rule (upstream's literals) |
+| `LCM_CONDENSATION_RATIO` / `_MIN_TOKENS` | `0.4` / `1000` | condensation size rule (upstream's literals) |
+
+Upstream settings the curve also drives when not set explicitly: `context_threshold`
+(0.35 → 0.80), `summary_timeout_ms` (60 s → 200 s), `expansion_timeout_ms` (120 s → 200 s),
+`fresh_tail_count` (32 → 400), `fresh_tail_max_tokens` (off → 0.15·W), `incremental_max_depth`
+(3 → 5), `summary_spend_max_calls` (24 → 120), `summary_circuit_breaker_failure_threshold`
+(2 → 4), `l2_budget_ratio` (0.5 → 0.8), `large_output_active_replay_stub_threshold_tokens`
+(25k → 100k), `expansion_context_tokens` (32k → 125k), `summary_prefix_target_tokens`
+(leaf_chunk_tokens → 0.20·W, sweep flag only).
+
 ## Layout of fork-only code
 - `window_scaling.py`     — the anchor table and the curve; `resolve_window_scaled(config, W)`
 - `host_cooldown.py`      — the host's compression-failure cooldown protocol for a plugin engine

@@ -168,3 +168,34 @@ def test_bootstrap_against_a_copy_of_the_preexisting_db(tmp_path):
             conn.close()
     finally:
         dag.close()
+
+
+def test_node_results_carry_the_index_block_when_present(tmp_path):
+    import json
+    from hermes_lcm import tools as lcm_tools
+    cfg = LCMConfig()
+    cfg.database_path = str(tmp_path / "ib.db")
+    e = LCMEngine(config=cfg, hermes_home=str(tmp_path))
+    try:
+        e.on_session_start("ib", platform="cli", context_length=200_000)
+        summary = "Body.\nExpand for details about: first topic\n- second topic\n- third topic"
+        rich = e._dag.add_node(SummaryNode(
+            session_id="ib", depth=0, summary=summary, token_count=10, source_token_count=50,
+            source_ids=[], source_type="messages", created_at=time.time(),
+            expand_hint=LCMEngine._extract_expand_hint(summary),
+        ))
+        e._dag.node_meta.write(rich, level=1, summary=summary)
+        plain = e._dag.add_node(_node("ib", 0, "no marker"))
+        e._dag.node_meta.write(plain, level=1, summary="no marker")
+        assert lcm_tools._node_index_block_payload(e, e._dag.get_node(rich)) == {
+            "index_block": "first topic\n- second topic\n- third topic"
+        }
+        assert lcm_tools._node_index_block_payload(e, e._dag.get_node(plain)) == {}
+        described = json.loads(lcm_tools.lcm_describe({}, engine=e))
+        by_id = {n["node_id"]: n for depth in described.get("depths", {}).values() for n in depth.get("nodes", [])} \
+            if isinstance(described.get("depths"), dict) else {}
+        blob = json.dumps(described)
+        assert "- second topic" in blob  # the multi-line block reaches the tool result
+        assert blob.count('"index_block"') == 1  # only the node that has one
+    finally:
+        e.shutdown()

@@ -146,6 +146,23 @@ def _require_engine(kwargs: Dict[str, Any]) -> "LCMEngine | None":
     return engine if engine is not None else None
 
 
+def _node_index_block_payload(engine: Any, node: Any) -> Dict[str, Any]:
+    """fork: betterlcm — the sidecar's multi-line index block for a node result, only when the
+    node has one (upstream result shapes are unchanged otherwise)."""
+    store = getattr(getattr(engine, "_dag", None), "node_meta", None)
+    if store is None or node is None:
+        return {}
+    try:
+        meta = store.read(int(node.node_id))
+    except Exception:
+        return {}
+    block = str((meta or {}).get("index_block") or "")
+    first_line = str(getattr(node, "expand_hint", "") or "")
+    if not block or block == first_line:
+        return {}
+    return {"index_block": block}
+
+
 def _get_session_node(engine: "LCMEngine", node_id: int):
     node = engine._dag.get_node(node_id)
     if node is None or node.session_id != engine.current_session_id:
@@ -1401,6 +1418,7 @@ def _expand_child_nodes(
                 "token_count": child.token_count,
                 "source_token_count": child.source_token_count,
                 "expand_hint": child.expand_hint,
+                **_node_index_block_payload(engine, child),  # fork
             }
         )
         budget_used += count_tokens(summary)
@@ -1545,6 +1563,7 @@ def _collect_context_blocks_for_node(
             "summary": summary,
             "summary_truncated": summary_truncated,
             "expand_hint": node.expand_hint,
+            **_node_index_block_payload(engine, node),  # fork
             "token_count": node.token_count,
         }
     ]
@@ -3318,6 +3337,7 @@ def _lcm_grep_semantic(
             "snippet": node.summary[:_LCM_GREP_SEMANTIC_SNIPPET_CHARS],
             "token_count": node.token_count,
             "expand_hint": node.expand_hint,
+            **_node_index_block_payload(engine, node),  # fork
             "earliest_at": node.earliest_at,
             "latest_at": node.latest_at,
             "from_current_session": has_current_session and node.session_id == current_session_id,
@@ -5327,6 +5347,7 @@ def lcm_describe(args: Dict[str, Any], **kwargs) -> str:
                     "node_id": node.node_id,
                     "token_count": node.token_count,
                     "expand_hint": node.expand_hint,
+                    **_node_index_block_payload(engine, node),  # fork
                 }
                 for node in nodes
             ],
@@ -5743,6 +5764,7 @@ def lcm_expand_query(args: Dict[str, Any], **kwargs) -> str:
             "depth": node.depth,
             "summary": node.summary[:300],
             "expand_hint": node.expand_hint,
+            **_node_index_block_payload(engine, node),  # fork
         }
         for node in selected_nodes
     ]

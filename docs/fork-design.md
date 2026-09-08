@@ -503,13 +503,18 @@ same DAG structure (nodes, depths, source ids) under the upstream checkout and t
 (`scratchpad/dag_shape.py`; only summary text differs, by design of the prompts).
 
 Known residuals (deliberately not done, or outside the fork):
-- Plan verification 4/7 (a failure injected through the host's real `build_turn_context`; a
-  live session to the trigger) were not run — the protocol is covered at the engine level
-  with the host's call shapes; a live run is the operator's call (it spends summariser calls).
+- Plan verification 4 is now covered by `tests/fork/test_host_integration.py` (the host's real
+  `build_turn_context` with a dead summariser keeps the turn, arms the cooldown, reports
+  `cooldown:<s>`). Verification 7 (a live session up to the 850k trigger) is the operator's
+  call; the real summariser route was exercised on a small forced-threshold session instead
+  (see the audit log in /tmp/progress.md).
 - Host-side hardcoded cuts (`_INLINE_SHELL_MAX_OUTPUT` 4000, MCP 2 MB) are outside this fork.
-- `engine.py` ingest path still calls `_load_generated_ignored_placeholder_hashes()` per
-  message (only the compaction pass was hoisted); the assembly budget selector still re-joins
-  the candidate per part (only matters with an assembly cap, which is off).
-- `lcm_grep`/`lcm_describe` results carry the single-line `expand_hint`, not the sidecar
-  `index_block`; the rotate marker node is not registered with the (default-off) rollups.
+- The assembly budget selector still re-joins the candidate per part (only matters with an
+  assembly cap, which is off). The ingest path's per-message placeholder-hash read is kept:
+  the import path generates placeholders inside that loop and must see them immediately.
 - The sweep-flag path and `dynamic_leaf_chunk_enabled` keep upstream's serial loop.
+- Observed live: under the index contract a chunk of only a few hundred tokens can produce
+  summaries LONGER than itself; both routes are then rejected (`count_tokens(result) <
+  source_tokens`) and the cooldown arms. The error names this case. It cannot occur at the
+  deployed sizes (leaf_chunk_tokens floor 20k, 40k chunks, 12k budget cap); a config that
+  lowers `leaf_chunk_tokens` far below ~2k should expect it.
