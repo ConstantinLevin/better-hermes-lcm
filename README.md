@@ -11,6 +11,14 @@
 
 > Bounded context, unbounded memory. Nothing is ever lost.
 
+> **This is `betterlcm`, a maintained fork of
+> [stephenschoettler/hermes-lcm](https://github.com/stephenschoettler/hermes-lcm)** built for
+> one strict rule — *no loss, at any context window* — and for large (1M-token) windows without
+> degrading ~256k behaviour. Everything the fork changes is listed in [What the fork changes](#what-the-fork-changes),
+> the maintenance contract in [`FORK.md`](FORK.md), the design in
+> [`docs/fork-design.md`](docs/fork-design.md) and every touched upstream line in
+> [`docs/fork-touchpoints.md`](docs/fork-touchpoints.md).
+
 `hermes-lcm` replaces one-shot active-context compression with a SQLite-backed,
 DAG-based context engine. It keeps the live prompt bounded, preserves raw
 messages, and gives the agent tools to recover exact detail after compaction.
@@ -24,6 +32,7 @@ OpenClaw. For an interactive visualization of the LCM idea, see
 ## Table of contents
 
 - [What it does](#what-it-does)
+- [What the fork changes](#what-the-fork-changes)
 - [LCM vs built-in compression](#lcm-vs-built-in-compression)
 - [Quick start](#quick-start)
 - [Commands and tools](#commands-and-tools)
@@ -36,6 +45,7 @@ OpenClaw. For an interactive visualization of the LCM idea, see
 - [How it works](#how-it-works)
 - [Documentation](#documentation)
 - [Development](#development)
+- [Fork maintenance](#fork-maintenance)
 - [Contributing](#contributing)
 - [License](#license)
 
@@ -103,6 +113,62 @@ fully-local providers). See the
 why, and [Agent configuration profiles](docs/agent-config-profiles.md) for
 copy-paste setups per agent type.
 
+## What the fork changes
+
+Upstream hermes-lcm sizes everything in absolute tokens tuned for ~128k–272k windows, and
+falls back to silent truncation when the summariser fails. The fork keeps upstream's behaviour
+at ~256k and below, and changes two things everywhere:
+
+**1. Every tuning value is a smooth function of the model's context window.**
+`t = clamp((W − 256k) / (1M − 256k), 0, 1)`; each setting is `upstream_value + t × (large_window_value − upstream_value)`.
+At 256k the resolved values *are* upstream's (a fixture session produces the same DAG structure
+under upstream and the fork); at 1M they are the large-window design; between, they slide.
+Anchors live in one table, [`window_scaling.py`](window_scaling.py); explicit env/config values
+always win over the curve; `lcm_status → window_scaling` shows every resolved value and its source.
+
+| setting | at 256k (upstream) | at 1M |
+|---|---|---|
+| compaction threshold (`LCM_CONTEXT_THRESHOLD` default) | 0.35 | 0.80 |
+| leaf chunk per summariser call | whole backlog in one pass | 40k tokens, up to 64 passes per compaction, draining to 30 % of the window |
+| summariser calls in flight | 1 | 6 (sequential persist, identical DAG) |
+| protected fresh tail | 32 messages | 400 messages / 150k tokens |
+| condensation trigger | every 4th leaf (count rule) | only once the summary pile exceeds 200k tokens, oldest material first |
+| DAG depth cap | 3 | 5 |
+| summariser / expansion timeouts, leaf-loop wall clock | 60 s / 120 s / 120 s | 200 s / 200 s / 200 s |
+| spend guard / breaker | 24 calls, 2 failures | 120 calls, 4 failures |
+| pre-summariser per-message cap | 3000 chars | whole message |
+| `lcm_expand` page, tool response caps, SQLite/token caches | 4k tokens, ×1, 2 MiB / 2048 | 32k tokens, ×4, 64 MiB / 8192 |
+
+**2. No unmarked loss, at any window** (pure changes, identical everywhere):
+
+- The deterministic-truncation fallback (upstream's "L3") is gone. When every summariser route
+  fails the raw context stays in place, the engine arms a host-visible cooldown (the host prints
+  its usual `cooldown:<s>` warning) and the turn continues — a compaction can never write a
+  chopped "summary" or kill a turn.
+- Every remaining cut or drop is marked and points at its provenance: sized `[LCM elided …]`
+  markers in summariser input, unmatched tool calls serialised (not dropped), externalized
+  stubs carry a head note, assembly renders the whole frontier and names anything omitted,
+  `/new` keeps index nodes (retain depth is a carry-over filter, not a delete), `/lcm rotate`
+  writes a marker node over rotated raw, bypass trims are marked.
+- Summaries are written as **indexes into recoverable history**: the prompts require coverage
+  of decisions and rationale, rejected approaches, constraints, identifiers/paths/values,
+  errors, tool-output contents, end state and open items — "exceed the target rather than omit
+  an item". The whole `Expand for details about:` block is stored per node (`lcm_node_meta`
+  sidecar, with the escalation level) and returned on `lcm_grep`/`lcm_describe`/expand
+  results; the summary header shows `[L2 bullet summary]` when the thinner form was used.
+- Recovery: `lcm_expand(node_id=…, hydrate=true)` returns externalized tool outputs inline;
+  empty hints still point at `lcm_expand(node_id=N)`; the system note tells the model that
+  absence from the visible context is never absence from the record.
+- `lcm_doctor {"coverage": true}` / `/lcm doctor coverage` measure how much of each node's
+  sources (paths, identifiers, quoted strings, numbers, decision keywords) is still
+  discoverable from its summary — the executable definition of "no loss".
+- Chunk boundaries never split an assistant tool call from its results; a compaction lock keeps
+  a host-abandoned worker from writing concurrently with the retry; hot paths (frontier token
+  projection, per-pass metadata reads) are cheaper.
+
+Costs at 256k: the system note is ~54 tokens longer and index-style summaries tend to be longer
+than upstream's terse ones (still under the same 12k cap). Everything else at 256k is upstream.
+
 ## LCM vs built-in compression
 
 Hermes core may persist original conversation history in `state.db` before
@@ -140,12 +206,18 @@ that the host's resolved environment is free of known vulnerabilities.
 
 ### Install the plugin
 
-Canonical install path: clone `hermes-lcm` as a general user plugin.
+Canonical install path: clone the plugin as a general user plugin. For the fork, clone the
+fork repository (branch `betterlcm`) and pin it so `hermes plugins update` cannot replace it
+with upstream:
 
 ```bash
-git clone https://github.com/stephenschoettler/hermes-lcm \
-  ~/.hermes/plugins/hermes-lcm
+git clone -b betterlcm <fork repository> ~/.hermes/plugins/hermes-lcm
+# pin: ~/.hermes/plugins/.install-metadata.json ->
+#   {"hermes-lcm": {"pinned": true, "revision": "<git rev-parse HEAD>", "source": "<fork repository>"}}
 ```
+
+Upstream's canonical install is the same command against
+`https://github.com/stephenschoettler/hermes-lcm`.
 
 For a profile-specific install:
 
@@ -229,7 +301,10 @@ there.
 
 ### Update it
 
-If you cloned directly into the plugin directory:
+Fork checkouts: see [Fork maintenance](#fork-maintenance) — upstream changes are merged in the
+fork repository first, tested, then pulled into the plugin directory and re-pinned.
+
+Upstream checkouts, if you cloned directly into the plugin directory:
 
 ```bash
 cd ~/.hermes/plugins/hermes-lcm && git pull --ff-only
@@ -380,15 +455,15 @@ Most installs only need `plugins.enabled` and `context.engine: lcm`.
 
 | Variable | Default | Use |
 |----------|---------|-----|
-| `LCM_CONTEXT_THRESHOLD` | `0.35` | Fraction of the context window that triggers LCM compaction |
-| `LCM_FRESH_TAIL_COUNT` | `32` | Recent messages protected from compaction |
-| `LCM_FRESH_TAIL_MAX_TOKENS` | `0` | Optional token cap for the protected fresh tail (`0` disables it); always retains the newest message and complete assistant/tool-result groups |
-| `LCM_INCREMENTAL_MAX_DEPTH` | `3` | Max DAG condensation depth (`-1` = unlimited, `0` = leaf only); enables hierarchical summarization |
-| `LCM_LEAF_CHUNK_TOKENS` | `20000` | Raw-backlog floor before leaf compaction; with dynamic chunking enabled, the base chunk target |
-| `LCM_DYNAMIC_LEAF_CHUNK_ENABLED` | `false` | Enable chunk-sized leaf compaction passes instead of compacting the whole non-tail raw backlog per pass |
+| `LCM_CONTEXT_THRESHOLD` | `0.35` → curve → `0.80` at 1M | Fraction of the context window that triggers LCM compaction. Unset = window-weighted (fork); set = wins over the curve |
+| `LCM_FRESH_TAIL_COUNT` | `32` → `400` at 1M | Recent messages protected from compaction (a cap) |
+| `LCM_FRESH_TAIL_MAX_TOKENS` | `0` → `0.15·W` at 1M | Optional token cap for the protected fresh tail (`0` disables it); always retains the newest message and complete assistant/tool-result groups |
+| `LCM_INCREMENTAL_MAX_DEPTH` | `3` → `5` at 1M | Max DAG condensation depth (`-1` = unlimited, `0` = leaf only); enables hierarchical summarization |
+| `LCM_LEAF_CHUNK_TOKENS` | `20000` | Raw-backlog floor before leaf compaction; with dynamic chunking enabled, the base chunk target. The fork's curved chunk size (`LCM_LEAF_CHUNK_FRACTION`, whole backlog at 256k → 4 % of the window at 1M) applies on top |
+| `LCM_DYNAMIC_LEAF_CHUNK_ENABLED` | `false` | Upstream's doubling chunk policy; enabling it keeps upstream's serial behaviour instead of the fork's curved chunking |
 | `LCM_DYNAMIC_LEAF_CHUNK_MAX` | `40000` | Upper bound for dynamic leaf chunk targets |
-| `LCM_THRESHOLD_FULL_SWEEP_ENABLED` | `false` | At threshold, opt into one synchronous bounded sweep that drains chunked raw history before publishing one new active context |
-| `LCM_SUMMARY_PREFIX_TARGET_TOKENS` | `0` | Sweep-only summary-frontier target; `0` derives one `LCM_LEAF_CHUNK_TOKENS` budget |
+| `LCM_THRESHOLD_FULL_SWEEP_ENABLED` | `false` | At threshold, opt into one synchronous bounded sweep that drains chunked raw history before publishing one new active context (upstream's serial path; the fork's curved drain/pass cap/concurrency apply to the default path) |
+| `LCM_SUMMARY_PREFIX_TARGET_TOKENS` | `0` → `0.20·W` at 1M | Sweep-only summary-frontier target; `0` derives it from the curve (upstream: one `LCM_LEAF_CHUNK_TOKENS` budget) |
 | `LCM_NEW_SESSION_RETAIN_DEPTH` | `2` | DAG depth retained after manual `/new` (`-1` all, `0` none) |
 | `LCM_DATABASE_PATH` | auto | SQLite database path. Empty config resolves to `HERMES_HOME/lcm.db`; plugin installs or operators may set this env var to another profile-scoped path such as `~/.hermes/hermes-lcm.db`. |
 | `LCM_FTS_INTEGRITY_CHECK_INTERVAL_HOURS` | `24` | Minimum hours between startup FTS5 deep integrity-checks (O(index size)). `0` checks every startup; a negative value never checks on startup. Structural checks always run regardless. |
@@ -424,15 +499,20 @@ moved back to that assistant even when doing so exceeds a configured bound.
 |----------|---------|-----|
 | `LCM_SUMMARY_MODEL` | auxiliary | Override summarization model |
 | `LCM_SUMMARY_FALLBACK_MODELS` | empty | Comma-separated summarization models tried after `LCM_SUMMARY_MODEL` or the auxiliary task default fails |
-| `LCM_SUMMARY_CIRCUIT_BREAKER_FAILURE_THRESHOLD` | `2` | Consecutive failed summarization calls before a route is skipped temporarily |
+| `LCM_SUMMARY_CIRCUIT_BREAKER_FAILURE_THRESHOLD` | `2` → `4` at 1M | Consecutive failed summarization calls before a route is skipped temporarily |
 | `LCM_SUMMARY_CIRCUIT_BREAKER_COOLDOWN_SECONDS` | `300` | Seconds to skip an open summary route before retrying it |
 | `LCM_EXPANSION_MODEL` | summary model / auxiliary | Override `lcm_expand_query` synthesis model |
-| `LCM_EXPANSION_CONTEXT_TOKENS` | `32000` | Context budget used by the auxiliary LLM for `lcm_expand_query` |
-| `LCM_SUMMARY_TIMEOUT_MS` | `60000` | Timeout for one summarization call |
-| `LCM_EXPANSION_TIMEOUT_MS` | `120000` | Timeout for one `lcm_expand_query` synthesis call |
+| `LCM_EXPANSION_CONTEXT_TOKENS` | `32000` → `125000` at 1M | Context budget used by the auxiliary LLM for `lcm_expand_query` |
+| `LCM_SUMMARY_TIMEOUT_MS` | `60000` → `200000` at 1M | Timeout for one summarization call |
+| `LCM_EXPANSION_TIMEOUT_MS` | `120000` → `200000` at 1M | Timeout for one `lcm_expand_query` synthesis call |
+| `LCM_SUMMARY_FAILURE_COOLDOWN_SECONDS` | `600` | Fork: cooldown armed when every summariser route fails (replaces upstream's silent truncation) |
 | `LCM_CRITICAL_BUDGET_PRESSURE_RATIO` | `0.0` | Disabled at `0.0`; when set, permits critical-pressure bypasses for bounded deferred catch-up and cache-friendly follow-on condensation only |
 
-Advanced compaction, assembly, and extraction knobs are defined in `config.py`.
+Advanced compaction, assembly, and extraction knobs are defined in `config.py`. The fork's
+own settings (`LCM_SCALE_LOW_WINDOW`, `LCM_SCALE_HIGH_WINDOW`, `LCM_LEAF_CHUNK_FRACTION`,
+`LCM_LEAF_PASS_CAP`, `LCM_DRAIN_STOP_FRACTION`, `LCM_SUMMARY_BUDGET_FRACTION`,
+`LCM_SUMMARY_CONCURRENCY`, `LCM_LEAF_LOOP_MAX_SECONDS`, … ) are listed with their curve anchors
+in [`FORK.md` → Fork configuration reference](FORK.md#fork-configuration-reference).
 
 ### Sensitive-pattern redaction
 
@@ -473,51 +553,33 @@ session.
 
 ### Tuning for large context windows
 
-Long-context models change the tuning problem. A 1M-token model does not mean
-you always want to spend 750k prompt tokens before LCM starts compacting. Start
-with the active prompt budget you are willing to pay for, then tune the threshold
-around that budget.
+In the fork you normally do not tune for a large window at all: every size that is a
+preference is derived from the model's effective `context_length` (see
+[What the fork changes](#what-the-fork-changes)). Check the result with `lcm_status` —
+the `window_scaling` section prints `t`, and every setting with its resolved value and source
+(`curve@t=…`, `env`, `config_yaml:…`, `manual`).
+
+Set explicit values only when you want something other than the curve. The two you are most
+likely to set:
 
 ```text
 compaction trigger = effective context window * LCM_CONTEXT_THRESHOLD
-LCM_CONTEXT_THRESHOLD = desired compaction trigger / effective context window
 ```
 
-Examples, as math rather than universal recommendations:
+- `LCM_CONTEXT_THRESHOLD` (or `lcm.context_threshold` in `config.yaml`): the curve gives 0.80
+  at 1M; set it if you want compaction earlier (cheaper prompts) or later (more raw context).
+- `LCM_LARGE_OUTPUT_EXTERNALIZATION_ENABLED` / `LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUBBING_ENABLED`:
+  pure features, worth enabling at any window (stubs carry a head note in the fork).
 
-| Effective context window | Desired trigger | Threshold |
-|--------------------------|-----------------|-----------|
-| `128000` | `96000` | `0.75` |
-| `200000` | `140000` | `0.70` |
-| `400000` | `240000` | `0.60` |
-| `1000000` | `250000` | `0.25` |
-| `1000000` | `400000` | `0.40` |
-| `1000000` | `600000` | `0.60` |
+Upstream's opt-in policies still exist and keep their upstream semantics when enabled:
+`LCM_DYNAMIC_LEAF_CHUNK_ENABLED` (doubling chunks, serial) and
+`LCM_THRESHOLD_FULL_SWEEP_ENABLED` (one bounded synchronous sweep: `LCM_SWEEP_MAX_PASSES`,
+default 12, total leaf plus condensation calls, and the curved leaf-loop wall clock — 120 s at
+256k, 200 s at 1M — per `compress()` call; it persists each completed DAG pass and publishes one
+newly assembled active context at the end). On the default path the fork already drains in
+curved chunks with a pass cap and a wall clock, so the sweep flag is rarely needed.
 
-A reasonable first pass for a true 1M effective window is:
-
-| Goal | Desired trigger | Threshold | Notes |
-|------|-----------------|-----------|-------|
-| Lower spend / earlier DAG building | `200000` to `300000` | `0.20` to `0.30` | Good when cost and latency matter more than maximum live context |
-| Balanced large-context use | `350000` to `500000` | `0.35` to `0.50` | Good starting point for many long-running agents |
-| Keep more raw context active | `600000+` | `0.60+` | Higher token burn, later compaction |
-
-Tune against your effective `context_length` if Hermes caps the provider's
-advertised window.
-
-Start with `LCM_CONTEXT_THRESHOLD`, `LCM_FRESH_TAIL_COUNT`, and large output
-externalization. Only tune leaf chunking after checking `lcm_status` and
-understanding whether your workload is dominated by huge raw backlog passes.
-
-`LCM_THRESHOLD_FULL_SWEEP_ENABLED=true` is an opt-in cache-shape policy. Once
-threshold pressure triggers compaction, the invocation keeps summarizing the
-oldest raw chunks outside the protected fresh tail even after pressure falls
-below the trigger. It then condenses the provider-visible summary frontier only
-when that frontier exceeds `LCM_SUMMARY_PREFIX_TARGET_TOKENS` (or one leaf
-budget when the target is `0`). One invocation is bounded to 12 total leaf plus
-condensation calls and 120 seconds in total (per `compress()` call; window-weighted in this fork), persists each completed DAG
-pass, and publishes one newly assembled active context at the end. It is
-synchronous and independent of deferred/background maintenance.
+Tune against your effective `context_length` if Hermes caps the provider's advertised window.
 
 ### Cache policy boundary
 
@@ -794,8 +856,9 @@ exposes retrieval tools that can drill back into exact stored sources.
 2. **Compact** - summarize older messages outside the fresh tail into D0 leaf
    nodes
 3. **Condense** - merge same-depth nodes into higher-depth summaries
-4. **Escalate** - shrink oversize summaries from detailed to bullets to
-   deterministic truncate
+4. **Escalate** - shrink oversize summaries from detailed to bullets; if every route fails,
+   keep the raw context, arm a cooldown and tell the host (the fork removed upstream's
+   deterministic truncation)
 5. **Assemble** - combine system prompt, highest-depth summaries, and fresh tail
 6. **Retrieve** - use LCM tools to drill into compacted history or synthesize
    from expanded context
@@ -834,7 +897,16 @@ config.py        env var defaults and overrides
 command.py       /lcm command handlers
 tools.py         lcm_grep, lcm_load_session, lcm_describe, lcm_expand, lcm_expand_query
 schemas.py       tool schemas shown to the model
-tests/           standalone pytest coverage
+tests/           standalone pytest coverage (tests/fork/ = fork tests, by step)
+
+window_scaling.py      fork: anchor table + curve + resolver
+window_scaled_mixin.py fork: resolves the curve on the engine, exposes effective_* values
+host_cooldown.py       fork: the host's compression-failure cooldown protocol
+marked_loss.py         fork: every marker left where upstream cut or dropped silently
+node_meta.py           fork: lcm_node_meta sidecar (escalation level + index block)
+leaf_pipeline.py       fork: concurrent leaf summarisation as a lookahead over the serial loop
+coverage_doctor.py     fork: lcm_doctor coverage
+errors.py              fork: SummaryUnavailableError
 ```
 
 Run tests:
@@ -842,10 +914,31 @@ Run tests:
 ```bash
 pip install pytest
 python -m pytest tests/ -v
+# fork: the same suite through the plugin's host venv, with the umask the SQLite guard needs
+scripts/test.sh
 ```
 
 No Hermes Agent checkout is required for the test suite; tests include a
 lightweight ABC stub.
+
+## Fork maintenance
+
+The fork is meant to track upstream **and** the other lossless-context implementation it was
+inspired by. The contract, in full, is in [`FORK.md`](FORK.md); the short form:
+
+1. **Upstream hermes-lcm.** `git fetch upstream && git merge upstream/main` in the fork
+   repository; resolve conflicts with [`docs/fork-touchpoints.md`](docs/fork-touchpoints.md)
+   (every touched upstream line, why, and what to do on conflict); `scripts/test.sh` must be
+   green; then pull into `~/.hermes/plugins/hermes-lcm` and re-pin.
+2. **lossless-claw.** On every
+   [lossless-claw](https://github.com/Martian-Engineering/lossless-claw) release, compare it
+   deeply against this fork — compaction/DAG algorithm, loss-avoidance and provenance,
+   summariser prompts and index quality, retrieval tools and operability — and port everything
+   it does better for this fork's purpose (no loss; 1M windows without degrading 256k). The
+   comparison reports live under `docs/claw-comparison/`; ported items are recorded there and
+   in `docs/fork-design.md`.
+3. Never merge anything that makes 256k behaviour differ from upstream's DAG structure or
+   that drops content without a marker; the fork tests under `tests/fork/` pin both.
 
 ## Contributing
 
