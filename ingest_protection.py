@@ -1385,7 +1385,14 @@ def protect_message_for_ingest(
         parse_json_strings=False,
     )
     normalized_content = normalize_content_value(original_content)
-    recovered_with_stat = recover_hermes_persisted_output_with_file_stat(raw_normalized_content) if role == "tool" else None
+    # fork: betterlcm — recovery must use the SAME host home the engine's replay path uses.
+    # Passing it on one side only made ingest store the preview while replay recovered the file,
+    # so the two identities disagreed and a tool result dropped out of the leaf's sources
+    # (verify-2 regression #1).
+    recovered_with_stat = (
+        recover_hermes_persisted_output_with_file_stat(raw_normalized_content, hermes_home)
+        if role == "tool" else None
+    )
     recovered_file_stat = None
     recovered_externalized = None
     if recovered_with_stat is not None:

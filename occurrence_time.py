@@ -77,6 +77,34 @@ def _unknown(
     }
 
 
+def _relative_day(match: "re.Match[str]", anchor: date) -> "date | None":
+    """Resolve one supported relative expression against the session anchor.
+
+    fork: betterlcm — source text is arbitrary. "999999999999 days ago" raised OverflowError
+    out of the arithmetic and aborted the caller's whole enrichment pass; an unresolvable count
+    is explicit unknown metadata, not an exception (audit p05 OT03).
+    """
+    simple = (match.group("simple") or "").casefold()
+    try:
+        if simple == "today":
+            return anchor
+        if simple == "yesterday":
+            return anchor - timedelta(days=1)
+        if match.group("weekday"):
+            target = _WEEKDAYS[match.group("weekday").casefold()]
+            delta = (anchor.weekday() - target) % 7
+            return anchor - timedelta(days=delta or 7)
+        count = int(match.group("count"))
+        unit = match.group("unit").casefold()
+        if unit.startswith("day"):
+            return anchor - timedelta(days=count)
+        if unit.startswith("week"):
+            return anchor - timedelta(weeks=count)
+        return _subtract_months(anchor, count)
+    except (OverflowError, ValueError, TypeError):
+        return None
+
+
 def resolve_occurrence_time(
     text: Any,
     *,
@@ -107,16 +135,23 @@ def resolve_occurrence_time(
             session_date=session_date,
             reason="ambiguous_multiple_explicit_dates",
         )
-    if explicit and list(_RELATIVE.finditer(content)):
+    if explicit:
         # fork: betterlcm — an explicit date used to return immediately, before the relative
         # expressions were looked at, so "On 2020-01-01 we proposed removal; yesterday we
-        # cancelled it" was recorded as a definite 2020 event (audit p05 OT02). Mixed evidence
-        # is ambiguous evidence.
-        return _unknown(
-            observed_at,
-            session_date=session_date,
-            reason="ambiguous_explicit_and_relative_dates",
-        )
+        # cancelled it" was recorded as a definite 2020 event (audit p05 OT02). Only a relative
+        # expression that resolves to a DIFFERENT day is a conflict: "Today (2026-09-08) we
+        # shipped the fix" agrees with itself and stays definite.
+        anchor_for_conflict = _parse_anchor(session_date)
+        if anchor_for_conflict is not None:
+            explicit_day = next(iter(distinct_explicit))
+            for relative in _RELATIVE.finditer(content):
+                relative_day = _relative_day(relative, anchor_for_conflict)
+                if relative_day is not None and relative_day != explicit_day:
+                    return _unknown(
+                        observed_at,
+                        session_date=session_date,
+                        reason="ambiguous_explicit_and_relative_dates",
+                    )
     if explicit:
         day, match = explicit[0]
         anchor = _parse_anchor(session_date)
@@ -156,29 +191,8 @@ def resolve_occurrence_time(
         )
 
     match = matches[0]
-    simple = (match.group("simple") or "").casefold()
-    # fork: betterlcm — source text is arbitrary. "999999999999 days ago" raised OverflowError
-    # out of the arithmetic and aborted the caller's whole enrichment pass; an unresolvable
-    # count is explicit unknown metadata, not an exception (audit p05 OT03).
-    try:
-        if simple == "today":
-            day = anchor
-        elif simple == "yesterday":
-            day = anchor - timedelta(days=1)
-        elif match.group("weekday"):
-            target = _WEEKDAYS[match.group("weekday").casefold()]
-            delta = (anchor.weekday() - target) % 7
-            day = anchor - timedelta(days=delta or 7)
-        else:
-            count = int(match.group("count"))
-            unit = match.group("unit").casefold()
-            if unit.startswith("day"):
-                day = anchor - timedelta(days=count)
-            elif unit.startswith("week"):
-                day = anchor - timedelta(weeks=count)
-            else:
-                day = _subtract_months(anchor, count)
-    except (OverflowError, ValueError, TypeError):
+    day = _relative_day(match, anchor)
+    if day is None:
         return _unknown(
             observed_at,
             session_date=session_date,

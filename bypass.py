@@ -385,6 +385,13 @@ class BypassMixin:
                     if following is None:
                         break
                     remove_index = following
+                if remove_index >= len(compacted) - 1:
+                    # fork: betterlcm — protecting the receipt must never cost the NEWEST
+                    # message: skipping the receipt at index 1 made the request the agent has
+                    # to answer the next removal candidate (verify-2 regression #2). Stop
+                    # deleting whole messages here and let the character-trim stages below
+                    # shrink text instead — they mark every cut they make.
+                    break
                 remove_indices = [remove_index]
             before_shape = [
                 (msg.get("role"), msg.get("tool_call_id"), bool(msg.get("tool_calls")))
@@ -410,9 +417,16 @@ class BypassMixin:
         previous_budget = -1
         for _ in range(12):
             next_messages: list[Dict[str, Any]] = []
-            for msg in compacted:
+            newest_index = len(compacted) - 1
+            for index, msg in enumerate(compacted):
                 if marked_loss.is_bypass_omission_marker(msg):
                     next_messages.append(msg)  # fork: the receipt is never shortened
+                    continue
+                if index == newest_index:
+                    # fork: betterlcm — the newest message is the request the agent has to
+                    # answer; the ordered last-resort stage below shrinks it only after
+                    # everything else, including the receipt, has already given way.
+                    next_messages.append(msg)
                     continue
                 next_msg = dict(msg)
                 content = next_msg.get("content")
@@ -431,39 +445,81 @@ class BypassMixin:
             ratio = target_tokens / max(1, token_count)
             char_budget = max(0, min(char_budget - 1, int(char_budget * max(0.25, ratio * 0.8))))
 
+        # fork: betterlcm — drop from the front, but never the receipt and never the newest
+        # message. Upstream dropped whatever was first; keeping the receipt at the front then
+        # made the live request the thing that went (verify-2 regression #2). When only the
+        # receipt and the newest message are left, the character-trim stage below shrinks them
+        # instead — and marks every cut.
         compacted = truncated
-        while len(compacted) > 1 and count_messages_tokens(compacted) > target_tokens:
-            # fork: betterlcm — drop from the front, but keep the receipt
-            if marked_loss.is_bypass_omission_marker(compacted[0]) and len(compacted) > 1:
-                remainder = self._sanitize_active_context_messages(compacted[1:])
-                if not remainder:
-                    break
-                compacted = [compacted[0]] + remainder[1:] if len(remainder) > 1 else [compacted[0]]
-                if len(compacted) <= 1:
-                    break
-                continue
-            compacted = self._sanitize_active_context_messages(compacted[1:])
+        while len(compacted) > 2 and count_messages_tokens(compacted) > target_tokens:
+            droppable = next(
+                (
+                    index
+                    for index in range(0, len(compacted) - 1)
+                    if not marked_loss.is_bypass_omission_marker(compacted[index])
+                ),
+                None,
+            )
+            if droppable is None:
+                break
+            remainder = compacted[:droppable] + compacted[droppable + 1:]
+            sanitized = self._sanitize_active_context_messages(remainder)
+            if len(sanitized) >= len(compacted):
+                break
+            compacted = sanitized
 
-        char_budget = max(0, min(80, target_tokens * 4))
-        previous_budget = -1
-        while count_messages_tokens(compacted) > target_tokens and char_budget != previous_budget:
-            previous_budget = char_budget
+        # fork: betterlcm — an ORDER of last resorts, because trimming every message together
+        # cut the live request to a bare marker while older context was still present
+        # (verify-2 regression #2):
+        #   1. shrink the older messages,
+        #   2. shrink the receipt to its shortest honest form (the counts survive),
+        #   3. only then shrink the newest message.
+        def _shrink(messages, budget, *, protect_newest, suffix):
+            newest_index = len(messages) - 1
             shrunk: list[Dict[str, Any]] = []
-            for msg in compacted:
+            for index, msg in enumerate(messages):
                 if marked_loss.is_bypass_omission_marker(msg):
-                    shrunk.append(msg)  # fork: the receipt survives every stage
+                    shrunk.append(msg)
+                    continue
+                if protect_newest and index == newest_index:
+                    shrunk.append(msg)
                     continue
                 next_msg = dict(msg)
-                content = next_msg.get("content")
-                # fork: betterlcm — the suffix marker is kept even at a zero char budget.
-                # Upstream dropped it exactly there, so the most destructive trim of all was
-                # the one that said nothing about itself (audit p05 BY01).
+                # the suffix marker is kept even at a zero char budget. Upstream dropped it
+                # exactly there, so the most destructive trim of all was the one that said
+                # nothing about itself (audit p05 BY01).
                 next_msg["content"] = self._truncate_bypass_content_value(
-                    content, char_budget, suffix=marked_loss.BYPASS_FINAL_TRIM_SUFFIX
+                    next_msg.get("content"), budget, suffix=suffix
                 )
                 shrunk.append(next_msg)
-            compacted = self._sanitize_active_context_messages(shrunk)
-            char_budget = max(0, char_budget // 2)
+            return self._sanitize_active_context_messages(shrunk)
+
+        for protect_newest in (True, False):
+            char_budget = max(0, min(80, target_tokens * 4))
+            previous_budget = -1
+            while (
+                count_messages_tokens(compacted) > target_tokens
+                and char_budget != previous_budget
+            ):
+                previous_budget = char_budget
+                compacted = _shrink(
+                    compacted, char_budget,
+                    protect_newest=protect_newest,
+                    suffix=marked_loss.BYPASS_FINAL_TRIM_SUFFIX,
+                )
+                char_budget = max(0, char_budget // 2)
+            if count_messages_tokens(compacted) <= target_tokens:
+                break
+            if protect_newest:
+                # step 2: the receipt becomes its shortest honest form before the live request
+                # loses anything at all.
+                compacted = [
+                    {**msg, "content": marked_loss.compact_bypass_omission_marker(msg.get("content"))}
+                    if marked_loss.is_bypass_omission_marker(msg) else msg
+                    for msg in compacted
+                ]
+                if count_messages_tokens(compacted) <= target_tokens:
+                    break
 
         return compacted
 

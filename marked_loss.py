@@ -37,6 +37,24 @@ def bypass_omission_marker(dropped_messages: int, dropped_chars: int) -> str:
     )
 
 
+_BYPASS_OMISSION_COUNTS_RE = re.compile(r"(\d+) older message\(s\) \(~(\d+) chars\)")
+
+
+def compact_bypass_omission_marker(text: str) -> str:
+    """The shortest honest form of the receipt, for a cap nothing else can satisfy.
+
+    fork: betterlcm — the receipt is never removed, but when the budget cannot hold it AND the
+    live request, the counts are what must survive, not the sentence around them.
+    """
+    match = _BYPASS_OMISSION_COUNTS_RE.search(str(text or ""))
+    if not match:
+        return f"{BYPASS_OMISSION_PREFIX} older messages dropped by the LCM bypass trim]"
+    return (
+        f"{BYPASS_OMISSION_PREFIX} {match.group(1)} msg / {match.group(2)} chars dropped, "
+        "host transcript only]"
+    )
+
+
 def is_bypass_omission_marker(message: Any) -> bool:
     """fork: betterlcm — is this the receipt above?"""
     if not isinstance(message, dict):

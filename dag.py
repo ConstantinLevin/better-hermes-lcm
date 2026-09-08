@@ -494,24 +494,49 @@ class SummaryDAG:
             ).fetchone()
         return int(row[0] or 0) if row else 0
 
-    def max_message_source_id(self, session_id: str) -> int:
-        """fork: betterlcm — the highest raw store_id any leaf of this session summarises.
+    def covered_message_prefix_end(self, session_id: str, *, floor: int = 0) -> int:
+        """fork: betterlcm — the end of the CONTIGUOUS run of stored rows this session's leaves
+        already summarise, starting just after ``floor``.
 
         The DAG is the durable record of what has been compacted; the lifecycle frontier is a
         second write that can be lost between them. Publication writes the node first, so a
-        crash (or an exception) between the two leaves a session whose summaries cover rows
-        the frontier still calls raw — and the next compaction summarises them a second time,
-        producing a duplicate index and a second node over the same sources (audit p05
-        CP02/CP03). Restoring the frontier as ``max(persisted, this)`` makes that self-healing.
+        failure between the two leaves a session whose summaries cover rows the frontier still
+        calls raw — and the next compaction summarises them a second time, producing a
+        duplicate index over the same sources (audit p05 CP02/CP03).
+
+        Only a PROVEN prefix counts. Taking the maximum source id instead stepped over rows no
+        node covers: a leaf may legitimately summarise a sparse selection, and an imported
+        graph need not cover a prefix at all, so those rows would be treated as compacted while
+        nothing indexes them (verify-2 regression #5).
         """
         with self._db_lock:
-            row = self._conn.execute(
-                """SELECT COALESCE(MAX(CAST(j.value AS INTEGER)), 0)
-                   FROM summary_nodes n, json_each(n.source_ids) j
-                   WHERE n.session_id = ? AND n.source_type = 'messages'""",
-                (session_id,),
-            ).fetchone()
-        return int(row[0] or 0) if row else 0
+            covered = {
+                int(row[0])
+                for row in self._conn.execute(
+                    """SELECT DISTINCT CAST(j.value AS INTEGER)
+                       FROM summary_nodes n, json_each(n.source_ids) j
+                       WHERE n.session_id = ? AND n.source_type = 'messages'
+                         AND CAST(j.value AS INTEGER) > ?""",
+                    (session_id, int(floor)),
+                ).fetchall()
+            }
+            if not covered:
+                return int(floor)
+            stored = [
+                int(row[0])
+                for row in self._conn.execute(
+                    """SELECT store_id FROM messages
+                       WHERE session_id = ? AND store_id > ?
+                       ORDER BY store_id""",
+                    (session_id, int(floor)),
+                ).fetchall()
+            ]
+        end = int(floor)
+        for store_id in stored:
+            if store_id not in covered:
+                break
+            end = store_id
+        return end
 
     def get_parent_node_ids(self, node_id: int, limit: int = 256) -> List[int]:
         """fork: betterlcm — nodes that record ``node_id`` as one of their sources.

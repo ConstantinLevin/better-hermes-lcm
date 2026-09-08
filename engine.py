@@ -1972,7 +1972,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         """
         frontier = int(persisted_frontier or 0)
         try:
-            published = self._dag.max_message_source_id(session_id)
+            published = self._dag.covered_message_prefix_end(session_id, floor=frontier)
         except Exception:  # pragma: no cover - a read failure must not block binding
             logger.debug("LCM could not derive the frontier floor from the DAG", exc_info=True)
             return frontier

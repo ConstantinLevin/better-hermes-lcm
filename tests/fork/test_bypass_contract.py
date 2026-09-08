@@ -96,7 +96,9 @@ def test_the_bypass_receipt_survives_every_trimming_stage(tmp_path):
 
         rendered = "\n".join(str(m.get("content")) for m in result)
         assert marked_loss.BYPASS_OMISSION_PREFIX in rendered, "the receipt was trimmed away"
-        assert "older message(s)" in rendered and "chars) were dropped" in rendered
+        # either the full sentence or its compact last-resort form, but always the counts
+        assert ("older message(s)" in rendered and "chars) were dropped" in rendered) or (
+            "msg /" in rendered and "chars dropped" in rendered)
         marker = next(m for m in result if marked_loss.is_bypass_omission_marker(m))
         assert "[LCM cut]" not in str(marker["content"]), "the receipt itself was shortened"
     finally:
@@ -110,5 +112,23 @@ def test_a_zero_budget_cut_still_says_it_cut(tmp_path):
         cut = e._truncate_bypass_content_value("a decision that matters", 0,
                                                suffix=marked_loss.BYPASS_FINAL_TRIM_SUFFIX)
         assert cut == marked_loss.BYPASS_FINAL_TRIM_SUFFIX
+    finally:
+        e.shutdown()
+
+
+def test_the_receipt_never_costs_the_newest_request(tmp_path):
+    """verify-2 regression #2: skipping the omission receipt at index 1 made the newest
+    message — the request the agent has to answer — the next removal candidate."""
+    from hermes_lcm import marked_loss
+    e = _bypassed_engine(tmp_path, "by01c.db")
+    try:
+        messages = [
+            {"role": "user", "content": "the original objective " + "o" * 200},
+            {"role": "user", "content": marked_loss.bypass_omission_marker(9, 4000)},
+            {"role": "user", "content": "LATEST REQUEST: what is the status?"},
+        ]
+        result = e._trim_bypass_compacted_to_cap(list(messages), 60)
+        rendered = "\n".join(str(m.get("content")) for m in result)
+        assert "LATEST REQUEST" in rendered, "the live request was deleted to keep the receipt"
     finally:
         e.shutdown()

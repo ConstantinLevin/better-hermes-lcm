@@ -652,8 +652,16 @@ def _is_index_shaped_summary(result: str) -> bool:
     lowered = normalized.lower()
     if lowered.rstrip(".!") in _NON_INDEX_ACKNOWLEDGEMENTS:
         return False
-    if any(lowered.startswith(marker) for marker in _NON_INDEX_REFUSAL_MARKERS):
-        return False
+    # A refusal is a WHOLE reply that says nothing about the source. Testing the opening words
+    # alone rejected real summaries that begin with those words ("I cannot reproduce the timeout
+    # after raising the limit to 120 seconds; the remaining issue is DNS"), so the phrase counts
+    # only when almost nothing follows it (verify-2 regression #10).
+    for marker in _NON_INDEX_REFUSAL_MARKERS:
+        if not lowered.startswith(marker):
+            continue
+        remainder = normalized[len(marker):].strip(" ,.;:!—-")
+        if len(remainder.split()) < 6:
+            return False
     return True
 
 

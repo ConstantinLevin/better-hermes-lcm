@@ -66,3 +66,24 @@ def test_the_frontier_catches_up_with_what_the_summaries_already_cover(tmp_path)
         assert engine._last_compacted_store_id == max(covered)
     finally:
         engine.shutdown()
+
+
+def test_the_frontier_never_steps_over_a_row_no_node_covers(tmp_path):
+    """verify-2 regression #5: taking the MAXIMUM source id treated uncovered rows as
+    compacted. A leaf may summarise a sparse selection, and an imported graph need not cover a
+    prefix at all — only a proven contiguous run may advance the frontier."""
+    cfg = LCMConfig(database_path=str(tmp_path / "sparse.db"))
+    engine = LCMEngine(config=cfg, hermes_home=str(tmp_path))
+    try:
+        engine.on_session_start("sp", platform="cli", context_length=200_000)
+        for index in range(5):
+            engine._store.append("sp", {"role": "user", "content": f"m{index}"}, source="cli")
+        engine._store.commit()
+        rows = [row["store_id"] for row in engine._store.get_session_messages("sp")]
+        engine._dag.add_node_with_meta(
+            _node(session="sp", source_ids=[rows[1], rows[2]]), level=1
+        )
+        engine._bind_lifecycle_state("sp")
+        assert engine._last_compacted_store_id == 0, "row 1 is covered by nothing"
+    finally:
+        engine.shutdown()

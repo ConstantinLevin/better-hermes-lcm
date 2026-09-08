@@ -85,6 +85,16 @@ def test_an_acknowledgement_is_not_a_summary(monkeypatch):
         assert escalation._is_index_shaped_summary(rejected) is False, rejected
     assert escalation._is_index_shaped_summary(replies[3]) is True
 
+    # ... and a real summary that merely BEGINS with one of those phrases is still a summary
+    # (verify-2 regression #10: the gate tested the opening words alone)
+    for accepted in (
+        "I cannot reproduce the timeout after raising the limit to 120 seconds; the remaining "
+        "issue is DNS. Expand for details about: timeout and DNS.",
+        "As an AI evaluation framework, Atlas compares timeout recovery and records failed "
+        "routes. Expand for details about: recovery.",
+    ):
+        assert escalation._is_index_shaped_summary(accepted) is True, accepted
+
     monkeypatch.setattr(escalation, "_call_llm_for_summary",
                         lambda *a, **k: "OK")
     with pytest.raises(SummaryUnavailableError) as raised:

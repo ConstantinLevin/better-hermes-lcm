@@ -1068,9 +1068,11 @@ class CompactionMixin:
             # returned the other messages and never mentioned them (audit p05 CP01). They stay
             # out of the summary TEXT and are named in a marker instead, so the extra sources
             # can never read as content the summariser claimed to cover.
-            published_source_ids = sorted(set(source_store_ids) | set(consumed_store_ids))
+            summarised_source_ids = set(source_store_ids)  # built once, not per source id
+            published_source_ids = sorted(summarised_source_ids | set(consumed_store_ids))
             excluded_source_ids = [
-                store_id for store_id in published_source_ids if store_id not in set(source_store_ids)
+                store_id for store_id in published_source_ids
+                if store_id not in summarised_source_ids
             ]
             if excluded_source_ids:
                 summary_text = summary_text.rstrip() + "\n" + marked_loss.excluded_reply_marker(

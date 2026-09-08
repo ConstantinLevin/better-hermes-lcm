@@ -83,3 +83,13 @@ def test_an_absurd_relative_count_returns_unknown_instead_of_raising():
     )
     assert result["event_time_source"] == "unknown"
     assert result["reason"] == "relative_expression_out_of_range"
+
+
+def test_an_explicit_date_that_agrees_with_its_relative_wording_stays_definite():
+    """fork: betterlcm — only a relative expression that resolves to a DIFFERENT day conflicts;
+    "Today (2026-09-08)" agrees with itself (regression found by the verify-2 auditor)."""
+    result = resolve_occurrence_time(
+        "Today (2026-09-08) we shipped the fix.", observed_at=123, session_date="2026-09-08"
+    )
+    assert result["event_time_source"] == "explicit"
+    assert result["event_date"] == "2026-09-08"
