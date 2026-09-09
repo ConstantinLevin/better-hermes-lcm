@@ -213,10 +213,11 @@ def _structured_outcome_suffix(block: Dict[str, Any]) -> str:
 
 # Keys a rendered block already accounts for: its own type, the streams that are rendered, the
 # outcome fields appended as a suffix, and the identity fields the metadata form prints.
+# fork: betterlcm — keys that carry no content of their own. Everything else is inventoried by
+# the branch that did NOT render it: exempting "text"/"content" globally hid them in the media
+# branch, which renders neither, and citations/annotations are substantive (round-3 verify-4 #9).
 _ACCOUNTED_BLOCK_KEYS = frozenset(
-    ("type", "text", "content", "cache_control", "citations", "annotations")
-    + _STRUCTURED_OUTCOME_KEYS
-    + _STRUCTURED_METADATA_KEYS
+    ("type", "cache_control") + _STRUCTURED_OUTCOME_KEYS + _STRUCTURED_METADATA_KEYS
 )
 
 
@@ -234,7 +235,8 @@ def _unrendered_field_receipt(block: Dict[str, Any], rendered_keys) -> str:
             continue
         if key in rendered_keys or key in _ACCOUNTED_BLOCK_KEYS:
             continue
-        if value in (None, "", [], {}, False):
+        # fork: betterlcm — 0 and False are VALUES, not absence (round-3 verify-4 #9)
+        if value is None or value == "" or value == [] or value == {}:
             continue
         omitted.append(key)
     if not omitted:
@@ -316,6 +318,8 @@ def _sanitize_content_block(content: Any) -> str:
             )
         if _looks_like_media_block(block_type, content):
             # the marker stands for the media; anything substantive beside it is still named
+            # the marker stands for the media; the branch renders no field of its own, so
+            # every substantive key is inventoried (round-3 verify-4 #9)
             return (
                 _MEDIA_ATTACHMENT_MARKER
                 + _structured_outcome_suffix(content)
@@ -506,7 +510,23 @@ def _sanitize_json_like(value: Any) -> Any:
                 candidate = key
             taken.add(candidate)
             renamed[key] = candidate
-        return {renamed[key]: _sanitize_json_like(val) for key, val in value.items()}
+        sanitized = {renamed[key]: _sanitize_json_like(val) for key, val in value.items()}
+        # fork: betterlcm — a KEY that was rewritten is a removal like any other, and it left
+        # no trace (round-3 verify-4 #9). The receipt rides in the object it happened in.
+        changed_keys = [key for key, candidate in renamed.items()
+                        if isinstance(key, str) and candidate != key]
+        if changed_keys:
+            receipt_key = "_lcm_key_sanitisation"
+            suffix = 0
+            while receipt_key in sanitized:
+                suffix += 1
+                receipt_key = f"_lcm_key_sanitisation_{suffix}"
+            shown = ", ".join(sorted(renamed[key] for key in changed_keys)[:10])
+            sanitized[receipt_key] = (
+                f"[LCM: {len(changed_keys)} key name(s) had injected context removed before "
+                f"summarising ({shown}); the stored message is unchanged — lcm_expand]"
+            )
+        return sanitized
     if isinstance(value, list):
         return [_sanitize_json_like(item) for item in value]
     if isinstance(value, str):

@@ -362,3 +362,27 @@ def test_the_summariser_sees_the_envelope_fields_or_a_receipt_for_them(tmp_path)
         assert "not summarised here" in serialized
     finally:
         e.shutdown()
+
+
+def test_every_rendering_branch_accounts_for_what_it_did_not_render():
+    """round-3 verify-4 #9: the "accounted" key set exempted text/content globally, so the
+    media branch — which renders neither — hid them; citations, annotations and nested
+    siblings vanished; a substantive zero-valued field counted as empty; and a JSON KEY that
+    was rewritten left no trace at all."""
+    from hermes_lcm.extraction import _sanitize_content_block, _sanitize_json_like
+
+    media = _sanitize_content_block({
+        "type": "image", "source": {"data": "x"}, "transcript": "the spoken words"})
+    assert media.startswith("[Media attachment]")
+    assert "transcript" in media and "source" in media
+
+    zero = _sanitize_content_block({"type": "text", "text": "ok", "retries": 0})
+    assert "retries" in zero, zero
+
+    cited = _sanitize_content_block({"type": "text", "text": "ok", "citations": [{"s": 1}]})
+    assert "citations" in cited, cited
+
+    renamed = _sanitize_json_like({"a<active_memory>x</active_memory>b": "V"})
+    receipts = [value for key, value in renamed.items()
+                if isinstance(key, str) and key.startswith("_lcm_key_sanitisation")]
+    assert receipts, renamed

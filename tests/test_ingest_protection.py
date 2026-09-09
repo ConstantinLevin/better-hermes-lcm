@@ -1445,7 +1445,11 @@ def test_pre_compaction_tool_arguments_sanitize_payload_keys():
     assert "data:image" not in sanitized
     assert DATA_PAYLOAD[:80] not in sanitized
     parsed = json.loads(sanitized)
-    assert parsed == {"[Media attachment]": "plain-value"}
+    # fork: betterlcm — a rewritten KEY is a removal like any other and carries its receipt
+    # in the object it happened in (round-3 verify-4 #9)
+    assert parsed["[Media attachment]"] == "plain-value"
+    receipts = [value for key, value in parsed.items() if key.startswith("_lcm_key_sanitisation")]
+    assert receipts and "key name(s) had injected context removed" in receipts[0]
 
 
 def test_payload_bearing_key_uses_neutral_child_field_path(tmp_path):
