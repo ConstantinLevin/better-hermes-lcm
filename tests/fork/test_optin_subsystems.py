@@ -325,3 +325,24 @@ def test_a_question_s_own_year_and_currency_survive_compilation():
     relative = compile_answer_contract(
         "How many vacations did I take last month?", "2026-09-09")
     assert relative.status == "planned", relative
+
+
+def test_structured_adapters_refuse_an_unfinished_generation():
+    """round-3 verify-4 #27: every structured adapter accepted a payload that arrived with
+    finish_reason="length" — a truncated extraction or selection acquired a successful
+    receipt."""
+    from types import SimpleNamespace
+    from hermes_lcm.escalation import unfinished_generation_reason
+
+    truncated = SimpleNamespace(choices=[SimpleNamespace(
+        message=SimpleNamespace(content='{"a": 1}'), finish_reason="length")])
+    assert unfinished_generation_reason(truncated) == "finish_reason=length"
+
+    incomplete = SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content="{}"), finish_reason="stop")],
+        status="incomplete", incomplete_details={"reason": "max_output_tokens"})
+    assert unfinished_generation_reason(incomplete).startswith("status=")
+
+    finished = SimpleNamespace(choices=[SimpleNamespace(
+        message=SimpleNamespace(content="{}"), finish_reason="stop")])
+    assert unfinished_generation_reason(finished) == ""

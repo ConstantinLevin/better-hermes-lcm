@@ -167,6 +167,13 @@ def _call_structured_assertion_llm(
     }
     apply_lcm_model_route(call_kwargs, model)
     response = call_llm(**call_kwargs)
+    # fork: betterlcm — a truncated generation is not a payload (round-3 verify-4 #27)
+    from .escalation import unfinished_generation_reason
+    unfinished = unfinished_generation_reason(response)
+    if unfinished:
+        raise ValueError(
+            f"structured assertion extractor returned an unfinished generation ({unfinished})"
+        )
     content = response.choices[0].message.content
     if not isinstance(content, str):
         content = str(content) if content else ""

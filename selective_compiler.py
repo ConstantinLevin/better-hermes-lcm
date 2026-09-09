@@ -300,6 +300,10 @@ def call_selective_auxiliary_selector(
     started = time.perf_counter()
     response = call_llm(**kwargs)
     latency_ms = round((time.perf_counter() - started) * 1_000.0, 3)
+    from .escalation import unfinished_generation_reason  # fork: round-3 verify-4 #27
+    unfinished = unfinished_generation_reason(response)
+    if unfinished:
+        raise ValueError(f"selector returned an unfinished generation ({unfinished})")
     content = response.choices[0].message.content
     text = str(content or "").strip()
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE).strip()

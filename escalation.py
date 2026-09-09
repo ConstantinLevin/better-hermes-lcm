@@ -211,6 +211,27 @@ def _strip_reasoning_blocks(text: str) -> str:
     return _THINK_BLOCK_RE.sub("", text)
 
 
+def unfinished_generation_reason(response: Any) -> str:
+    """fork: betterlcm — why this response is not a finished generation, or "".
+
+    Every structured adapter accepted a payload that arrived with
+    ``finish_reason="length"`` or a provider status of "incomplete": a truncated extraction or
+    selection acquired a successful receipt (round-3 verify-4 #27). One check, used by all.
+    """
+    try:
+        choice = response.choices[0]
+    except Exception:  # pragma: no cover - a shape without choices
+        choice = None
+    finish_reason = str(getattr(choice, "finish_reason", "") or "").strip().lower()
+    if finish_reason in _TRUNCATED_FINISH_REASONS:
+        return f"finish_reason={finish_reason}"
+    status = str(getattr(response, "status", "") or "").strip().lower()
+    details = getattr(response, "incomplete_details", None)
+    if status == "incomplete" or details:
+        return f"status={status or 'incomplete'}"
+    return ""
+
+
 def _sanitize_reasoning_summary(text: str) -> str:
     """Return a summary safe to persist, or ``""`` when the model returned only
     reasoning.

@@ -256,6 +256,10 @@ def call_auxiliary_selector(
     started = time.perf_counter()
     response = call_llm(**call_kwargs)
     latency_ms = round((time.perf_counter() - started) * 1_000.0, 3)
+    from .escalation import unfinished_generation_reason  # fork: round-3 verify-4 #27
+    unfinished = unfinished_generation_reason(response)
+    if unfinished:
+        raise ValueError(f"host selector returned an unfinished generation ({unfinished})")
     content = response.choices[0].message.content
     if not isinstance(content, str):
         content = str(content) if content else ""
