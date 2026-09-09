@@ -291,3 +291,26 @@ def test_an_elision_cannot_swallow_an_earlier_receipt(tmp_path):
         assert "chars of injected context removed" in serialized, serialized[:400]
     finally:
         e.shutdown()
+
+
+def test_a_block_s_other_substantive_fields_are_named_not_dropped():
+    """round-2 verify-4 #14: a typed text block carrying {"text": "stdout", "content":
+    "stderr FAILED", "extra": "FATAL"} rendered "stdout" and dropped the rest with nothing in
+    its place — the summariser read a success where the row recorded a failure."""
+    from hermes_lcm.extraction import _sanitize_content_block
+
+    rendered = _sanitize_content_block({
+        "type": "text", "text": "stdout", "content": "stderr FAILED",
+        "is_error": True, "extra": "FATAL",
+    })
+    assert "stdout" in rendered and "stderr FAILED" in rendered
+    assert "is_error=True" in rendered
+    assert "extra" in rendered and "not rendered here" in rendered
+
+    media = _sanitize_content_block({"type": "image", "source": {"data": "x"},
+                                     "caption": "the failing chart"})
+    assert media.startswith("[Media attachment]")
+    assert "caption" in media
+
+    plain = _sanitize_content_block({"type": "text", "text": "just text"})
+    assert plain == "just text", plain

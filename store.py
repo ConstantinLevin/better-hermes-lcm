@@ -650,13 +650,26 @@ class MessageStore:
                     "tool_call_id": tool_call_id,
                 }
             )
-            self._conn.execute(
-                "UPDATE messages SET content = ?, token_estimate = ? WHERE store_id = ?",
-                (placeholder, placeholder_tokens, store_id),
-            )
-            if before_commit is not None:
-                before_commit(self._conn, store_id)
-            self._conn.commit()
+            # fork: betterlcm — the rewrite, the caller's archive callback and the commit are
+            # ONE transaction. A callback that raised left the content rewrite pending, and the
+            # next unrelated commit published it without the chunk archive that makes the old
+            # offsets readable — the GC placeholder became durable while the bytes it replaced
+            # lost their index (round-2 verify-4 #6). BaseException, because a cancellation
+            # leaves the same half-state.
+            try:
+                self._conn.execute(
+                    "UPDATE messages SET content = ?, token_estimate = ? WHERE store_id = ?",
+                    (placeholder, placeholder_tokens, store_id),
+                )
+                if before_commit is not None:
+                    before_commit(self._conn, store_id)
+                self._conn.commit()
+            except BaseException:
+                try:
+                    self._conn.rollback()
+                except Exception:  # pragma: no cover - a dead connection cannot roll back
+                    logger.warning("LCM could not roll back a failed GC rewrite", exc_info=True)
+                raise
             return True
 
     def pin(self, store_id: int) -> None:

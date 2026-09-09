@@ -5398,9 +5398,18 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                 )
                 if externalized is not None and externalized.get("kind", "tool_result") == "tool_result":
                     placeholder = build_transcript_gc_placeholder(externalized)
-                    self._store.gc_externalized_tool_result(
-                        store_id, placeholder, before_commit=_archive_in_rewrite_txn
-                    )
+                    # fork: betterlcm — GC is an optimisation; a failure must not abort the
+                    # compaction that already published its node. The store rolls the rewrite
+                    # back as one transaction (round-2 verify-4 #6) and the row keeps its bytes.
+                    try:
+                        self._store.gc_externalized_tool_result(
+                            store_id, placeholder, before_commit=_archive_in_rewrite_txn
+                        )
+                    except Exception:
+                        logger.warning(
+                            "LCM transcript GC failed for store_id %s; the row is unchanged",
+                            store_id, exc_info=True,
+                        )
                     continue
 
             # fork: betterlcm — the payload must contain the row's ORIGINAL bytes before the
@@ -5422,9 +5431,15 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                 continue
 
             placeholder = build_transcript_gc_placeholder(externalized)
-            self._store.gc_externalized_tool_result(
-                store_id, placeholder, before_commit=_archive_in_rewrite_txn
-            )
+            try:
+                self._store.gc_externalized_tool_result(
+                    store_id, placeholder, before_commit=_archive_in_rewrite_txn
+                )
+            except Exception:  # fork: betterlcm — see above
+                logger.warning(
+                    "LCM transcript GC failed for store_id %s; the row is unchanged",
+                    store_id, exc_info=True,
+                )
 
     def _serialize_messages(self, messages: List[Dict[str, Any]]) -> str:
         """Serialize messages into labeled text for the summarizer."""

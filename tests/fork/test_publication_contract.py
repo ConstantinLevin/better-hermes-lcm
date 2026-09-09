@@ -236,3 +236,29 @@ def test_a_session_change_during_summarisation_does_not_publish_under_the_new_se
         assert all(node.depth == 0 for node in e._dag.get_session_nodes("s"))
     finally:
         e.shutdown()
+
+
+def test_a_failed_gc_callback_leaves_the_row_and_its_chunks_alone(tmp_path):
+    """round-2 verify-4 #6: the content rewrite, the caller's archive callback and the commit
+    were not one transaction, so a callback that raised left the rewrite PENDING and the next
+    unrelated commit published the GC placeholder without the chunk archive."""
+    from hermes_lcm.store import MessageStore
+    store = MessageStore(str(tmp_path / "gc.db"))
+    try:
+        store_id = store.append("s", {"role": "tool", "tool_call_id": "c1",
+                                      "content": "the original result bytes"}, source="cli")
+        store.commit()
+
+        def failing(conn, sid):
+            raise RuntimeError("archive failed")
+
+        with pytest.raises(RuntimeError):
+            store.gc_externalized_tool_result(store_id, "[placeholder]", before_commit=failing)
+        assert store._conn.in_transaction is False
+        store._conn.commit()  # an unrelated commit must not publish the rewrite
+        assert store.get(store_id)["content"] == "the original result bytes"
+
+        assert store.gc_externalized_tool_result(store_id, "[placeholder]") is True
+        assert store.get(store_id)["content"] == "[placeholder]"
+    finally:
+        store.close()

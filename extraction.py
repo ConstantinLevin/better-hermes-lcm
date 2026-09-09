@@ -202,6 +202,42 @@ def _structured_outcome_suffix(block: Dict[str, Any]) -> str:
     return f" [{', '.join(parts)}]" if parts else ""
 
 
+# Keys a rendered block already accounts for: its own type, the streams that are rendered, the
+# outcome fields appended as a suffix, and the identity fields the metadata form prints.
+_ACCOUNTED_BLOCK_KEYS = frozenset(
+    ("type", "text", "content", "cache_control", "citations", "annotations")
+    + _STRUCTURED_OUTCOME_KEYS
+    + _STRUCTURED_METADATA_KEYS
+)
+
+
+def _unrendered_field_receipt(block: Dict[str, Any], rendered_keys) -> str:
+    """fork: betterlcm — name substantive fields the rendering does not show.
+
+    A typed text block carrying ``{"text": "stdout", "content": "stderr FAILED",
+    "extra": "FATAL"}`` rendered "stdout" and dropped the rest with nothing in its place
+    (round-2 verify-4 #14). The stored row is unchanged; this says what the summariser is not
+    being shown, and where to read it.
+    """
+    omitted: List[str] = []
+    for key, value in block.items():
+        if not isinstance(key, str):
+            continue
+        if key in rendered_keys or key in _ACCOUNTED_BLOCK_KEYS:
+            continue
+        if value in (None, "", [], {}, False):
+            continue
+        omitted.append(key)
+    if not omitted:
+        return ""
+    shown = ", ".join(sorted(omitted)[:10])
+    more = f" (+{len(omitted) - 10} more)" if len(omitted) > 10 else ""
+    return (
+        f"\n[LCM: {len(omitted)} further field(s) of this block are not rendered here "
+        f"({shown}{more}); the stored message is unchanged — lcm_expand]"
+    )
+
+
 def _sanitize_content_block(content: Any) -> str:
     if content is None:
         return ""
@@ -214,8 +250,14 @@ def _sanitize_content_block(content: Any) -> str:
             block_text = _sanitize_content_block(block)
             if not block_text:
                 continue
-            if block_text == _MEDIA_ATTACHMENT_MARKER:
+            if block_text.startswith(_MEDIA_ATTACHMENT_MARKER):
+                # fork: betterlcm — a media block can now carry a receipt for the substantive
+                # fields beside it (round-2 verify-4 #14); count the attachment and keep the
+                # receipt as its own part rather than losing both to an equality test.
                 media_count += 1
+                remainder = block_text[len(_MEDIA_ATTACHMENT_MARKER):].strip()
+                if remainder:
+                    parts.append(remainder)
                 continue
             if block_text.endswith(_MEDIA_ATTACHMENT_SUFFIX):
                 media_count += 1
@@ -243,14 +285,33 @@ def _sanitize_content_block(content: Any) -> str:
             text_value = content.get("text")
             if isinstance(text_value, dict):
                 text_value = text_value.get("value", "") or text_value.get("text", "")
-            if not text_value:
-                text_value = content.get("content", "")
             # fork: betterlcm — a typed TEXT block can still carry an outcome beside its text
             # (is_error, a status, its call id). Returning only the text made a failed step
-            # read exactly like a successful one (verify-4 #6).
-            return _sanitize_content_block(text_value) + _structured_outcome_suffix(content)
+            # read exactly like a successful one (verify-4 #6). And it can carry a SECOND
+            # stream: `text` plus `content` (stdout and stderr) — rendering one and dropping
+            # the other lost a whole output stream even in the typed branch
+            # (round-2 verify-4 #14).
+            rendered_parts: List[str] = []
+            rendered_keys: List[str] = []
+            for key, value in (("text", text_value), ("content", content.get("content"))):
+                if value in (None, ""):
+                    continue
+                part = _sanitize_content_block(value)
+                if part and part not in rendered_parts:
+                    rendered_parts.append(part)
+                    rendered_keys.append(key)
+            return (
+                "\n".join(rendered_parts)
+                + _structured_outcome_suffix(content)
+                + _unrendered_field_receipt(content, rendered_keys)
+            )
         if _looks_like_media_block(block_type, content):
-            return _MEDIA_ATTACHMENT_MARKER
+            # the marker stands for the media; anything substantive beside it is still named
+            return (
+                _MEDIA_ATTACHMENT_MARKER
+                + _structured_outcome_suffix(content)
+                + _unrendered_field_receipt(content, ())
+            )
         # fork: betterlcm — a block may carry BOTH `text` and `content` (stdout and stderr, for
         # example). Taking the first and ignoring the second dropped a whole output stream
         # (verify-4 #6). Keep every distinct one, then the typed siblings that change what the
@@ -264,8 +325,12 @@ def _sanitize_content_block(content: Any) -> str:
             if part and part not in rendered_parts:
                 rendered_parts.append(part)
         if rendered_parts:
-            return "\n".join(rendered_parts) + _structured_outcome_suffix(content)
-        return _extract_structured_metadata(content)
+            return (
+                "\n".join(rendered_parts)
+                + _structured_outcome_suffix(content)
+                + _unrendered_field_receipt(content, ("text", "content"))
+            )
+        return _extract_structured_metadata(content) + _unrendered_field_receipt(content, ())
     return str(content)
 
 
