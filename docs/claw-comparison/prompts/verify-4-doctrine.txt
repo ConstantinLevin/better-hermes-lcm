@@ -1,4 +1,4 @@
-You are auditing "betterlcm" (a fork of the hermes-lcm plugin, Python, at /home/agent/projects/agentimprovement/betterlcm) against ONE rule, exhaustively.
+You are auditing "betterlcm" (a fork of the hermes-lcm plugin, Python, at the repository root) against ONE rule, exhaustively.
 
 THE RULE: nothing may be lost or hidden without a marker. Concretely, every one of these is a violation:
  (a) content that reaches the plugin and then becomes unreachable — not stored, deleted, overwritten, or reachable from no summary node;

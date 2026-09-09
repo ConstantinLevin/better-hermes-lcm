@@ -235,8 +235,8 @@ depth 4, concurrency 3, guard 57, breaker 3, L2 0.60, serialize cap 2,048,000 ch
 
 ### Test runner
 ```
-cd ~/.hermes/plugins/hermes-lcm && /home/agent/.hermes/bin/uv run --no-project \
-  --python /home/agent/.hermes/hermes-agent/venv/bin/python --with pytest --with numpy \
+cd ~/.hermes/plugins/hermes-lcm && the Hermes bin directory/uv run --no-project \
+  --python (Hermes Agent host internals; path elided) --with pytest --with numpy \
   python -m pytest tests/ -q
 ```
 

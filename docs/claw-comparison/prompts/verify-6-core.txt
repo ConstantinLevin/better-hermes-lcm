@@ -1,4 +1,4 @@
-You are auditing "betterlcm" (a fork of the hermes-lcm plugin, Python, at /home/agent/projects/agentimprovement/betterlcm) before it ships.
+You are auditing "betterlcm" (a fork of the hermes-lcm plugin, Python, at the repository root) before it ships.
 
 SCOPE — the CORE path only. That is: everything a default-configured install actually executes to carry a conversation into and out of the context window.
   ingest -> store -> reconcile/rebind -> compaction (leaf + condensation) -> summariser input and output -> active-context assembly -> bypass trimming -> the retrieval tools the agent can call (lcm_grep, lcm_recall, lcm_recent, lcm_describe, lcm_expand, lcm_expand_query, lcm_inspect, lcm_status, lcm_doctor, lcm_load_session, lcm_compute) -> operator commands, backup/restore, maintenance and lifecycle.

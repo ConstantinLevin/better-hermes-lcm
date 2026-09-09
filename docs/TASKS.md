@@ -303,7 +303,7 @@ at 256k and no longer do:
 | summariser input rendered a tool call as `name(arguments)` and dropped everything else the provider attached to it; a tool call that was not a dict was filtered out entirely; a nested `{"type":"text","text":{"value":…,"annotations":[…]}}` object's other fields vanished, because the block inventory only sees the OUTER block's keys. | `marked_loss.tool_call_fields_note` / `unrepresentable_tool_call_note` name the first two; `_unrendered_field_receipt` takes a `prefix` and inventories the nested object as `text.<key>`. |
 | `_summary_frontier_nodes` loaded every node with `limit=100_000` and filtered in Python, so a session past that limit computed its frontier from a TRUNCATED set: condensation could re-publish over sources a node above the cut already covered, and the prefix would omit real summaries while reporting nothing (B7). | `dag.get_frontier_nodes` — the same SQL predicate as `get_frontier_token_total`, unbounded, so the count and the token sum cannot diverge. |
 
-### Tenth pass — verify-6 (core-only audit, prompt `verify-6-core.txt`, report `/tmp/claw-compare/verify6/`)
+### Tenth pass — verify-6 (core-only audit, prompt `verify-6-core.txt`, report `docs/claw-comparison/`)
 
 Ten P1 and one P2, all confirmed with probes against `015eef4`. Four were regressions this
 fork introduced in the eighth/ninth passes. All eleven are fixed:
@@ -462,7 +462,7 @@ green while upstream's new behaviour goes unexercised.
 **R2 — lossless-claw released or moved: evaluate and port what is better.**
 Trigger: any commit or release of lossless-claw newer than the one already analysed —
 **v1.0.0** (analysis in `docs/claw-comparison/v1.0.0.md`, sources were at
-`/tmp/lossless-claw-v1.0.0`).
+`lossless-claw v1.0.0`).
 
 1. Diff the new claw version against the analysed one. Every changed file, not just release
    notes.

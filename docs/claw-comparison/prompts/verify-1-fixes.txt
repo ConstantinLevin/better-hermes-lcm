@@ -1,4 +1,4 @@
-You are verifying a second pass of fixes in "betterlcm", a fork of the hermes-lcm plugin (Python, for Hermes Agent) at /home/agent/projects/agentimprovement/betterlcm.
+You are verifying a second pass of fixes in "betterlcm", a fork of the hermes-lcm plugin (Python, for Hermes Agent) at the repository root.
 
 Purpose of the fork (the yardstick for every judgement): NO LOSS whatsoever. Loss means provenance gone, content unreachable, or a bounded/failed operation reported as a complete one. Summaries are acceptable ONLY because they are clearly marked, carry provenance, and act as an index. A 1,000,000-token context window must work well: every tuning value is weighted smoothly between a 256k window (where upstream hermes-lcm behaviour is kept exactly) and 1M, with no band switches.
 

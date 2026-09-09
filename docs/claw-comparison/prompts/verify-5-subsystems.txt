@@ -1,4 +1,4 @@
-You are auditing the OPT-IN subsystems of "betterlcm", a fork of the hermes-lcm plugin (Python, for Hermes Agent) at /home/agent/projects/agentimprovement/betterlcm.
+You are auditing the OPT-IN subsystems of "betterlcm", a fork of the hermes-lcm plugin (Python, for Hermes Agent) at the repository root.
 
 Purpose of the fork (the yardstick): NO LOSS whatsoever — loss means provenance gone, content unreachable, or a bounded/failed/partial operation reported as complete. Summaries are acceptable only because they are marked, carry provenance and act as an index. A 1,000,000-token window must work well, with every tuning value weighted smoothly between 256k (upstream behaviour kept) and 1M.
 
