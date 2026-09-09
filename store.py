@@ -88,6 +88,53 @@ _PROJECTED_MESSAGE_KEYS = frozenset({
 _HOST_MESSAGE_ID_KEYS = ("message_id", "id", "uuid", "event_id")
 
 
+REVISION_SUPERSEDES_KEY = "lcm_supersedes_store_id"
+
+
+def is_revision_row(row: Dict[str, Any]) -> bool:
+    """fork: betterlcm — a row archived because the host EDITED an already-stored message.
+
+    It is real content and stays reachable, but it must not take part in the chronological
+    replay matching: appending it at the end of the archive made reconciliation skip the rows
+    between (round-3 verify-2 #8).
+    """
+    envelope = row.get("envelope") if isinstance(row, dict) else None
+    return bool(isinstance(envelope, dict) and envelope.get(REVISION_SUPERSEDES_KEY))
+
+
+def message_envelope_fingerprint(msg: Dict[str, Any]) -> str:
+    """Everything a host sent, for change detection: content, calls and the rest.
+
+    fork: betterlcm — comparing content alone missed an edit that changed only tool arguments
+    or reasoning metadata (round-3 verify-4 #3), so a changed command was never archived.
+    """
+    if "store_id" in (msg or {}) or isinstance((msg or {}).get("envelope"), dict):
+        # a STORED row: its un-projected fields live in "envelope"
+        source_fields = (msg.get("envelope") or {}).items()
+    else:
+        # an incoming host message: everything the columns do not project
+        source_fields = (
+            (key, value) for key, value in (msg or {}).items()
+            if key not in _PROJECTED_MESSAGE_KEYS
+        )
+    envelope = {
+        key: value for key, value in source_fields
+        if isinstance(key, str)
+        and not key.startswith("lcm_")
+        and not key.startswith("_lcm")
+    }
+    payload = {
+        "role": str(msg.get("role") or ""),
+        "content": _normalize_content_value(msg.get("content")) or "",
+        "tool_calls": msg.get("tool_calls") or None,
+        "envelope": envelope,
+    }
+    try:
+        return json.dumps(payload, ensure_ascii=False, default=str, sort_keys=True)
+    except Exception:  # pragma: no cover - default=str covers the usual cases
+        return str(payload)
+
+
 def host_message_id_of(msg: Dict[str, Any]) -> Optional[str]:
     for key in _HOST_MESSAGE_ID_KEYS:
         value = msg.get(key)
@@ -1470,6 +1517,27 @@ class MessageStore:
             found.extend(int(row[0]) for row in rows)
         return sorted(set(found) - excluded)
 
+    def tool_result_store_ids_batch(self, session_id: str,
+                                    tool_call_ids: List[str]) -> Dict[str, List[int]]:
+        """fork: betterlcm — one query for many call ids (round-3 verify-2 #10)."""
+        wanted = sorted({str(value).strip() for value in tool_call_ids if str(value or "").strip()})
+        if not wanted:
+            return {}
+        found: Dict[str, List[int]] = {}
+        batch = _SQLITE_MAX_BOUND_VARIABLES - 2
+        for start in range(0, len(wanted), batch):
+            chunk = wanted[start:start + batch]
+            placeholders = ",".join("?" * len(chunk))
+            rows = self._conn.execute(
+                f"""SELECT tool_call_id, store_id FROM messages
+                    WHERE session_id = ? AND role = 'tool' AND tool_call_id IN ({placeholders})
+                    ORDER BY store_id""",
+                [session_id, *chunk],
+            ).fetchall()
+            for call_id, store_id in rows:
+                found.setdefault(str(call_id), []).append(int(store_id))
+        return found
+
     def tool_result_store_ids(self, session_id: str, tool_call_id: str,
                               *, limit: int = 10) -> List[int]:
         """fork: betterlcm — rows that ARE the archived result of this call (round-2 verify-4 #19)."""
@@ -1505,6 +1573,30 @@ class MessageStore:
                 record = self._row_to_dict(row)
                 found[str(record.get("host_message_id"))] = record  # newest wins
         return found
+
+    def revision_rows_for(self, session_id: str, store_ids: List[int]) -> List[int]:
+        """fork: betterlcm — archived corrections that supersede any of these rows.
+
+        A correction is stored as its own row, so the leaf covering the original must cover the
+        correction too; otherwise the newer text is reachable from no summary (round-3 #8).
+        """
+        wanted = {int(value) for value in store_ids or []}
+        if not wanted:
+            return []
+        rows = self._conn.execute(
+            """SELECT store_id, envelope_extra FROM messages
+               WHERE session_id = ? AND envelope_extra LIKE ?""",
+            (session_id, f"%{REVISION_SUPERSEDES_KEY}%"),
+        ).fetchall()
+        found: List[int] = []
+        for store_id, envelope_extra in rows:
+            try:
+                envelope = json.loads(envelope_extra or "{}")
+            except (TypeError, ValueError):
+                continue
+            if int(envelope.get(REVISION_SUPERSEDES_KEY) or 0) in wanted:
+                found.append(int(store_id))
+        return sorted(set(found) - wanted)
 
     # -- Search -------------------------------------------------------------
 

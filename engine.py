@@ -145,7 +145,11 @@ from .sqlite_util import (
     _is_sqlite_locked_error,
     _temporary_sqlite_busy_timeout,
 )
-from .store import MessageStore, host_message_id_of  # fork: betterlcm
+from .store import (  # fork: betterlcm
+    MessageStore,
+    host_message_id_of,
+    message_envelope_fingerprint,
+)
 from .tokens import count_message_tokens, count_messages_tokens, count_tokens
 from . import tools as lcm_tools
 
@@ -2086,14 +2090,33 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         if self._session_ignored or self._session_stateless:
             return 0
         candidates: dict[str, Dict[str, Any]] = {}
+        fingerprints: dict[str, str] = {}
         for message in ingested_prefix:
             if not isinstance(message, dict):
                 continue
             host_id = host_message_id_of(message)
             if host_id:
                 candidates[host_id] = message  # the newest occurrence in this snapshot
+                fingerprints[host_id] = message_envelope_fingerprint(message)
         if not candidates:
             return 0
+        # fork: betterlcm — an UNCHANGED prefix costs no database work. Reading every already
+        # ingested row's full content, calls and envelope on every turn tripled the ingest hot
+        # path on a 900-message prefix (round-3 verify-2 #10), and the prefix is unchanged on
+        # almost every turn. Only ids whose envelope fingerprint moved since the last snapshot
+        # are looked up.
+        seen = getattr(self, "_last_prefix_revision_fingerprints", None)
+        if seen is None:
+            seen = {}
+            self._last_prefix_revision_fingerprints = seen
+        changed = {
+            host_id for host_id, fingerprint in fingerprints.items()
+            if seen.get(host_id) != fingerprint
+        }
+        self._last_prefix_revision_fingerprints = dict(fingerprints)
+        if not changed:
+            return 0
+        candidates = {host_id: candidates[host_id] for host_id in changed}
         try:
             stored = self._store.latest_rows_by_host_message_id(
                 self._session_id, list(candidates)
@@ -2111,8 +2134,10 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                 stored_content
             ):
                 continue  # the stored form is a reference; a cheap comparison would lie
-            incoming = normalize_content_value(message.get("content")) or ""
-            if incoming == stored_content:
+            # fork: betterlcm — the WHOLE envelope decides, not the content alone: an edit that
+            # changed only tool arguments or reasoning metadata was never archived
+            # (round-3 verify-4 #3).
+            if message_envelope_fingerprint(message) == message_envelope_fingerprint(row):
                 continue
             revision = dict(message)
             revision["lcm_supersedes_store_id"] = int(row.get("store_id") or 0)
@@ -5912,6 +5937,24 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
             for message in messages
             if str(message.get("role") or "") == "tool"
         }
+        # fork: betterlcm — ONE archive query for every call in this window, not one per
+        # missing result: twenty missing results issued twenty SELECTs on the assembly hot
+        # path (round-3 verify-2 #10).
+        expected_call_ids = [
+            str(_tool_call_id(call) or "").strip()
+            for message in messages
+            if str(message.get("role") or "") == "assistant"
+            for call in (message.get("tool_calls") or [])
+            if isinstance(call, dict)
+        ]
+        archived_by_call_id: Optional[Dict[str, List[int]]]
+        try:
+            archived_by_call_id = self._store.tool_result_store_ids_batch(
+                self._session_id, [call_id for call_id in expected_call_ids if call_id]
+            )
+        except Exception:  # pragma: no cover - a degraded store answers "unknown"
+            logger.debug("LCM could not check the archive for missing tool results", exc_info=True)
+            archived_by_call_id = None
 
         i = 0
         while i < len(messages):
@@ -5961,7 +6004,10 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                         # covered it (verify-4 #10); saying "it is in the raw store" without
                         # looking was the same mistake for a call that never received a result
                         # (round-2 verify-4 #19), so the store is actually consulted.
-                        archived_ids = self._archived_tool_result_store_ids(expected_id)
+                        archived_ids = (
+                            None if archived_by_call_id is None
+                            else archived_by_call_id.get(expected_id, [])
+                        )
                         in_window = expected_id in result_ids_in_window
                         sanitized.append({
                             "role": "tool",

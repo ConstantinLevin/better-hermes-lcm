@@ -47,6 +47,11 @@ from .sanitize import _clean_active_assistant_message
 
 import logging
 
+from .store import (  # fork: betterlcm
+    host_message_id_of,
+    is_revision_row,
+    message_envelope_fingerprint,
+)
 logger = logging.getLogger(__name__)
 
 _PRESERVED_OBJECTIVE_CONTEXT_PREFIX = "[Current user objective preserved from compacted history]"
@@ -889,10 +894,16 @@ class ReconcileMixin:
             return cursor
 
         incoming_identities = self._effective_replay_identities(messages)
-        stored_head_rows = self._store.get_session_messages(
-            self._session_id,
-            limit=tail_limit,
-        )
+        stored_head_rows = [
+            row for row in self._store.get_session_messages(
+                self._session_id,
+                limit=tail_limit,
+            )
+            # fork: betterlcm — an archived correction is appended at the END of the archive; it
+            # is not a position in the replayed conversation, and matching it chronologically
+            # made reconciliation skip every row between (round-3 verify-2 #8).
+            if not is_revision_row(row)
+        ]
         stored_head = [self._message_replay_identity(row, stored_row=True) for row in stored_head_rows]
         # Stale-snapshot proof uses the raw durable prefix.  Ignore-message
         # filters may suppress noisy rows for tail reconciliation, but filtered
@@ -972,7 +983,7 @@ class ReconcileMixin:
             )
             if not page:
                 break
-            candidates.extend(page)
+            candidates.extend(row for row in page if not is_revision_row(row))  # fork
             next_candidate_after = page[-1]["store_id"]
         active_identity_counts: dict[tuple[Any, ...], int] = {}
         for msg in messages:
@@ -1169,5 +1180,30 @@ class ReconcileMixin:
             if match_idx is not None:
                 ids_by_message_id[id(msg)] = candidates[match_idx]["store_id"]
                 store_idx = match_idx + 1
+
+        # fork: betterlcm — a message the host EDITED no longer matches the row it was first
+        # stored as; its durable copy is the archived correction, which is appended at the end
+        # and deliberately kept out of the chronological walk above. Resolve those by the host's
+        # own id, so an edited turn still maps and compaction can still publish
+        # (round-3 verify-2 #8 / verify-4 #3).
+        unmapped_with_host_ids = {
+            host_message_id_of(msg): msg
+            for msg in messages
+            if id(msg) not in ids_by_message_id and host_message_id_of(msg)
+        }
+        if unmapped_with_host_ids:
+            try:
+                rows = self._store.latest_rows_by_host_message_id(
+                    self._session_id, [key for key in unmapped_with_host_ids if key]
+                )
+            except Exception:  # pragma: no cover - a degraded store maps nothing extra
+                rows = {}
+            for host_id, msg in unmapped_with_host_ids.items():
+                row = rows.get(str(host_id))
+                if row is None:
+                    continue
+                if message_envelope_fingerprint(msg) != message_envelope_fingerprint(row):
+                    continue
+                ids_by_message_id[id(msg)] = int(row["store_id"])
 
         return ids_by_message_id

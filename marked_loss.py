@@ -382,6 +382,23 @@ def leading_turns_dropped_marker(dropped: int, roles: List[str]) -> str:
     )
 
 
+def revision_rows_marker(store_ids: List[int]) -> str:
+    """Name archived corrections that supersede rows this node covers.
+
+    fork: betterlcm — a correction the host made to an already-stored message is archived as
+    its own row. The leaf covering the original covers the correction too, so the newer text is
+    never reachable from no summary, and this line says the newer version exists
+    (round-3 verify-2 #8).
+    """
+    ids = ", ".join(str(store_id) for store_id in store_ids[:40])
+    more = f" (+{len(store_ids) - 40} more)" if len(store_ids) > 40 else ""
+    return (
+        f"{RECEIPT_LINE_PREFIX} {len(store_ids)} of the message(s) summarised here were later "
+        f"CORRECTED by the host; the newer version(s) are sources of this node and are not in "
+        f"the text above — lcm_expand(store_id={ids}{more})]"
+    )
+
+
 def aggregated_inherited_receipt_marker(receipts: List[str], node_ids: List[int]) -> str:
     """One line standing for receipts whose verbatim copies would defeat condensation.
 

@@ -43,6 +43,7 @@ class ResetStateMixin:
         # already being generated cannot be published into the session that replaced it
         # (round-2 verify-4 #3 / RS02).
         self._publication_generation = int(getattr(self, "_publication_generation", 0)) + 1
+        self._last_prefix_revision_fingerprints = {}  # fork: betterlcm (round-3 verify-2 #10)
         self._last_compacted_store_id = 0
         self._ingest_cursor = 0
         self._ingest_cursor_needs_reconcile = False

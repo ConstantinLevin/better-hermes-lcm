@@ -162,3 +162,42 @@ def test_a_second_engine_cannot_shrink_the_shared_token_cache():
         tokens_module._token_cache_requests.clear()
         tokens_module._token_cache_requests.update(requests)
         tokens_module._count_tokens_cached = original
+
+
+def test_an_unchanged_prefix_costs_no_revision_reads(tmp_path):
+    """round-3 verify-2 #10: every ingest re-read all already-ingested host ids — full content,
+    calls and envelope — and the prefix is unchanged on almost every turn."""
+    from hermes_lcm.config import LCMConfig
+    from hermes_lcm.engine import LCMEngine
+
+    cfg = LCMConfig(database_path=str(tmp_path / "prefixperf.db"))
+    e = LCMEngine(config=cfg, hermes_home=str(tmp_path))
+    try:
+        e.on_session_start("pp", platform="cli", context_length=200_000)
+        messages = [
+            {"role": "user", "content": f"turn {index} " + "word " * 20, "message_id": f"m{index}"}
+            for index in range(50)
+        ]
+        e._ingest_messages(messages)
+        e._store.commit()
+
+        reads = {"n": 0}
+        real = e._store.latest_rows_by_host_message_id
+
+        def counted(*args, **kwargs):
+            reads["n"] += 1
+            return real(*args, **kwargs)
+
+        e._store.latest_rows_by_host_message_id = counted
+        e._ingest_messages(messages)          # the first snapshot after ingest: one lookup
+        assert reads["n"] == 1
+        for _ in range(5):
+            e._ingest_messages(list(messages))  # unchanged: no database work at all
+        assert reads["n"] == 1, f"{reads['n']} revision queries on an unchanged prefix"
+
+        edited = [dict(message) for message in messages]
+        edited[3] = dict(edited[3], content="CORRECTED")
+        e._ingest_messages(edited)
+        assert reads["n"] == 2, "a changed prefix is looked up once more"
+    finally:
+        e.shutdown()

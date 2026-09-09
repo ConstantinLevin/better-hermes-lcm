@@ -1121,6 +1121,9 @@ class CompactionMixin:
             # sits next to the marker row it belongs to and is in no active-context message, so
             # it mapped to no node and the summary covering its marker read as unexpandable
             # (round-2 verify-4 #1). It is a source of this leaf, named in its own receipt.
+            revision_ids = self._store.revision_rows_for(  # fork: round-3 verify-2 #8
+                self._session_id, consumed_store_ids
+            )
             recovered_body_ids = self._store.attached_recovered_body_ids(
                 self._session_id,
                 [
@@ -1131,13 +1134,21 @@ class CompactionMixin:
                 exclude_ids=consumed_store_ids,
             )
             published_source_ids = sorted(
-                summarised_source_ids | set(consumed_store_ids) | set(recovered_body_ids)
+                summarised_source_ids
+                | set(consumed_store_ids)
+                | set(recovered_body_ids)
+                | set(revision_ids)
             )
             excluded_source_ids = [
                 store_id for store_id in published_source_ids
                 if store_id not in summarised_source_ids
                 and store_id not in set(recovered_body_ids)
+                and store_id not in set(revision_ids)
             ]
+            if revision_ids:
+                summary_text = summary_text.rstrip() + "\n" + marked_loss.revision_rows_marker(
+                    revision_ids
+                )
             if recovered_body_ids:
                 summary_text = summary_text.rstrip() + "\n" + marked_loss.recovered_body_rows_marker(
                     recovered_body_ids

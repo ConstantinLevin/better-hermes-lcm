@@ -334,3 +334,58 @@ def test_an_edited_message_with_a_host_id_is_archived_as_a_revision(tmp_path):
         assert len(e._store.get_session_messages("rev")) == before
     finally:
         e.shutdown()
+
+
+def test_a_tool_argument_correction_is_archived_and_still_maps(tmp_path):
+    """round-3 verify-4 #3 / verify-2 #8: the revision check compared CONTENT only, so an edit
+    that changed a command's arguments was never archived; and the archived correction, being
+    appended at the end, made the chronological replay matching skip the rows between it and
+    the original."""
+    from hermes_lcm import escalation
+    cfg = LCMConfig(database_path=str(tmp_path / "revision2.db"), fresh_tail_count=1,
+                    leaf_chunk_tokens=10)
+    e = LCMEngine(config=cfg, hermes_home=str(tmp_path))
+    try:
+        e.on_session_start("rv2", platform="cli", context_length=200_000)
+        first = [
+            {"role": "user", "content": "run it", "message_id": "m1"},
+            {"role": "assistant", "content": "running", "message_id": "m2", "tool_calls": [
+                {"id": "c1", "type": "function",
+                 "function": {"name": "terminal", "arguments": "alpha"}}]},
+            {"role": "tool", "tool_call_id": "c1", "content": "done", "message_id": "m3"},
+            {"role": "user", "content": "and now?", "message_id": "m4"},
+        ]
+        e._ingest_messages(first)
+        e._store.commit()
+
+        edited = [dict(message) for message in first]
+        edited[1] = dict(edited[1], tool_calls=[
+            {"id": "c1", "type": "function",
+             "function": {"name": "terminal", "arguments": "beta"}}])
+        e._ingest_messages(edited)
+        e._store.commit()
+
+        rows = e._store.get_session_messages("rv2")
+        assert any("beta" in str(row.get("tool_calls") or "") for row in rows), \
+            "the corrected command was not archived"
+
+        # ... and the ORIGINAL rows still map, so compaction can still publish
+        mapped = e._get_store_ids_for_messages(edited)
+        assert len(mapped) == len(edited), mapped
+
+        e.threshold_tokens = 1
+        e._resolve_window_scaled_settings()
+        original = escalation._call_llm_for_summary
+        escalation._call_llm_for_summary = lambda *a, **k: "ran the command\nExpand for details about: command"
+        try:
+            e.compress(list(edited) + [{"role": "user", "content": "tail"}], current_tokens=400_000)
+        finally:
+            escalation._call_llm_for_summary = original
+        nodes = e._dag.get_session_nodes("rv2")
+        if nodes:
+            covered = {int(value) for node in nodes for value in node.source_ids}
+            revision_ids = {int(row["store_id"]) for row in rows
+                            if "beta" in str(row.get("tool_calls") or "")}
+            assert revision_ids <= covered, (revision_ids, covered)
+    finally:
+        e.shutdown()
