@@ -218,6 +218,7 @@ class LeafLookahead:
         focus_topic: Optional[str],
         deadline: Optional[float],
         input_filter: Callable[[Sequence[Dict[str, Any]]], List[Dict[str, Any]]] = list,
+        executor: "DaemonThreadPoolExecutor | None" = None,  # fork: shared per engine
     ) -> None:
         self._summarize = summarize
         self._inputs: List[List[Dict[str, Any]]] = [input_filter(chunk) for chunk in chunks]
@@ -225,7 +226,13 @@ class LeafLookahead:
         self._focus_topic = focus_topic
         self._deadline = deadline
         self._scope = HostExecutionScope()  # fork: captured on the compaction thread
-        self._executor = DaemonThreadPoolExecutor(
+        # fork: betterlcm — the pool may be SHARED across attempts. A per-instance pool bounded
+        # each attempt on its own, so a host that abandoned one compaction and retried left the
+        # previous attempt's blocked workers running and started a second set: 2 → 4 → 6 live
+        # workers over three retries (round-2 verify-2 #6). One pool per engine bounds the
+        # total, whatever the host does.
+        self._owns_executor = executor is None
+        self._executor = executor or DaemonThreadPoolExecutor(
             max_workers=self._concurrency, thread_name_prefix="lcm-leaf")
         self._futures: Dict[int, Future] = {}
         self._next_submit = 0
@@ -318,7 +325,8 @@ class LeafLookahead:
         for future in pending:
             future.cancel()
         # never block the compaction thread on abandoned LLM calls
-        self._executor.shutdown(wait=False, cancel_futures=True)
+        if self._owns_executor:
+            self._executor.shutdown(wait=False, cancel_futures=True)
 
 
 class CompactionLock:

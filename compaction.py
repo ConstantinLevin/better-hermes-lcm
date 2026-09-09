@@ -387,7 +387,7 @@ class CompactionMixin:
         concurrency = int(self.effective_summary_concurrency or 1)
         if concurrency <= 1 or remaining_passes <= 1:
             return None
-        from .leaf_pipeline import LeafLookahead, chunks_needed, plan_chunks
+        from .leaf_pipeline import DaemonThreadPoolExecutor, LeafLookahead, chunks_needed, plan_chunks
         needed = chunks_needed(
             estimated_active_tokens,
             self._non_sweep_drain_stop_tokens(),
@@ -410,11 +410,33 @@ class CompactionMixin:
             focus_topic=focus_topic,
             deadline=deadline,
             input_filter=lambda chunk: [m for m in chunk if id(m) not in dependent_reply_message_ids],
+            executor=self._leaf_worker_pool(concurrency),  # fork: one pool per engine
         )
         logger.info(
             "LCM leaf lookahead: %d chunk(s) planned, concurrency %d", lookahead.planned, concurrency
         )
         return lookahead
+
+    def _leaf_worker_pool(self, concurrency: int):
+        """fork: betterlcm — ONE worker pool per engine, reused across compaction attempts.
+
+        A per-attempt pool bounded each attempt on its own: a host that abandoned a compaction
+        and retried left the first attempt's blocked summariser calls running and started a
+        second set of workers (round-2 verify-2 #6). Sharing the pool bounds the live workers
+        for the engine, whatever the host does; abandoned calls simply occupy it until they
+        return, which is exactly the back-pressure the retry needs to see.
+        """
+        from .leaf_pipeline import DaemonThreadPoolExecutor
+
+        pool = getattr(self, "_leaf_pool", None)
+        if pool is None or getattr(pool, "_max_workers", 0) < concurrency:
+            if pool is not None:
+                pool.shutdown(wait=False)
+            pool = DaemonThreadPoolExecutor(
+                max_workers=max(1, int(concurrency)), thread_name_prefix="lcm-leaf"
+            )
+            self._leaf_pool = pool
+        return pool
 
     def _take_leaf_lookahead(self, summary_input_chunk: List[Dict[str, Any]]):
         """fork: betterlcm — the planned result for this chunk, or None to summarise inline."""

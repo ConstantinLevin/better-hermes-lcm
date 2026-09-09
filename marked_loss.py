@@ -149,6 +149,8 @@ def rotate_marker_summary(
     )
 
 
+COMPACT_ASSEMBLY_OMISSION_PREFIX = "[LCM assembly omissions — not rendered this turn: "
+
 ASSEMBLY_OMISSION_MARKER_HEADER = (
     "[LCM assembly omissions — nothing below is deleted; it is just not rendered this turn]"
 )
@@ -273,7 +275,7 @@ def compact_assembly_omission_marker(
     if not counts:
         return ""
     return (
-        "[LCM assembly omissions — not rendered this turn: "
+        COMPACT_ASSEMBLY_OMISSION_PREFIX
         + ", ".join(counts)
         + "; nothing is deleted — lcm_status / lcm_expand]"
     )

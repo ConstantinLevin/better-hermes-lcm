@@ -380,3 +380,32 @@ def test_the_pool_survives_this_interpreter_creating_real_worker_threads():
         assert sorted(future.result(timeout=5) for future in results) == list(range(12))
     finally:
         pool.shutdown(wait=True)
+
+
+def test_abandoned_workers_do_not_accumulate_across_retries(tmp_path, monkeypatch):
+    """round-2 verify-2 #6: each attempt built its OWN pool, so a host that abandoned a
+    compaction and retried left the previous attempt's blocked summariser calls running and
+    started a second set: 2 → 4 → 6 live workers over three retries."""
+    e = _engine(tmp_path, "retrypool", summary_concurrency=2)
+    release = threading.Event()
+    try:
+        def blocked(prompt, max_tokens, model="", timeout=None):
+            release.wait(10)
+            return "s\nExpand for details about: s"
+
+        monkeypatch.setattr(escalation, "_call_llm_for_summary", blocked)
+        msgs = _messages(30)
+        for _ in range(3):
+            lookahead = e._start_leaf_lookahead(
+                msgs, 200, dependent_reply_message_ids=set(), focus_topic=None,
+                deadline=time.monotonic() + 0.2, estimated_active_tokens=900_000,
+                remaining_passes=4,
+            )
+            if lookahead is not None:
+                lookahead.close()
+        pool = getattr(e, "_leaf_pool", None)
+        assert pool is not None
+        assert len(pool._threads) <= 2, f"workers accumulated: {len(pool._threads)}"
+    finally:
+        release.set()
+        e.shutdown()

@@ -1038,3 +1038,54 @@ def test_a_retained_child_is_reachable_past_the_reverse_edge_cap(tmp_path):
         assert lcm_tools._get_session_node(e, child) is not None
     finally:
         e.shutdown()
+
+
+def test_every_assembled_prefix_shape_is_recognised_as_scaffolding(tmp_path):
+    """round-2 verify-2 #5: the compact omission footer was not recognised, so an assembled
+    prefix ending in it was ingested and stored as raw conversation."""
+    from hermes_lcm import marked_loss
+    e = _engine(tmp_path, "shapes.db", incremental_max_depth=0)
+    try:
+        e.on_session_start("sh", platform="cli", context_length=200_000)
+        base = time.time()
+        for index in range(4):
+            _add(e, "sh", 0, f"summary {index} " + "s" * 300, base + index)
+        # a budget that fits the summary and the one-line receipt but not the full sentence
+        for cap in (120, 200, 320, 500):
+            assembled = e._assemble_context(
+                None, [{"role": "user", "content": "tail"}], assembly_cap_override=cap,
+            )
+            prefix = assembled[0]
+            # whatever shape assembly chose, the engine must recognise it as its own
+            assert e._is_replayed_context_scaffold_message(prefix) is True, (cap, prefix)
+        compact = {
+            "role": "user",
+            "content": "[Recent Summary (d0, node 1)]\nbody\n\n---\n\n"
+                       + marked_loss.compact_assembly_omission_marker(
+                           omitted_node_ids=[2, 3], depth_cap_hits=[],
+                           omitted_tail_messages=0),
+        }
+        assert e._is_replayed_context_scaffold_message(compact) is True
+    finally:
+        e.shutdown()
+
+
+def test_a_candidate_that_exactly_fits_is_still_rendered(tmp_path):
+    """round-2 verify-2 #4: the incremental packing estimate is not additive, so a summary
+    that exactly fitted the budget was omitted by the estimate alone."""
+    e = _engine(tmp_path, "exactfit.db", incremental_max_depth=0)
+    try:
+        e.on_session_start("ef", platform="cli", context_length=262_144)
+        base = time.time()
+        _add(e, "ef", 0, "first summary", base)
+        _add(e, "ef", 0, "second summary", base + 1)
+        exact = e._assemble_context(None, [{"role": "user", "content": "t"}])
+        prefix = str(exact[0].get("content") or "")
+        budget = count_messages_tokens([{"role": exact[0]["role"], "content": prefix}])
+        again = e._assemble_context(
+            None, [{"role": "user", "content": "t"}], assembly_cap_override=budget + 40,
+        )
+        rendered = "\n".join(str(m.get("content") or "") for m in again)
+        assert "first summary" in rendered and "second summary" in rendered, rendered
+    finally:
+        e.shutdown()

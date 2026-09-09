@@ -4481,7 +4481,15 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
             )
         if content.lstrip().startswith(_PRESERVED_OBJECTIVE_CONTEXT_PREFIX):
             return True
-        if "[Expand for details:" not in content:
+        # fork: betterlcm — every shape assembly can emit must round-trip through this
+        # recognition, or the generated prefix is ingested and stored as raw conversation
+        # (round-2 verify-2 #5). A prefix whose parts all had to be given up carries only the
+        # omission receipt, with no expand trailer at all.
+        carries_omission_receipt = (
+            marked_loss.COMPACT_ASSEMBLY_OMISSION_PREFIX in content
+            or marked_loss.ASSEMBLY_OMISSION_MARKER_HEADER in content
+        )
+        if "[Expand for details:" not in content and not carries_omission_receipt:
             return False
         # fork: betterlcm — the scaffold must BE the message, not merely contain the header.
         # This classifier decides whether a message is EXCLUDED FROM STORAGE, and upstream
@@ -4498,6 +4506,8 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         ):
             return False
         trailing = content.rstrip()
+        if carries_omission_receipt:
+            return True
         # The trailer is the whole last line. Matching it with `[^\]]*` broke on an expand hint
         # that contains a bracket of its own ("Expand for details about: items[0]"), and the
         # prefix was then re-ingested and stored as raw conversation.
@@ -5971,7 +5981,13 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         if deadline is not None:
             remaining_seconds = deadline - time.monotonic()
             if remaining_seconds <= 0:
-                raise TimeoutError("threshold full sweep time budget exhausted")
+                # fork: betterlcm — a bare TimeoutError escaped both the compaction handler and
+                # the host wrapper, which tolerate SummaryUnavailableError: committed leaf work
+                # was published, the frontier had moved, and compress() still returned the
+                # original context with no cooldown (round-2 verify-2 #3).
+                raise SummaryUnavailableError(
+                    "condensation time budget exhausted before this group"
+                )
             timeout_seconds = min(timeout_seconds, remaining_seconds)
         summary_text, level = summarize_with_escalation(
             text=combined_text,
@@ -6520,8 +6536,19 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                 for part, part_node_id in zip(summary_parts, summary_part_node_ids):
                     cost = _content_cost(part) + (separator_tokens if selected_parts else 0)
                     if running + cost > summary_budget:
-                        if part_node_id is not None:
-                            omitted_node_ids.append(part_node_id)
+                        # token counts are not additive, so the estimate is only a fast path:
+                        # confirm against the real joined candidate before rejecting content
+                        # that would in fact have fitted (round-2 verify-2 #4)
+                        exact = count_message_tokens({
+                            "role": summary_role,
+                            "content": separator.join(selected_parts + [part]),
+                        })
+                        if exact > summary_budget:
+                            if part_node_id is not None:
+                                omitted_node_ids.append(part_node_id)
+                            continue
+                        selected_parts.append(part)
+                        running = exact
                         continue
                     selected_parts.append(part)
                     running += cost
@@ -7191,6 +7218,15 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
 
     def shutdown(self):
         self._unregister_active_engine_binding()
+        # fork: betterlcm — the shared leaf worker pool belongs to this engine (round-2
+        # verify-2 #6); let its daemon threads go without waiting on abandoned model calls.
+        leaf_pool = getattr(self, "_leaf_pool", None)
+        if leaf_pool is not None:
+            try:
+                leaf_pool.shutdown(wait=False)
+            except Exception:  # pragma: no cover - shutdown is best effort
+                logger.debug("LCM leaf worker pool shutdown failed", exc_info=True)
+            self._leaf_pool = None
         if self._adaptive_retrieval is not None:
             self._adaptive_retrieval.close()
         self._store.close()
