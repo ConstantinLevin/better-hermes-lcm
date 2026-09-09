@@ -617,17 +617,24 @@ def extract_before_compaction(
         digest = hashlib.sha256(serialized_messages.encode("utf-8", "replace")).hexdigest()[:16]
         provenance = f"source chars={len(serialized_messages)}, sha256:{digest}"
         if source_store_ids:
-            ids = [int(store_id) for store_id in source_store_ids]
-            shown = ", ".join(str(store_id) for store_id in ids[:40])
-            # fork: betterlcm — "+N more" is not a resolvable manifest: the note must name the
-            # rows it came from, and a RANGE plus the count does that in one line however long
-            # the segment is (round-2 verify-4 #38).
-            more = (
-                f" (+{len(ids) - 40} more; the complete span is store_ids "
-                f"{min(ids)}..{max(ids)}, {len(ids)} row(s))"
-                if len(ids) > 40 else ""
+            ids = sorted({int(store_id) for store_id in source_store_ids})
+            # fork: betterlcm — the COMPLETE manifest, compressed into ranges. "+N more" and a
+            # bare min..max span are not resolvable when the ids are sparse (round-3 verify-3):
+            # a reader cannot tell which rows the note came from. Contiguous runs collapse, so
+            # even a long segment stays one line.
+            runs: list[str] = []
+            start = previous = ids[0]
+            for store_id in ids[1:]:
+                if store_id == previous + 1:
+                    previous = store_id
+                    continue
+                runs.append(str(start) if start == previous else f"{start}-{previous}")
+                start = previous = store_id
+            runs.append(str(start) if start == previous else f"{start}-{previous}")
+            provenance += (
+                f", store_ids={','.join(runs)} ({len(ids)} row(s))"
+                " — lcm_expand(store_id=…)"
             )
-            provenance += f", store_ids={shown}{more} — lcm_expand(store_id=…)"
         header += f"*Source: {provenance}*\n\n"
 
         with open(file_path, "a", encoding="utf-8") as f:

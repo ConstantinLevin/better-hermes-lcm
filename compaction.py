@@ -1319,8 +1319,16 @@ class CompactionMixin:
                         ) or 0)
                 except SummaryUnavailableError as exc:
                     self._last_leaf_summary_error = str(exc)
+                    # fork: betterlcm — a group that FAILED does not erase the groups that were
+                    # published before it: the caller kept the original context and reported
+                    # compression_count 0 although a new parent existed (round-3 verify-3).
+                    condensation_published = int(
+                        getattr(self, "_last_condensation_published", 0) or 0
+                    )
                     logger.warning(
-                        "LCM condensation unavailable with no leaf pass this turn: %s", exc
+                        "LCM condensation unavailable with no leaf pass this turn "
+                        "(%d group(s) already published): %s",
+                        condensation_published, exc,
                     )
             if force_overflow and len(messages) >= 1:
                 leading_anchor_count = self._leading_anchor_count(working_messages)

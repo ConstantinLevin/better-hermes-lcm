@@ -3987,6 +3987,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         store_ids: "list[int]",
         *,
         connection: "sqlite3.Connection | None" = None,
+        raise_on_failure: bool = False,
     ) -> None:
         """Soft-archive raw-history chunks for purged/GC'd messages (best effort).
 
@@ -4014,10 +4015,16 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                 store.archive_chunks_for_messages(store_ids)
             finally:
                 store.close()
-        except Exception:  # pragma: no cover - defensive; archive is best-effort
-            logger.debug(
+        except Exception:
+            # fork: betterlcm — inside a GC rewrite this failure MUST reach the caller: the
+            # rewrite and the archive are one transaction, and swallowing the failure let the
+            # placeholder become durable while the old chunk offsets stayed live
+            # (round-3 verify-3). Everywhere else it stays best effort.
+            logger.warning(
                 "LCM chunk archive for purged messages failed", exc_info=True
             )
+            if raise_on_failure:
+                raise
 
     def _reset_retained_min_depth(self, session_id: str | None) -> int | None:
         """fork: betterlcm — the depth filter that stands in for upstream's reset-time prune.
@@ -5587,7 +5594,9 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
             # after the content rewrite and before its commit: archive this row's
             # now-stale chunks ATOMICALLY with the rewrite so a recall can never
             # slice the new (short) content at the old chunk offsets (F2).
-            self._archive_chunks_for_messages([sid], connection=conn)
+            self._archive_chunks_for_messages(
+                [sid], connection=conn, raise_on_failure=True  # fork: round-3 verify-3
+            )
 
         for store_id in source_store_ids:
             stored = stored_by_id.get(store_id)
@@ -6212,6 +6221,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
             upper = max_depth
 
         condensed_any = False
+        self._last_condensation_published = 0  # fork: betterlcm — round-3 verify-3
         suppression_reason = ""
         fanin = max(1, self._config.condensation_fanin)
         # fork: betterlcm — one compress() may publish up to `leaf_pass_cap` leaves at a large
@@ -6282,6 +6292,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
 
         if not condensed_any and leaf_compacted_this_turn and self._config.cache_friendly_condensation_enabled:
             self._last_condensation_suppressed_reason = suppression_reason
+        self._last_condensation_published = groups_published
         # fork: betterlcm — tell the caller whether anything was actually PUBLISHED. A
         # condensation that spent a model call and wrote a new parent used to be invisible to
         # compress(), which then returned "noop" with the original context (round-2 verify-2 #7).

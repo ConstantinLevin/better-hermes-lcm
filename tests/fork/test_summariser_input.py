@@ -169,7 +169,9 @@ def test_an_extraction_note_names_the_rows_it_came_from(tmp_path, monkeypatch):
         "[USER]: ship it", str(tmp_path / "notes"), session_id="s1", source_store_ids=[7, 8, 9]
     ) is True
     note = next((tmp_path / "notes").glob("*.md")).read_text()
-    assert "store_ids=7, 8, 9" in note
+    # fork: betterlcm — contiguous ids collapse into a range so the COMPLETE manifest fits on
+    # one line however long the segment is (round-3 verify-3)
+    assert "store_ids=7-9 (3 row(s))" in note
     assert "sha256:" in note
     assert "lcm_expand(store_id=…)" in note
 
