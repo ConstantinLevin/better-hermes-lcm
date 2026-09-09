@@ -7385,21 +7385,50 @@ def lcm_doctor(args: Dict[str, Any], **kwargs) -> str:
             "detail": str(e),
         })
 
-    # 3. Orphaned DAG nodes (nodes referencing store_ids that don't exist)
+    # 3. Orphaned DAG nodes (nodes referencing sources that don't exist)
     try:
-        all_nodes = engine._dag.get_session_nodes(session_id)
-        orphaned = 0
+        # fork: betterlcm — BOTH source types, and the population is named. The check walked
+        # only message-source nodes with the default node limit, so a node referencing a
+        # nonexistent CHILD NODE was told "all nodes have valid sources", and a session with
+        # more nodes than the limit was certified from a sample (round-2 verify-4 #34).
+        node_limit = 100_000
+        all_nodes = engine._dag.get_session_nodes(session_id, limit=node_limit)
+        scan_complete = len(all_nodes) < node_limit
+        orphaned_message_nodes: list[int] = []
+        orphaned_node_nodes: list[int] = []
         for node in all_nodes:
             if node.source_type == "messages":
                 for sid in node.source_ids:
-                    stored = engine._store.get(sid)
-                    if stored is None:
-                        orphaned += 1
+                    if engine._store.get(sid) is None:
+                        orphaned_message_nodes.append(int(node.node_id))
                         break
+            elif node.source_type == "nodes":
+                for child_id in node.source_ids:
+                    if engine._dag.get_node(int(child_id)) is None:
+                        orphaned_node_nodes.append(int(node.node_id))
+                        break
+        orphaned = len(orphaned_message_nodes) + len(orphaned_node_nodes)
+        if orphaned:
+            detail = {
+                "nodes_examined": len(all_nodes),
+                "scan_complete": scan_complete,
+                "nodes_with_missing_messages": orphaned_message_nodes[:20],
+                "nodes_with_missing_child_nodes": orphaned_node_nodes[:20],
+            }
+        else:
+            detail = {
+                "nodes_examined": len(all_nodes),
+                "scan_complete": scan_complete,
+                "result": (
+                    f"every source of the {len(all_nodes)} node(s) examined resolves"
+                    if scan_complete else
+                    f"the {len(all_nodes)} node(s) examined all resolve; the session holds more"
+                ),
+            }
         checks.append({
             "check": "orphaned_dag_nodes",
-            "status": "pass" if orphaned == 0 else "warn",
-            "detail": f"{orphaned} nodes reference missing store messages" if orphaned else "all nodes have valid sources",
+            "status": "pass" if orphaned == 0 and scan_complete else "warn",
+            "detail": detail,
         })
     except Exception as e:
         checks.append({

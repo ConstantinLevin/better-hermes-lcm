@@ -56,6 +56,17 @@ def extract_index_entities(text: str, *, limit: int = 400) -> List[str]:
     return out[:limit]
 
 
+def index_entities_with_bound(text: str, *, limit: int = 400) -> tuple[List[str], bool]:
+    """fork: betterlcm — the entity list AND whether the cap cut it short.
+
+    A source holding 1,000 filenames whose summary kept the first 400 scored 100% coverage:
+    the cap decided which entities existed, and the score was computed over exactly the ones
+    that survived (round-2 verify-4 #34).
+    """
+    entities = extract_index_entities(text, limit=limit + 1)
+    return entities[:limit], len(entities) > limit
+
+
 def _present(entity: str, haystack: str) -> bool:
     needle = entity.lower()
     if needle in haystack:
@@ -65,8 +76,9 @@ def _present(entity: str, haystack: str) -> bool:
     return len(needle) >= 6 and stem.isalpha() and stem in haystack
 
 
-def coverage_of(summary_text: str, index_block: str, sources_text: str) -> Dict[str, Any]:
-    entities = extract_index_entities(sources_text)
+def coverage_of(summary_text: str, index_block: str, sources_text: str,
+                *, source_truncated: bool = False) -> Dict[str, Any]:
+    entities, entities_truncated = index_entities_with_bound(sources_text)
     haystack = (str(summary_text or "") + "\n" + str(index_block or "")).lower()
     present = [e for e in entities if _present(e, haystack)]
     missing = [e for e in entities if not _present(e, haystack)]
@@ -80,12 +92,20 @@ def coverage_of(summary_text: str, index_block: str, sources_text: str) -> Dict[
         "fraction": round(fraction, 3) if fraction is not None else None,
         "scored": fraction is not None,
         "missing_sample": missing[:12],
+        # fork: betterlcm — the score describes only what was EXAMINED (round-2 verify-4 #34)
+        "entities_truncated": bool(entities_truncated),
+        "source_truncated": bool(source_truncated),
+        "coverage_bounded": bool(entities_truncated or source_truncated),
     }
 
 
 def _source_text_for_node(engine: Any, node: Any, *, max_chars: int = 400_000):
-    """Return ``(text, unreadable_source_ids)`` — a source the node records but that cannot be
-    read is reported, never silently treated as empty."""
+    """Return ``(text, unreadable_source_ids, truncated)``.
+
+    A source the node records but that cannot be read is reported, never silently treated as
+    empty; and a source list longer than ``max_chars`` says so, because a score computed over
+    the first 400,000 characters is not a score over the sources (round-2 verify-4 #34).
+    """
     parts: List[str] = []
     unreadable: List[int] = []
     if node.source_type == "messages":
@@ -109,7 +129,7 @@ def _source_text_for_node(engine: Any, node: Any, *, max_chars: int = 400_000):
                 continue
             parts.append(child.summary)
     text = "\n".join(parts)
-    return text[:max_chars], unreadable
+    return text[:max_chars], unreadable, len(text) > max_chars
 
 
 def node_coverage(engine: Any, node: Any) -> Dict[str, Any]:
@@ -121,8 +141,9 @@ def node_coverage(engine: Any, node: Any) -> Dict[str, Any]:
         except Exception:
             meta = None
     index_block = str((meta or {}).get("index_block") or "")
-    sources_text, unreadable = _source_text_for_node(engine, node)
-    result = coverage_of(node.summary, index_block, sources_text)
+    sources_text, unreadable, source_truncated = _source_text_for_node(engine, node)
+    result = coverage_of(node.summary, index_block, sources_text,
+                         source_truncated=source_truncated)
     result.update({
         "node_id": int(node.node_id),
         "depth": int(node.depth),
@@ -148,6 +169,7 @@ def session_coverage(engine: Any, session_id: Optional[str] = None, *, limit: in
     # structurally broken (a recorded source that cannot be read).
     unscored = [n for n in per_node if n["entities"] == 0]
     broken = [n for n in per_node if n["unreadable_source_ids"]]
+    bounded = [n for n in per_node if n.get("coverage_bounded")]
     truncated_scan = len(nodes) >= max(1, int(limit))
     return {
         "session_id": session_id,
@@ -161,6 +183,8 @@ def session_coverage(engine: Any, session_id: Optional[str] = None, *, limit: in
         ],
         # a paging limit bounds the WORK, never the claim: say when the scan was partial
         "scan_complete": not truncated_scan,
+        # fork: betterlcm — nodes whose score covers only part of their sources or entities
+        "nodes_with_bounded_coverage": [n["node_id"] for n in bounded],
         "aggregate_fraction": round(total_present / total_entities, 3) if total_entities else None,
         "nodes_below_floor": [
             {k: n[k] for k in ("node_id", "depth", "level", "fraction", "entities", "missing_sample")}
@@ -178,9 +202,10 @@ def coverage_check(report: Dict[str, Any]) -> Dict[str, Any]:
     below = report.get("nodes_below_floor") or []
     broken = report.get("nodes_with_unreadable_sources") or []
     unscored = report.get("unscored_nodes") or []
+    bounded = report.get("nodes_with_bounded_coverage") or []
     aggregate = report.get("aggregate_fraction")
     floor = float(report.get("floor", 0.6))
-    if broken or not report.get("scan_complete", True):
+    if broken or bounded or not report.get("scan_complete", True):
         status = "fail" if broken else "warn"
     elif aggregate is None:
         status = "warn"          # nothing could be scored: not evidence of coverage

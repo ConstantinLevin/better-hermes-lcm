@@ -2923,21 +2923,38 @@ def _check_disk_space(db_path: str) -> bool:
         return True
 
 
+def _normalized_sql(text: str) -> str:
+    """Compare definitions the way SQLite stores them (it drops ``IF NOT EXISTS``)."""
+    flat = " ".join(str(text or "").split()).rstrip(";").strip().lower()
+    return flat.replace("create trigger if not exists ", "create trigger ", 1)
+
+
 def _fts_missing_triggers(conn: sqlite3.Connection, spec: ExternalContentFtsSpec) -> bool:
-    expected = {
-        trigger_name
-        for trigger_name in (_extract_trigger_name(sql) for sql in spec.trigger_sqls)
-        if trigger_name
-    }
-    if not expected:
+    """True when an expected trigger is absent OR is not the trigger we expect.
+
+    fork: betterlcm — the check compared NAMES only, so a trigger of the right name with a
+    different (or empty) body passed: repair reported ``rebuilt=true, degraded=false``, the
+    existing rows were searchable, and the next appended row was missing from the index with
+    nothing saying so (round-2 verify-4 #35). The stored definition is compared instead.
+    """
+    expected_by_name: dict[str, str] = {}
+    for sql in spec.trigger_sqls:
+        trigger_name = _extract_trigger_name(sql)
+        if trigger_name:
+            expected_by_name[trigger_name] = _normalized_sql(sql)
+    if not expected_by_name:
         return False
-    placeholders = ",".join("?" for _ in expected)
+    placeholders = ",".join("?" for _ in expected_by_name)
     rows = conn.execute(
-        f"SELECT name FROM sqlite_master WHERE type='trigger' AND name IN ({placeholders})",
-        tuple(sorted(expected)),
+        f"SELECT name, sql FROM sqlite_master WHERE type='trigger' AND name IN ({placeholders})",
+        tuple(sorted(expected_by_name)),
     ).fetchall()
-    existing = {str(row[0]) for row in rows if row and row[0]}
-    return bool(expected - existing)
+    existing = {str(row[0]): _normalized_sql(row[1]) for row in rows if row and row[0]}
+    for name, expected_sql in expected_by_name.items():
+        actual_sql = existing.get(name)
+        if actual_sql is None or actual_sql != expected_sql:
+            return True
+    return False
 
 
 def external_content_fts_needs_repair(conn: sqlite3.Connection, spec: ExternalContentFtsSpec) -> bool:
@@ -3071,8 +3088,22 @@ def repair_external_content_fts(
             triggers_were_missing = False
         else:
             triggers_were_missing = _fts_missing_triggers(conn, spec)
+            if triggers_were_missing:
+                # fork: betterlcm — the trigger SQL is CREATE ... IF NOT EXISTS, so a trigger
+                # of the right NAME with a wrong body survived "repair" untouched: the index
+                # then missed every row appended afterwards (round-2 verify-4 #35). Drop what
+                # we own before recreating it.
+                _drop_fts_triggers(conn, spec.trigger_sqls)
             for trigger_sql in spec.trigger_sqls:
                 conn.execute(trigger_sql)
+            if triggers_were_missing and not rebuilt:
+                # rows written while the trigger was absent or broken are not in the index;
+                # recreating the trigger does not backfill them
+                conn.execute(
+                    f"INSERT INTO {quote_sql_identifier(spec.table_name)}"
+                    f"({quote_sql_identifier(spec.table_name)}) VALUES('rebuild')"
+                )
+                rebuilt = True
         if rebuilt:
             # A freshly rebuilt index is known-consistent; record the marker so
             # the next startup can skip the deep integrity-check within the

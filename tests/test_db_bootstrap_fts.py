@@ -267,8 +267,10 @@ def test_trigger_disappearing_on_fast_path_reenters_repair_ownership(
             conn.set_trace_callback(None)
 
         assert trigger_dropped is True
+        # fork: betterlcm — recreating a trigger does not backfill the rows written while it
+        # was gone, so a trigger repair now rebuilds the index too (round-2 verify-4 #35)
         assert result == {
-            "rebuilt": False,
+            "rebuilt": True,
             "degraded": False,
             "triggers_recreated": True,
         }

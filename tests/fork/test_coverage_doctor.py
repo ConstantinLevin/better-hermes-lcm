@@ -154,3 +154,78 @@ def test_a_truncated_scan_is_never_reported_as_a_clean_bill(tmp_path):
         assert session_coverage(e, "cov", limit=100)["scan_complete"] is True
     finally:
         e.shutdown()
+
+
+def test_a_capped_entity_list_does_not_certify_full_coverage(tmp_path):
+    """round-2 verify-4 #34: the entity extractor stops at 400 entities and the source text at
+    400,000 characters, so a source holding 1,000 filenames whose summary kept the first 400
+    scored 100% — the cap decided which entities existed and the score covered only those."""
+    sources = " ".join(f"file_{index}.py" for index in range(1000))
+    summary = " ".join(f"file_{index}.py" for index in range(400))
+    report = coverage_doctor.coverage_of(summary, "", sources)
+    assert report["entities_truncated"] is True, report
+    assert report["coverage_bounded"] is True
+    check = coverage_doctor.coverage_check({
+        "nodes_below_floor": [], "nodes_with_unreadable_sources": [],
+        "unscored_nodes": [], "nodes_with_bounded_coverage": [7],
+        "aggregate_fraction": 1.0, "floor": 0.6, "scan_complete": True,
+    })
+    assert check["status"] == "warn", check
+
+
+def test_the_orphan_check_walks_node_sources_too(tmp_path):
+    """round-2 verify-4 #34: the orphan check validated message-source nodes only, so a node
+    referencing a nonexistent CHILD NODE was answered with "all nodes have valid sources"."""
+    import json
+    import time
+    from hermes_lcm import tools as lcm_tools
+    from hermes_lcm.dag import SummaryNode
+    e = _engine(tmp_path)
+    try:
+        e.on_session_start("orph", platform="cli", context_length=200_000)
+        e._dag.add_node(SummaryNode(
+            session_id="orph", depth=1, summary="a parent", token_count=5,
+            source_token_count=10, source_ids=[999_999], source_type="nodes",
+            created_at=time.time()))
+        payload = json.loads(lcm_tools.lcm_doctor({}, engine=e))
+        check = next(c for c in payload["checks"] if c["check"] == "orphaned_dag_nodes")
+        assert check["status"] == "warn", check
+        assert check["detail"]["nodes_with_missing_child_nodes"], check
+    finally:
+        e.shutdown()
+
+
+def test_a_same_named_but_wrong_trigger_is_repaired_not_certified(tmp_path):
+    """round-2 verify-4 #35: the FTS trigger check compared NAMES only, so a trigger of the
+    right name with a no-op body passed. Repair reported rebuilt/not-degraded, existing rows
+    stayed searchable, and the next appended row was simply missing from the index."""
+    from hermes_lcm.db_bootstrap import (
+        external_content_fts_needs_repair, repair_external_content_fts,
+    )
+    from hermes_lcm.store import build_message_fts_spec
+    e = _engine(tmp_path)
+    try:
+        store = e._store
+        store.append("cov", {"role": "user", "content": "before the sabotage"}, source="cli")
+        store.commit()
+        conn = store.connection
+        spec = build_message_fts_spec()
+        assert external_content_fts_needs_repair(conn, spec) is False
+
+        name = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE '%fts%' "
+            "AND sql LIKE '%INSERT%' LIMIT 1"
+        ).fetchone()[0]
+        conn.execute(f"DROP TRIGGER {name}")
+        conn.execute(f"CREATE TRIGGER {name} AFTER INSERT ON messages BEGIN SELECT 1; END")
+        conn.commit()
+        assert external_content_fts_needs_repair(conn, spec) is True, "a no-op trigger passed"
+
+        repair_external_content_fts(conn, spec)
+        assert external_content_fts_needs_repair(conn, spec) is False
+        store.append("cov", {"role": "user", "content": "canary after repair"}, source="cli")
+        store.commit()
+        found = store.search("canary", session_id="cov", limit=5)
+        assert found, "the repaired index did not receive the next appended row"
+    finally:
+        e.shutdown()
