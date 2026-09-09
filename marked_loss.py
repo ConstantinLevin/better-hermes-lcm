@@ -1,6 +1,6 @@
 """fork: better-hermeslcm — every place the fork still drops or cuts text leaves a marker.
 
-Rule (docs/fork-design.md): a summary is acceptable only while its provenance is intact AND
+Rule (CLAUDE.md): a summary is acceptable only while its provenance is intact AND
 the visible text still hints at what was cut. These helpers build those hints so the
 upstream call sites stay one-liners. Every marker is prefixed ``[LCM`` so ``lcm_doctor`` and
 a reader can find them, and the message-body marker keeps upstream's literal

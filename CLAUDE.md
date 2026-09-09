@@ -2,7 +2,9 @@
 
 **This repository is `better-hermeslcm`, a fork of [`stephenschoettler/hermes-lcm`](https://github.com/stephenschoettler/hermes-lcm)** (the LCM context-engine plugin for Hermes Agent — Python, SQLite-backed message store plus a summary DAG). Upstream base commit is in `.upstream-base`. The fork branch is `better-hermeslcm`.
 
-Read this before touching anything. Then read [`FORK.md`](FORK.md) (the maintenance contract) and [`docs/TASKS.md`](docs/TASKS.md) → **"WHAT IS LEFT TO DO"** (the authoritative work list and the standing tasks).
+Read this before touching anything. Then [`FORK.md`](FORK.md) (the maintenance contract) and [`docs/TASKS.md`](docs/TASKS.md) (the backlog — open work only; what was done is in the code and `git log`).
+
+**Do not write anything down that is not code, the README, this file, or the backlog.** No design docs, no pass logs, no notes-to-self. A finding is implemented, in the backlog, or nonsense.
 
 ## Why the fork exists — three goals, in priority order
 
@@ -15,7 +17,7 @@ Read this before touching anything. Then read [`FORK.md`](FORK.md) (the maintena
 
 **b) Optimise for large context windows** (up to 1M tokens) without degrading small ones. Every value that is a *preference* is a smooth weighted interpolation between two anchors — 256k and 1M — resolved through `window_scaling.py`. **Never a band switch, never an `if window > X` branch.**
 
-**c) Take what lossless-claw does better.** [lossless-claw](https://github.com/Martian-Engineering/lossless-claw) (TypeScript, OpenClaw) solves the same problem; where it is better *for this fork's purpose*, port it. **The goal is to be strictly superior to upstream hermes-lcm** — better on the no-loss axis without being worse on any other. Audit prompts are in `docs/claw-comparison/prompts/`; what each round decided is a pass entry in `docs/TASKS.md`.
+**c) Take what lossless-claw does better.** [lossless-claw](https://github.com/Martian-Engineering/lossless-claw) (TypeScript, OpenClaw) solves the same problem; where it is better *for this fork's purpose*, port it. **The goal is to be strictly superior to upstream hermes-lcm** — better on the no-loss axis without being worse on any other. Audit prompts are in `docs/claw-comparison/prompts/`; what a round finds is either fixed in the code or an entry in `docs/TASKS.md` — audit reports are not kept.
 
 ## The rule that is most often gotten wrong
 
@@ -31,7 +33,7 @@ A cut that fires at 256k but not at 1M is a **defect in this fork**. "That is wh
 
 Fork logic goes in **new modules** so upstream merges stay reviewable; upstream files get small, marked `# fork: better-hermeslcm` hooks.
 
-> **Naming:** the project, the repository and the branch are **better-hermeslcm**. Two identifiers deliberately keep the older `betterlcm` spelling and must NOT be renamed: the in-code marker `# fork: better-hermeslcm` (it is the grep token every audit report and every line of `docs/fork-touchpoints.md` cites) and the migration row `betterlcm_node_meta_v1` (it exists in live databases). Grep for `# fork: better-hermeslcm` to find every fork hook.
+> **Naming:** everything is **better-hermeslcm** — project, repository, branch and the in-code marker. Grep `# fork: better-hermeslcm` to find every fork hook. The one exception is `node_meta.LEGACY_MIGRATION_STEPS`, which still names the pre-rename migration row so a database written by an older build has that row retired instead of recording one migration twice.
 
 Fork modules: `window_scaling.py` (the anchor table and curve), `window_scaled_mixin.py` (`effective_*` resolution), `marked_loss.py` (**every marker the fork emits**), `host_cooldown.py`, `leaf_pipeline.py`, `node_meta.py`, `coverage_doctor.py`, `errors.py`.
 
@@ -53,6 +55,25 @@ ingest → store.py → reconcile.py → compaction.py (leaf + condensation)
 - **A receipt is a claim that something was removed.** Do not emit one for a turn that held nothing — a false claim of removal is its own defect.
 - **Test edits:** fork tests go in `tests/fork/`. Upstream tests that pin behaviour the fork deliberately changed get **re-pointed and recorded** in `docs/fork-touchpoints.md` — never deleted silently.
 - **Edit files with the editor.** Do not patch by piping heredoc Python/sed scripts through the shell: the diff becomes unreadable and those scripts have corrupted source files here before.
+
+## Do not
+
+Enable deferred maintenance; set either assembly cap (`max_assembly_tokens`,
+`reserve_tokens_floor`); set `incremental_max_depth=0`; enable sensitive-pattern redaction (it is
+explicitly not lossless); curve `protect_last_n` (it belongs to the bypass path, not the LCM
+tail); enable ingest-side externalization (the host already spills oversized tool output — doing
+it ourselves puts a ref in the replay the agent never saw); leave the checkout dirty.
+
+**The four places the fork knowingly does not keep everything.** Every other path either keeps
+the content or marks what it removed. These are operator policies, all off by default, named
+here so they are not discovered later:
+
+| exception | what is not recoverable | how to avoid it |
+|---|---|---|
+| `ignore_message_patterns` | a matching message is never stored; the active context keeps a hash placeholder | leave empty (default) |
+| `sensitive_patterns_enabled` | the redacted span is replaced before storage, and two different secrets can collide on one placeholder | leave disabled (default) |
+| ignored / stateless / auxiliary sessions | the conversation is bounded but never stored at all | leave `ignore_session_patterns` / `stateless_session_patterns` empty; auxiliary (subagent) sessions are excluded by design |
+| trajectory protection | the protected payload is redacted in place before hashing | do not enable the trajectory subsystem |
 
 ## Verification — what counts as evidence
 
@@ -95,6 +116,5 @@ Both are written up in `docs/TASKS.md` §E, with the outstanding audits in §F:
 | [`README.md`](README.md) | user-facing; "What the fork changes" is the upstream-vs-fork comparison |
 | [`FORK.md`](FORK.md) | maintenance contract: the two rules, the configured exceptions to no-loss, upgrade and claw-tracking procedures, the fork config reference |
 | [`docs/TASKS.md`](docs/TASKS.md) | the ledger. Pass history above, **"WHAT IS LEFT TO DO"** below — start there |
-| [`docs/fork-design.md`](docs/fork-design.md) | the design and every deviation from it |
 | [`docs/fork-touchpoints.md`](docs/fork-touchpoints.md) | every upstream file touched, why, and how to re-apply on conflict — the merge risk surface |
 | `docs/claw-comparison/` | the lossless-claw analyses, the audit reports, and the audit prompts |

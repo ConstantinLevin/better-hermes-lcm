@@ -7052,7 +7052,7 @@ class TestExtraction:
 
         assert "[Externalized tool output" not in serialized
         # fork: better-hermeslcm — a failed externalization must not become a silent cut; the body
-        # stays inline and whole (see docs/fork-design.md, no-loss doctrine).
+        # stays inline and whole (see CLAUDE.md, the no-loss doctrine).
         assert "...[truncated]..." not in serialized
         assert content in serialized
 

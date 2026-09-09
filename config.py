@@ -769,8 +769,20 @@ class LCMConfig:
     embedding_query_spend_backoff_seconds: float = 60.0
 
     # -- Session carry-over ---
-    # Depth retained after /new (-1 = all, 0 = nothing, 2 = keep d2+)
-    new_session_retain_depth: int = 2
+    # Depth retained after /new (-1 = all, 0 = nothing, 2 = keep d2+).
+    #
+    # fork: better-hermeslcm — 0 by default. NEW MEANS NEW.
+    #
+    # The working context is EVERYTHING in the window — system prompt, rendered summaries, the
+    # fresh tail, the raw backlog — not just the tail. So upstream's 2 does not give a new
+    # session a fresh context; it gives it a fresh tail with the old work's index still sitting
+    # in front of it. If you want the DAG you do not start a new session; if you start one you
+    # are saying this is different work, and the old work's summaries have no business being
+    # there.
+    #
+    # Nothing is deleted by this: the old session keeps its nodes and they stay reachable by
+    # session-scoped retrieval. Set 2 (or -1) to get upstream's carry-over back.
+    new_session_retain_depth: int = 0
     # Safety gate: destructive `/lcm doctor clean apply` workflow is disabled by default.
     doctor_clean_apply_enabled: bool = False
 

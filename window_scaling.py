@@ -65,7 +65,8 @@ class Anchor:
     unset: Optional[Any] = None    # sentinel for fork-added fields; None => upstream field
 
 
-# The single source of truth for the curve. Keep in sync with docs/fork-design.md.
+# The single source of truth for the curve. The classification of each anchor (preference or
+# quality) is in FORK.md; the reasoning for each value is in its own comment below.
 WINDOW_SCALED_DEFAULTS: tuple[Anchor, ...] = (
     Anchor("context_threshold", "context_threshold", 0.35, 0.80, cast=float),
     # Non-sweep drain stop: upstream stops the instant it is under the threshold; at 1M drain

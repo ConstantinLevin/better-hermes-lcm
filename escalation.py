@@ -538,7 +538,7 @@ def _build_l1_prompt(
     """Build a role-separated Level 1 prompt over untrusted source data."""
     # fork: better-hermeslcm — the summary is an INDEX into recoverable provenance. The failure
     # mode to avoid is an item a future reader could not discover from the summary, not
-    # length. See docs/fork-design.md ("Index contract").
+    # length. A summary is an index into recoverable history (CLAUDE.md).
     depth_guidance = {
         0: "Preserve decisions, rationale, constraints, active tasks, file paths, commands, and specific values.",
         1: (

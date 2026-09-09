@@ -234,3 +234,47 @@ def test_dynamic_chunking_keeps_upstream_timing_at_the_low_anchor(tmp_path, monk
         assert e._last_compression_noop_reason != "leaf loop time budget exhausted"
     finally:
         e.shutdown()
+
+
+def test_a_chunk_ends_on_a_turn_boundary_not_mid_exchange(tmp_path, summariser_calls):
+    """A leaf is one expandable unit, so a chunk that ends between a user question and the
+    assistant's answer produces two summaries that each describe half an exchange."""
+    e = _engine(tmp_path, W256)
+    try:
+        e._config.leaf_chunk_fraction = 0.0008
+        e._resolve_window_scaled_settings()
+        chunk = int(e.effective_leaf_chunk_tokens)
+        messages = []
+        for i in range(30):
+            messages.append({"role": "user", "content": f"question {i} " + ("word " * 20)})
+            messages.append({"role": "assistant", "content": f"answer {i} " + ("word " * 20)})
+        messages += _tail()
+
+        selected = e._select_oldest_leaf_chunk_aligned(messages, chunk)
+        assert selected, "a chunk must be selected"
+        assert len(selected) < len(messages), "this fixture must actually be chunked"
+        # the message after the chunk starts a new turn
+        assert messages[len(selected)]["role"] == "user", [m["role"] for m in selected[-3:]]
+        # ...and the chunk itself ends with the assistant's answer
+        assert selected[-1]["role"] == "assistant"
+    finally:
+        e.shutdown()
+
+
+def test_turn_alignment_never_swallows_a_long_agentic_run(tmp_path, summariser_calls):
+    """Honouring the turn boundary unconditionally would hand an entire tool-driven run to one
+    summariser call — the whole-backlog behaviour this fork removed. The search is bounded."""
+    e = _engine(tmp_path, W256)
+    try:
+        e._config.leaf_chunk_fraction = 0.0008
+        e._resolve_window_scaled_settings()
+        chunk = int(e.effective_leaf_chunk_tokens)
+        messages = [{"role": "user", "content": "start the migration"}]
+        for i in range(200):  # no user turn for the rest of the backlog
+            messages.append({"role": "assistant", "content": f"step {i} " + ("word " * 40)})
+        selected = e._select_oldest_leaf_chunk_aligned(messages, chunk)
+        assert len(selected) < len(messages), "an agentic run must still be chunked"
+        from hermes_lcm.tokens import count_messages_tokens
+        assert count_messages_tokens(selected) <= chunk * 2
+    finally:
+        e.shutdown()

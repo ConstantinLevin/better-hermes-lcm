@@ -491,8 +491,23 @@ class CompactionMixin:
         candidate_raw: List[Dict[str, Any]],
         working_leaf_chunk_tokens: int,
     ) -> List[Dict[str, Any]]:
-        """fork: better-hermeslcm — token-greedy oldest chunk, extended so it never ends between an
-        assistant tool call and the tool results that answer it (mirrors fresh_tail.py)."""
+        """fork: better-hermeslcm — token-greedy oldest chunk, aligned to a TURN boundary.
+
+        A leaf is one expandable unit, so where a chunk ends decides what a reader gets back.
+        Ending it in the middle of an exchange gives two leaves that each describe half of one:
+        the question in one summary, the answer in another, and neither says the whole thing.
+
+        Two rules, in order:
+          1. Never end between an assistant tool call and the results that answer it. This is
+             absolute — a call without its result is an unanswered call, and the pair is
+             meaningless apart (mirrors `fresh_tail.py`).
+          2. Prefer to end where the next message starts a new user turn, so a leaf covers whole
+             exchanges. This one is a PREFERENCE, not an absolute: an agentic run can go
+             hundreds of tool calls deep without a user turn, and honouring it unconditionally
+             would hand that entire run to one summariser call — the whole-backlog behaviour
+             this fork removed, reintroduced through the back door. So the search for the next
+             turn boundary is bounded; past that, rule 1's boundary stands.
+        """
         selected = self._select_oldest_leaf_chunk(candidate_raw, working_leaf_chunk_tokens)
         if not selected or len(selected) >= len(candidate_raw):
             return selected
@@ -510,7 +525,40 @@ class CompactionMixin:
             # ends inside a result run: take the rest of that run
             while end < len(candidate_raw) and candidate_raw[end].get("role") == "tool":
                 end += 1
-        return candidate_raw[:end]
+        return candidate_raw[:self._extend_to_turn_boundary(
+            candidate_raw, end, working_leaf_chunk_tokens
+        )]
+
+    # How far past the chunk target the turn-boundary search may look, as a multiple of the
+    # target. Half a chunk is enough for an ordinary exchange and small enough that an agentic
+    # run without user turns falls back to the tool-group boundary instead of swallowing the
+    # backlog.
+    _TURN_ALIGNMENT_OVERSHOOT = 0.5
+
+    def _extend_to_turn_boundary(
+        self,
+        candidate_raw: List[Dict[str, Any]],
+        end: int,
+        working_leaf_chunk_tokens: int,
+    ) -> int:
+        """Advance ``end`` to just before the next user message, within a bounded overshoot."""
+        if end >= len(candidate_raw) or working_leaf_chunk_tokens <= 0:
+            return end
+        if str(candidate_raw[end].get("role") or "") == "user":
+            return end  # already on a turn boundary
+        budget = int(working_leaf_chunk_tokens * self._TURN_ALIGNMENT_OVERSHOOT)
+        spent = 0
+        probe = end
+        while probe < len(candidate_raw):
+            if str(candidate_raw[probe].get("role") or "") == "user":
+                return probe  # the exchange completes here
+            spent += count_message_tokens(candidate_raw[probe])
+            if spent > budget:
+                return end  # too far: keep the tool-group-aligned boundary
+            probe += 1
+        # the backlog ends without another user turn; taking the remainder would make this leaf
+        # the whole rest of the history, so keep the bounded boundary
+        return end
 
     def _select_oldest_leaf_chunk(
         self,

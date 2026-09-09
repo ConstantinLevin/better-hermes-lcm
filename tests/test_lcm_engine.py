@@ -12392,6 +12392,10 @@ class TestSessionRetainDepth:
             created_at=time.time(),
         ))
 
+        # fork: better-hermeslcm — carry-over is OFF by default now (new means new), so a test of
+        # the carry-over mechanism has to ask for it rather than inherit it from the default.
+        engine._config.new_session_retain_depth = 2
+
         engine._session_id = "old-session"
         engine.on_session_reset()
         moved = engine.carry_over_new_session_context("old-session", "new-session")
