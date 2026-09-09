@@ -518,6 +518,29 @@ class SummaryDAG:
             ).fetchone()
         return int(row[0] or 0) if row else 0
 
+    def get_frontier_nodes(self, session_id: str) -> List["SummaryNode"]:
+        """fork: betterlcm — the session's uncondensed nodes, in SQL and UNBOUNDED.
+
+        The engine built this set by loading every node with ``limit=100_000`` and filtering in
+        Python. Past that limit the frontier was computed from a truncated node set, silently:
+        condensation would then re-publish over sources a node above the cut already covers,
+        and the assembled prefix would omit real summaries while reporting nothing. Same
+        predicate as :meth:`get_frontier_token_total`, so the count and the sum cannot diverge.
+        """
+        with self._db_lock:
+            rows = self._conn.execute(
+                f"""SELECT {_NODE_SELECT_COLUMNS} FROM summary_nodes n
+                   WHERE n.session_id = ?
+                   AND n.node_id NOT IN (
+                       SELECT json_each.value FROM summary_nodes p,
+                       json_each(p.source_ids)
+                       WHERE p.session_id = ? AND p.source_type = 'nodes'
+                   )
+                   ORDER BY n.depth, n.created_at""",
+                (session_id, session_id),
+            ).fetchall()
+        return [self._row_to_node(r) for r in rows]
+
     def covered_message_prefix_end(self, session_id: str, *, floor: int = 0) -> int:
         """fork: betterlcm — the end of the CONTIGUOUS run of stored rows this session's leaves
         already summarise, starting just after ``floor``.

@@ -299,9 +299,20 @@ at 256k and no longer do:
 |---|---|
 | active-context cleanup stripped `<think>` / reasoning parts out of every replayed assistant turn and said so only in the log. Only `_assemble_context` counted it; below-threshold cleanup, bypass trimming and forced-overflow recovery reported nothing. | the turn carries `marked_loss.INTERNAL_REPLAY_MARKER` itself (`sanitize._mark_internal_removal`). It is positionally neutral, so it can never displace the caller's newest message, and it is a fixed string, so `reconcile` still maps the replayed turn back to its stored row. A turn that held NOTHING is still dropped outright — inventing a receipt for an empty turn would be a false claim of removal. Under an assembly cap, a turn that is now *only* the receipt is held out of the budget pass and named in the prefix instead (`_is_internal_replay_receipt_only`). |
 
+| corrupt envelope JSON was cut at 20,000 chars in `store._row_to_dict` with no marker and no cursor, and `lcm_expand` on a RAW row did not report the corruption at all — it answered `has_more=false` while the host fields sat unreadable in the column. | the store returns `envelope_raw` whole with `envelope_raw_chars`; both expansion paths page it through the existing `envelope_offset` cursor and emit `envelope_raw_truncated` / `_next_offset` / `_continue_with`. |
+| summariser input rendered a tool call as `name(arguments)` and dropped everything else the provider attached to it; a tool call that was not a dict was filtered out entirely; a nested `{"type":"text","text":{"value":…,"annotations":[…]}}` object's other fields vanished, because the block inventory only sees the OUTER block's keys. | `marked_loss.tool_call_fields_note` / `unrepresentable_tool_call_note` name the first two; `_unrendered_field_receipt` takes a `prefix` and inventories the nested object as `text.<key>`. |
+| `_summary_frontier_nodes` loaded every node with `limit=100_000` and filtered in Python, so a session past that limit computed its frontier from a TRUNCATED set: condensation could re-publish over sources a node above the cut already covered, and the prefix would omit real summaries while reporting nothing (B7). | `dag.get_frontier_nodes` — the same SQL predicate as `get_frontier_token_total`, unbounded, so the count and the token sum cannot diverge. |
+
 Rejected in this pass: a completion-cue/negation gate on `_source_supports_assertion_value`
 (verify-4 #23). Every whitelist of completion verbs rejects real ones ("I submitted the
 report"), and a wrong rejection drops an assertion silently — that is loss too. Left open.
+
+Also rejected: a generated-scaffold digest ledger, so that a user pasting our assembled prefix
+verbatim is stored instead of classified as our own scaffolding. The ledger would have to be
+authoritative to help, and then any host-side normalisation of our prefix would make it fail to
+match — re-ingesting our own generated summaries as raw conversation, which is a worse and far
+more common failure than the paste. The paste case also loses no CONTENT: what is dropped is a
+copy of summaries the DAG already holds. Left open.
 
 **Still open after this pass:** verify-4 #23 (positive "completed" accepted from a negated
 source), verify-4 #6's smallest case (a budget too small for even a

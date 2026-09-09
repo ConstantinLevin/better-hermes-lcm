@@ -1616,8 +1616,45 @@ def _expand_message_sources(
                     ),
                 }
         if stored.get("envelope_corrupt"):
+            # fork: betterlcm — corrupt envelope JSON is not an empty envelope, and the raw
+            # text is not exempt from paging: it was returned whole (after a silent 20,000-char
+            # cut in the store) with no cursor, so a large corrupt envelope either blew the
+            # caller's budget or lost its tail with nothing to say so.
             expanded["envelope_corrupt"] = True
-            expanded["envelope_raw"] = stored.get("envelope_raw") or "" 
+            raw_envelope = str(stored.get("envelope_raw") or "")
+            raw_budget = max(
+                0,
+                remaining_tokens
+                - count_tokens(sliced["content"])
+                - (count_tokens(call_slice["content"]) if call_slice is not None else 0),
+            )
+            raw_slice = _slice_content_for_response(
+                raw_envelope,
+                raw_budget,
+                envelope_offset if source_index == source_offset else 0,
+            )
+            expanded["envelope_raw"] = raw_slice["content"]
+            expanded["envelope_raw_chars"] = raw_slice["content_chars"]
+            expanded["envelope_raw_offset"] = raw_slice["content_offset"]
+            expanded["envelope_raw_returned_chars"] = raw_slice["content_returned_chars"]
+            if raw_slice["content_truncated"]:
+                expanded["envelope_raw_truncated"] = True
+                expanded["envelope_raw_next_offset"] = raw_slice["next_content_offset"]
+                expanded["envelope_raw_continue_with"] = {
+                    "tool": "lcm_expand",
+                    "node_id": int(node.node_id),
+                    "source_offset": source_index,
+                    "source_limit": 1,
+                    "content_offset": (
+                        sliced["next_content_offset"] if sliced["has_more"]
+                        else sliced["content_offset"] + sliced["content_returned_chars"]
+                    ),
+                    "envelope_offset": raw_slice["next_content_offset"],
+                    "tool_calls_offset": (
+                        call_slice["next_content_offset"]
+                        if call_slice is not None and call_slice["content_truncated"] else 0
+                    ),
+                }
         if stored.get("tool_call_id") and stored.get("role") == "tool":
             expanded["tool_call_id"] = stored.get("tool_call_id")
         if stored.get("role") == "tool":
@@ -6137,6 +6174,35 @@ def lcm_expand(args: Dict[str, Any], **kwargs) -> str:
                     "envelope_offset": envelope_slice["next_content_offset"],
                     # fork: every continuation carries EVERY cursor, or following one restarts
                     # a field the caller already has (round-4 verify-2 #9)
+                    "tool_calls_offset": tool_calls_offset,
+                }
+        elif stored.get("envelope_corrupt"):
+            # fork: betterlcm — the raw-store path did not report envelope corruption AT ALL:
+            # it reported a row with no envelope and has_more=false, so the reader was told the
+            # whole row had been returned while the host fields sat unreadable in the column.
+            from .tokens import count_tokens as _count_tokens_corrupt
+            result["envelope_corrupt"] = True
+            raw_envelope = str(stored.get("envelope_raw") or "")
+            raw_slice = _slice_content_for_response(
+                raw_envelope, max(0, max_tokens - raw_budget_used), envelope_offset
+            )
+            raw_budget_used += _count_tokens_corrupt(raw_slice["content"])
+            result["envelope_raw"] = raw_slice["content"]
+            result["envelope_raw_chars"] = raw_slice["content_chars"]
+            result["envelope_raw_offset"] = raw_slice["content_offset"]
+            result["envelope_raw_returned_chars"] = raw_slice["content_returned_chars"]
+            if raw_slice["content_truncated"]:
+                result["envelope_raw_truncated"] = True
+                result["envelope_raw_next_offset"] = raw_slice["next_content_offset"]
+                result["has_more"] = True
+                result["envelope_raw_continue_with"] = {
+                    "tool": "lcm_expand",
+                    "store_id": store_id,
+                    "content_offset": (
+                        sliced["next_content_offset"] if sliced["has_more"]
+                        else sliced["content_offset"] + sliced["content_returned_chars"]
+                    ),
+                    "envelope_offset": raw_slice["next_content_offset"],
                     "tool_calls_offset": tool_calls_offset,
                 }
         # fork: betterlcm — an assistant turn's tool CALLS are part of what it said. Node

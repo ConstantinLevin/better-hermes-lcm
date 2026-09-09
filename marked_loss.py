@@ -153,6 +153,51 @@ def externalized_head_note(text: str) -> str:
     return f"\n[LCM head of externalized output: {head}]"
 
 
+_ACCOUNTED_TOOL_CALL_KEYS = frozenset({"id", "type", "index", "function"})
+_ACCOUNTED_TOOL_FUNCTION_KEYS = frozenset({"name", "arguments"})
+
+
+def tool_call_fields_note(call: dict) -> str:
+    """fork: betterlcm — name what a rendered ``name(arguments)`` call leaves out.
+
+    The summariser saw only the function name and its arguments. Anything else the provider
+    attached to the call — a cache hint, a server-side id, a partial-arguments flag, a
+    provider status — was dropped with nothing in its place.
+    """
+    omitted: List[str] = []
+    for key, value in call.items():
+        if not isinstance(key, str) or key in _ACCOUNTED_TOOL_CALL_KEYS:
+            continue
+        if value is None or value == "" or value == [] or value == {}:
+            continue
+        omitted.append(key)
+    function = call.get("function")
+    if isinstance(function, dict):
+        for key, value in function.items():
+            if not isinstance(key, str) or key in _ACCOUNTED_TOOL_FUNCTION_KEYS:
+                continue
+            if value is None or value == "" or value == [] or value == {}:
+                continue
+            omitted.append(f"function.{key}")
+    if not omitted:
+        return ""
+    shown = ", ".join(sorted(omitted)[:10])
+    more = f" (+{len(omitted) - 10} more)" if len(omitted) > 10 else ""
+    return (
+        f" {RECEIPT_LINE_PREFIX} {len(omitted)} further field(s) of this tool call are not "
+        f"summarised here ({shown}{more}); the stored row is unchanged — lcm_expand]"
+    )
+
+
+def unrepresentable_tool_call_note(call: Any) -> str:
+    """A tool call the renderer cannot shape as ``name(arguments)`` is still something it did."""
+    return (
+        f"  {RECEIPT_LINE_PREFIX} a tool call recorded in a non-standard shape "
+        f"({content_head(call, limit=120)!r}) is not rendered here; the stored row is "
+        "unchanged — lcm_expand]"
+    )
+
+
 def unmatched_tool_call_note() -> str:
     return "[no tool result in this chunk]"
 

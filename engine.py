@@ -5800,9 +5800,12 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                 serialized_tool_calls = [
                     (tc, tc in matched_tool_calls) for tc in tool_calls if isinstance(tc, dict)
                 ]
+                # fork: betterlcm — a call the renderer cannot shape as name(arguments) was
+                # dropped by the isinstance filter with nothing in its place.
+                unrepresentable_calls = [tc for tc in tool_calls if not isinstance(tc, dict)]
                 envelope_fields = self._message_envelope_fields(msg)
                 if _is_synthetic_assistant_noise(content):
-                    if not serialized_tool_calls and not envelope_fields:
+                    if not serialized_tool_calls and not envelope_fields and not unrepresentable_calls:
                         # fork: betterlcm — the turn is dropped from the summariser's input by
                         # WORDING alone, so a genuine "Acknowledged." disappeared with nothing
                         # in its place (round-4 verify-4 #8). Identifying synthetic origin
@@ -5817,7 +5820,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                 content = marked_loss.elide_text(  # fork: marked
                     content, serialize_cap, original_chars=raw_chars
                 )
-                if serialized_tool_calls:
+                if serialized_tool_calls or unrepresentable_calls:
                     tc_parts = []
                     for tc, is_matched in serialized_tool_calls:
                         fn = tc.get("function", {})
@@ -5831,7 +5834,12 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                         args = sanitize_pre_compaction_tool_arguments(args)
                         args = marked_loss.elide_args(args, args_cap)  # fork: marked
                         suffix = "" if is_matched else " " + marked_loss.unmatched_tool_call_note()
+                        # fork: betterlcm — everything else the provider attached to the call
+                        # is named rather than dropped
+                        suffix += marked_loss.tool_call_fields_note(tc)
                         tc_parts.append(f"  {name}({args}){suffix}")
+                    for tc in unrepresentable_calls:
+                        tc_parts.append(marked_loss.unrepresentable_tool_call_note(tc))
                     content += "\n[Tool calls:\n" + "\n".join(tc_parts) + "\n]"
                 content += marked_loss.envelope_summary_suffix(  # fork: round-3 verify-4 #8
                     self._message_envelope_fields(msg)
@@ -6539,6 +6547,12 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
 
     def _summary_frontier_nodes(self) -> List[SummaryNode]:
         """Return all provider-visible summary frontier nodes for the active session."""
+        # fork: betterlcm — the frontier is a SQL predicate, not a page of nodes. Loading every
+        # node with limit=100_000 and filtering in Python meant a session past that limit
+        # computed its frontier from a truncated set, with nothing to say so.
+        projected = getattr(self._dag, "get_frontier_nodes", None)
+        if projected is not None:
+            return list(projected(self._session_id))
         all_nodes = self._dag.get_session_nodes(self._session_id, limit=100_000)
         referenced = {
             source_id

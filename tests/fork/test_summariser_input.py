@@ -444,3 +444,58 @@ def test_the_summariser_input_receipts_survive_into_the_published_leaf(tmp_path)
         assert "chars of injected context removed" in rendered or "elided" in rendered, rendered
     finally:
         e.shutdown()
+
+
+def test_tool_call_metadata_and_odd_shapes_are_named(tmp_path):
+    """round-4: the summariser saw `name(arguments)` and nothing else — a provider status, a
+    partial-arguments flag, a cache hint were dropped, and a call that was not a dict at all
+    was filtered out silently."""
+    from hermes_lcm import marked_loss
+    from hermes_lcm.config import LCMConfig
+    from hermes_lcm.engine import LCMEngine
+    e = LCMEngine(config=LCMConfig(database_path=str(tmp_path / "tc.db")),
+                  hermes_home=str(tmp_path))
+    try:
+        e.on_session_start("tc", platform="cli", context_length=262_144)
+        serialized = e._serialize_messages([
+            {
+                "role": "assistant",
+                "content": "working",
+                "tool_calls": [
+                    {
+                        "id": "c1", "type": "function",
+                        "function": {"name": "terminal", "arguments": "{}", "partial": True},
+                        "provider_status": "rejected",
+                    },
+                    "terminal(ls)",
+                ],
+            },
+            {"role": "tool", "tool_call_id": "c1", "content": "ok"},
+        ])
+        assert "provider_status" in serialized and "function.partial" in serialized
+        assert "non-standard shape" in serialized and "terminal(ls)" in serialized
+        assert marked_loss.RECEIPT_LINE_PREFIX in serialized
+    finally:
+        e.shutdown()
+
+
+def test_a_nested_text_object_names_its_other_fields(tmp_path):
+    """round-4: `{"type":"text","text":{"value":"…","annotations":[…]}}` rendered the value and
+    dropped everything beside it; the outer inventory only sees the outer block's keys."""
+    from hermes_lcm.config import LCMConfig
+    from hermes_lcm.engine import LCMEngine
+    e = LCMEngine(config=LCMConfig(database_path=str(tmp_path / "nested.db")),
+                  hermes_home=str(tmp_path))
+    try:
+        e.on_session_start("nested", platform="cli", context_length=262_144)
+        serialized = e._serialize_messages([{
+            "role": "user",
+            "content": [{
+                "type": "text",
+                "text": {"value": "the answer", "annotations": [{"cite": "doc-1"}]},
+            }],
+        }])
+        assert "the answer" in serialized
+        assert "text.annotations" in serialized
+    finally:
+        e.shutdown()

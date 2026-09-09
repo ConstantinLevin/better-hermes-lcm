@@ -221,7 +221,7 @@ _ACCOUNTED_BLOCK_KEYS = frozenset(
 )
 
 
-def _unrendered_field_receipt(block: Dict[str, Any], rendered_keys) -> str:
+def _unrendered_field_receipt(block: Dict[str, Any], rendered_keys, prefix: str = "") -> str:
     """fork: betterlcm — name substantive fields the rendering does not show.
 
     A typed text block carrying ``{"text": "stdout", "content": "stderr FAILED",
@@ -238,7 +238,7 @@ def _unrendered_field_receipt(block: Dict[str, Any], rendered_keys) -> str:
         # fork: betterlcm — 0 and False are VALUES, not absence (round-3 verify-4 #9)
         if value is None or value == "" or value == [] or value == {}:
             continue
-        omitted.append(key)
+        omitted.append(f"{prefix}{key}")
     if not omitted:
         return ""
     shown = ", ".join(sorted(omitted)[:10])
@@ -294,8 +294,17 @@ def _sanitize_content_block(content: Any) -> str:
         block_type = str(content.get("type", "")).lower()
         if block_type in _TEXT_BLOCK_TYPES:
             text_value = content.get("text")
+            nested_receipt = ""
             if isinstance(text_value, dict):
-                text_value = text_value.get("value", "") or text_value.get("text", "")
+                # fork: betterlcm — a NESTED text object's other fields (annotations, a
+                # citation list, a status) were dropped without a receipt: the outer
+                # inventory only sees the outer block's keys (round-4).
+                nested_source = text_value
+                nested_key = "value" if nested_source.get("value") not in (None, "") else "text"
+                text_value = nested_source.get("value", "") or nested_source.get("text", "")
+                nested_receipt = _unrendered_field_receipt(
+                    nested_source, (nested_key,), prefix="text."
+                )
             # fork: betterlcm — a typed TEXT block can still carry an outcome beside its text
             # (is_error, a status, its call id). Returning only the text made a failed step
             # read exactly like a successful one (verify-4 #6). And it can carry a SECOND
@@ -315,6 +324,7 @@ def _sanitize_content_block(content: Any) -> str:
                 "\n".join(rendered_parts)
                 + _structured_outcome_suffix(content)
                 + _unrendered_field_receipt(content, rendered_keys)
+                + nested_receipt
             )
         if _looks_like_media_block(block_type, content):
             # the marker stands for the media; anything substantive beside it is still named

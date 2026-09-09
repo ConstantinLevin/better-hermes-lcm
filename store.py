@@ -2178,7 +2178,12 @@ class MessageStore:
                 # is kept so the fields can still be recovered by hand (round-3 verify-4 #8).
                 d["envelope"] = {}
                 d["envelope_corrupt"] = True
-                d["envelope_raw"] = str(d.get("envelope_extra") or "")[:20_000]
+                # fork: betterlcm — the raw text is returned WHOLE. Cutting it at 20,000 chars
+                # here destroyed the only remaining copy of the fields for the reader, with no
+                # marker and no continuation; readers page it through `envelope_offset`.
+                raw_envelope = str(d.get("envelope_extra") or "")
+                d["envelope_raw"] = raw_envelope
+                d["envelope_raw_chars"] = len(raw_envelope)
         d.pop("envelope_extra", None)
         d["source"] = _normalize_source_value(d.get("source"))
         d["conversation_id"] = _normalize_conversation_id_value(d.get("conversation_id"))

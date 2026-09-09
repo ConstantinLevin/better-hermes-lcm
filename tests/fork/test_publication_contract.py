@@ -20,6 +20,29 @@ def _node(session="s", **kw):
     return SummaryNode(**base)
 
 
+def test_the_frontier_is_a_sql_predicate_not_a_page_of_nodes(tmp_path):
+    """B7: the engine built the frontier by loading nodes with a limit and filtering in Python,
+    so a session past that limit computed its frontier from a truncated set with nothing to say
+    so. The SQL predicate is unbounded and agrees with the token sum over the same set."""
+    dag = SummaryDAG(str(tmp_path / "frontier.db"))
+    try:
+        leaf_ids = [dag.add_node(_node(token_count=7)) for _ in range(1200)]
+        # get_session_nodes' own default page is 1000 — the frontier must not inherit it
+        assert len(dag.get_session_nodes("s")) == 1000
+        frontier = dag.get_frontier_nodes("s")
+        assert len(frontier) == 1200
+        assert dag.get_frontier_token_total("s") == sum(n.token_count for n in frontier)
+
+        # a condensed parent takes its children off the frontier, and only those
+        dag.add_node(_node(depth=1, source_ids=leaf_ids[:500], source_type="nodes"))
+        frontier = dag.get_frontier_nodes("s")
+        assert len(frontier) == 701
+        assert {n.node_id for n in frontier}.isdisjoint(set(leaf_ids[:500]))
+        assert dag.get_frontier_token_total("s") == sum(n.token_count for n in frontier)
+    finally:
+        dag.close()
+
+
 def test_a_node_and_its_sidecar_are_published_together(tmp_path):
     dag = SummaryDAG(str(tmp_path / "pub.db"))
     try:
@@ -592,3 +615,50 @@ def test_an_edit_that_changes_only_a_projected_field_is_archived(tmp_path):
     long_a = "x" * 250 + "A"
     long_b = "x" * 250 + "B"
     assert host_message_id_of({"message_id": long_a}) != host_message_id_of({"message_id": long_b})
+
+
+def test_a_corrupt_envelope_is_returned_whole_and_paged(tmp_path):
+    """round-4: corrupt envelope JSON was cut at 20,000 chars in the store with no marker and
+    no cursor, and `lcm_expand` on a raw row did not report the corruption at all — it said
+    has_more=false while the host fields sat unreadable in the column."""
+    import json
+    from hermes_lcm.tools import lcm_expand
+
+    cfg = LCMConfig()
+    cfg.database_path = str(tmp_path / "corrupt_envelope.db")
+    engine = LCMEngine(config=cfg, hermes_home=str(tmp_path))
+    engine.on_session_start("s", context_length=200_000)
+    store = engine._store
+    try:
+        store_id = store.append("s", {"role": "user", "content": "hi"}, source="cli")
+        broken = '{"reasoning_content": "' + "z" * 60_000  # never closed
+        store._conn.execute(
+            "UPDATE messages SET envelope_extra = ? WHERE store_id = ?", (broken, store_id)
+        )
+        store.commit()
+
+        row = store.get(store_id)
+        assert row["envelope_corrupt"] is True
+        assert row["envelope_raw"] == broken          # whole, not 20,000 chars
+        assert row["envelope_raw_chars"] == len(broken)
+
+        first = json.loads(lcm_expand({"store_id": store_id, "max_tokens": 500}, engine=engine))
+        assert first["envelope_corrupt"] is True
+        assert first["envelope_raw_truncated"] is True
+        assert first["has_more"] is True
+        cursor = first["envelope_raw_continue_with"]["envelope_offset"]
+        assert cursor == first["envelope_raw_next_offset"] > 0
+
+        seen = first["envelope_raw"]
+        while True:
+            page = json.loads(lcm_expand(
+                {"store_id": store_id, "max_tokens": 500, "envelope_offset": cursor},
+                engine=engine,
+            ))
+            seen += page["envelope_raw"]
+            if not page.get("envelope_raw_truncated"):
+                break
+            cursor = page["envelope_raw_next_offset"]
+        assert seen == broken                          # every character is reachable
+    finally:
+        engine.shutdown()
