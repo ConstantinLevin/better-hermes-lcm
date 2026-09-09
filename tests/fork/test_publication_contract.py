@@ -467,3 +467,88 @@ def test_a_rebind_after_publication_does_not_hand_the_new_session_old_context(tm
         assert e._last_compression_status in {"noop", "sanitized"}
     finally:
         e.shutdown()
+
+
+def test_a_failed_revision_write_is_retried_on_the_next_turn(tmp_path):
+    """round-4 verify-2 #1: the fingerprint cache advanced before the archive write succeeded,
+    so a transient failure was cached as "already checked" and an unchanged retry never wrote
+    the correction again — the edit stayed lost."""
+    import sqlite3
+    cfg = LCMConfig(database_path=str(tmp_path / "retryrev.db"))
+    e = LCMEngine(config=cfg, hermes_home=str(tmp_path))
+    try:
+        e.on_session_start("rr", platform="cli", context_length=200_000)
+        e._ingest_messages([{"role": "user", "content": "ORIGINAL", "message_id": "m1"}])
+        e._store.commit()
+
+        real_append = e._store.append
+        state = {"failed": False}
+
+        def failing_append(*args, **kwargs):
+            if not state["failed"] and "CORRECTED" in str(args[1].get("content") or ""):
+                state["failed"] = True
+                raise sqlite3.OperationalError("disk full")
+            return real_append(*args, **kwargs)
+
+        e._store.append = failing_append
+        try:
+            e._ingest_messages([{"role": "user", "content": "CORRECTED", "message_id": "m1"}])
+        finally:
+            e._store.append = real_append
+        contents = [str(row.get("content") or "") for row in e._store.get_session_messages("rr")]
+        assert "CORRECTED" not in contents, "the probe did not exercise the failure"
+
+        # the same snapshot again: the correction must be attempted once more
+        e._ingest_messages([{"role": "user", "content": "CORRECTED", "message_id": "m1"}])
+        e._store.commit()
+        contents = [str(row.get("content") or "") for row in e._store.get_session_messages("rr")]
+        assert "CORRECTED" in contents, contents
+        assert "ORIGINAL" in contents
+    finally:
+        e.shutdown()
+
+
+def test_a_consumed_revision_row_does_not_move_the_frontier_forward(tmp_path):
+    """round-4 verify-2 #3: a revision row is appended at the END of the archive, and taking
+    its id as a chronological position made the frontier jump to it and then move backward,
+    leaving an active row past the frontier that a raw-after-frontier query could not see."""
+    from hermes_lcm import escalation
+    cfg = LCMConfig(database_path=str(tmp_path / "revfrontier.db"), fresh_tail_count=1,
+                    leaf_chunk_tokens=10, incremental_max_depth=0)
+    e = LCMEngine(config=cfg, hermes_home=str(tmp_path))
+    try:
+        e.on_session_start("rf", platform="cli", context_length=200_000)
+        messages = [
+            {"role": "user", "content": "first " + "w" * 200, "message_id": "m1"},
+            {"role": "user", "content": "second " + "w" * 200, "message_id": "m2"},
+            {"role": "user", "content": "third " + "w" * 200, "message_id": "m3"},
+            {"role": "user", "content": "fourth " + "w" * 200, "message_id": "m4"},
+        ]
+        e._ingest_messages(messages)
+        e._store.commit()
+        edited = [dict(message) for message in messages]
+        edited[0] = dict(edited[0], content="FIRST CORRECTED " + "w" * 200)
+        e._ingest_messages(edited)
+        e._store.commit()
+
+        e.threshold_tokens = 1
+        e._resolve_window_scaled_settings()
+        original = escalation._call_llm_for_summary
+        escalation._call_llm_for_summary = lambda *a, **k: "s\nExpand for details about: s"
+        try:
+            e.compress(list(edited) + [{"role": "user", "content": "tail"}], current_tokens=400_000)
+        finally:
+            escalation._call_llm_for_summary = original
+
+        rows = e._store.get_session_messages("rf")
+        revision_ids = {int(row["store_id"]) for row in rows
+                        if "FIRST CORRECTED" in str(row.get("content") or "")}
+        assert revision_ids, "the correction was not archived"
+        assert e._last_compacted_store_id not in revision_ids, (
+            "the frontier stopped on an appended revision row"
+        )
+        chronological = [int(row["store_id"]) for row in rows
+                         if int(row["store_id"]) not in revision_ids]
+        assert e._last_compacted_store_id <= max(chronological)
+    finally:
+        e.shutdown()

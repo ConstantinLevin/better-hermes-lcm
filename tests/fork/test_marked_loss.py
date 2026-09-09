@@ -1557,3 +1557,20 @@ def test_expansion_synthesis_reports_an_unreadable_source(tmp_path, monkeypatch)
         assert payload["missing_source_store_ids"] == [999999], payload
     finally:
         e.shutdown()
+
+
+def test_a_quoted_leading_turn_receipt_with_user_text_is_stored(tmp_path):
+    """round-4 verify-2 #6: the receipt classifier matched a PREFIX, so a user message that
+    quoted our receipt and then added their own instructions was classified as scaffolding and
+    dropped."""
+    from hermes_lcm import marked_loss
+    e = _engine(tmp_path, "quotedreceipt.db", incremental_max_depth=0)
+    try:
+        e.on_session_start("qr", platform="cli", context_length=200_000)
+        receipt = marked_loss.leading_turns_dropped_marker(2, ["assistant", "tool"])
+        assert e._is_replayed_context_scaffold_message(
+            {"role": "user", "content": receipt}) is True
+        with_text = {"role": "user", "content": receipt + "\n\nMY NEW INSTRUCTION: stop."}
+        assert e._is_replayed_context_scaffold_message(with_text) is False, with_text
+    finally:
+        e.shutdown()

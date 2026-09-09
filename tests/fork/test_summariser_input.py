@@ -386,3 +386,18 @@ def test_every_rendering_branch_accounts_for_what_it_did_not_render():
     receipts = [value for key, value in renamed.items()
                 if isinstance(key, str) and key.startswith("_lcm_key_sanitisation")]
     assert receipts, renamed
+
+
+def test_a_pure_refusal_is_never_a_summary(tmp_path):
+    """round-4 verify-2 #5: relaxing the gate so faithful paraphrases survive let a plain
+    refusal through — "I cannot summarize the provided material because it violates my content
+    policies. Please provide different material." was published verbatim as a summary node."""
+    from hermes_lcm import escalation
+    source = ("The rollout was cancelled after the credentials expired; the daemon failed at "
+              "startup and the DNS path was ruled out.")
+    refusal = ("I cannot summarize the provided material because it violates my content "
+               "policies. Please provide different material.")
+    assert escalation._is_index_shaped_summary(refusal, source) is False
+    # ... and a paraphrase that merely opens like a refusal still survives
+    paraphrase = "I cannot start the daemon because the credentials expired at startup."
+    assert escalation._is_index_shaped_summary(paraphrase, source) is True

@@ -649,6 +649,9 @@ class CompactionMixin:
             return sanitized_messages
         anchor_source_messages = list(working_messages)
         pressure_messages = messages if len(messages) == len(working_messages) else working_messages
+        # fork: betterlcm — the identity this whole compaction belongs to, captured before any
+        # model work. Every result branch is fenced against it (round-4 verify-2 #4).
+        compress_fence = self._publication_fence()
         leaf_compacted_this_turn = False
         dropped_replayed_scaffold_messages = False
         leaf_passes = 0
@@ -1108,6 +1111,18 @@ class CompactionMixin:
                 break
             consumed_store_ids = self._get_store_ids_for_messages(source_lookup_chunk)
             consumed_store_ids = sorted(dict.fromkeys(consumed_store_ids))
+            # fork: betterlcm — a consumed REVISION row is not a chronological position: it was
+            # appended at the end of the archive, and taking its id as the frontier made the
+            # frontier jump forward and then back, skipping a row that was still active
+            # (round-4 verify-2 #3). Its superseded original IS the position, and both belong
+            # to this leaf's provenance.
+            superseded_by_revision = self._store.superseded_ids_for(
+                self._session_id, consumed_store_ids
+            )
+            chronological_store_ids = sorted({
+                superseded_by_revision.get(store_id, store_id)
+                for store_id in consumed_store_ids
+            })
 
             # fork: betterlcm — every row this leaf CONSUMES becomes a source of it. Upstream
             # published only the summarised lineage, so replies to host-injected placeholders
@@ -1144,6 +1159,7 @@ class CompactionMixin:
             published_source_ids = sorted(
                 summarised_source_ids
                 | set(consumed_store_ids)
+                | set(chronological_store_ids)  # fork: the superseded originals too
                 | set(recovered_body_ids)
                 | set(revision_ids)
             )
@@ -1205,7 +1221,10 @@ class CompactionMixin:
                 self._dag.add_node_with_meta(node, level=int(_level), summary=summary_text)
                 self._invalidate_rollups_for_published_node(node)
                 self._maybe_gc_compacted_tool_results(compacted_chunk, source_store_ids)
-                self._last_compacted_store_id = max(consumed_store_ids) if consumed_store_ids else 0
+                # fork: the frontier moves over CHRONOLOGICAL positions only (round-4 #3)
+                self._last_compacted_store_id = (
+                    max(chronological_store_ids) if chronological_store_ids else 0
+                )
                 self._persist_frontier_marker()
 
             pressure_consumed_chunk = pressure_messages[
@@ -1371,6 +1390,23 @@ class CompactionMixin:
                     active_context_messages,
                     insert_missing_tool_stubs=False,
                 )
+            # fork: betterlcm — EVERY result branch is fenced, not only the leaf one. The
+            # condensation-only return sat below the final fence, so a rebind landing after
+            # assembly handed the new session the old session's prefix and cursor
+            # (round-4 verify-2 #4).
+            with self._publication_lock:
+                if self._publication_fence() != compress_fence:
+                    logger.warning(
+                        "LCM discarding a condensation-only result built for %s#%s: the "
+                        "session is now %s#%s",
+                        compress_fence[0], compress_fence[1], *self._publication_fence(),
+                    )
+                    self._last_compression_status = "noop"
+                    self._last_compression_noop_reason = (
+                        "the session was rebound while this compaction was assembling its "
+                        "result"
+                    )
+                    return messages
             if condensation_published:
                 # fork: betterlcm — real published work, even with no leaf pass this turn
                 self._ingest_cursor = len(sanitized_messages)
@@ -1485,11 +1521,11 @@ class CompactionMixin:
         # verify-4 #1). The publication itself is already fenced under the lock; here the fence
         # is re-checked, and stale work is returned as an unchanged context instead.
         with self._publication_lock:
-            if self._publication_fence() != leaf_fence:
+            if self._publication_fence() != compress_fence:
                 logger.warning(
                     "LCM discarding an assembled context built for %s#%s: the session is now "
                     "%s#%s",
-                    leaf_fence[0], leaf_fence[1], *self._publication_fence(),
+                    compress_fence[0], compress_fence[1], *self._publication_fence(),
                 )
                 self._last_compression_status = "noop"
                 self._last_compression_noop_reason = (

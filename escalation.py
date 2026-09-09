@@ -666,6 +666,16 @@ _NON_INDEX_REFUSAL_MARKERS = (
     "as an ai", "cannot assist", "can't assist", "i won't", "i will not",
     "no content to summarize", "nothing to summarize",
 )
+# fork: betterlcm — the vocabulary a summariser uses to talk about its OWN refusal. A reply
+# built from these words says nothing about the source however long it is, while a faithful
+# paraphrase of the source uses none of them (round-4 verify-2 #5).
+_REFUSAL_SELF_REFERENCE = frozenset({
+    "summarize", "summarise", "summarizing", "summarising", "summary", "provide", "provided",
+    "material", "materials", "policy", "policies", "guidelines", "guideline", "content",
+    "request", "requested", "comply", "compliance", "assist", "assistance", "instructions",
+    "unable", "cannot", "sorry", "apologize", "apologise", "violates", "violate", "violating",
+    "different", "another",
+})
 _NON_INDEX_ACKNOWLEDGEMENTS = frozenset({
     "ok", "okay", "k", "sure", "done", "understood", "acknowledged", "got it", "yes", "no",
     "noted", "will do", "thanks", "thank you", "n/a", "none", "null", "-",
@@ -731,6 +741,16 @@ def _is_index_shaped_summary(result: str, source_text: str = "") -> bool:
         # shares nothing specific with the source is treated as a non-answer; a long refusal
         # that slips through still has to be shorter than its source to be published, and says
         # so in the node rather than being lost.
+        # A reply whose words are the summariser's own refusal vocabulary indexes nothing,
+        # whatever its length: "I cannot summarize the provided material because it violates my
+        # content policies. Please provide different material." (round-4 verify-2 #5).
+        remainder_words = {
+            word.strip(".,;:!?\"'()").casefold()
+            for word in remainder.split()
+        }
+        self_referential = remainder_words & _REFUSAL_SELF_REFERENCE
+        if len(self_referential) >= 2:
+            return False
         if len(remainder.split()) >= 6:
             return True
         source_tokens = _index_evidence_tokens(source_text)

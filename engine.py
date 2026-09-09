@@ -2114,7 +2114,15 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
             host_id for host_id, fingerprint in fingerprints.items()
             if seen.get(host_id) != fingerprint
         }
-        self._last_prefix_revision_fingerprints = dict(fingerprints)
+        # fork: betterlcm — cache only what this call actually SETTLED. Recording every
+        # fingerprint up front meant a failed archive write (or a failed lookup) was never
+        # retried: an unchanged retry saw "already checked" and the correction stayed lost
+        # (round-4 verify-2 #1). Unchanged ids are settled by definition.
+        settled = {
+            host_id: fingerprint for host_id, fingerprint in fingerprints.items()
+            if host_id not in changed
+        }
+        self._last_prefix_revision_fingerprints = settled
         if not changed:
             return 0
         candidates = {host_id: candidates[host_id] for host_id in changed}
@@ -2123,22 +2131,25 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                 self._session_id, list(candidates)
             )
         except Exception:
-            logger.debug("LCM revision check could not read the store", exc_info=True)
-            return 0
+            logger.warning("LCM revision check could not read the store", exc_info=True)
+            return 0  # nothing is cached for these ids: the next turn tries again
         revisions = 0
         for host_id, message in candidates.items():
             row = stored.get(host_id)
             if row is None:
-                continue
+                settled[host_id] = fingerprints.get(host_id, "")
+                continue  # never stored under this id: nothing to supersede
             stored_content = str(row.get("content") or "")
             if is_externalized_placeholder(stored_content) or extract_ingest_externalized_refs(
                 stored_content
             ):
+                settled[host_id] = fingerprints.get(host_id, "")
                 continue  # the stored form is a reference; a cheap comparison would lie
             # fork: betterlcm — the WHOLE envelope decides, not the content alone: an edit that
             # changed only tool arguments or reasoning metadata was never archived
             # (round-3 verify-4 #3).
             if message_envelope_fingerprint(message) == message_envelope_fingerprint(row):
+                settled[host_id] = fingerprints.get(host_id, "")
                 continue
             revision = dict(message)
             revision["lcm_supersedes_store_id"] = int(row.get("store_id") or 0)
@@ -2153,7 +2164,8 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                 )
             except Exception:
                 logger.warning("LCM could not archive an edited message", exc_info=True)
-                continue
+                continue  # not settled: the fingerprint stays out of the cache
+            settled[host_id] = fingerprints.get(host_id, "")
             revisions += 1
             logger.info(
                 "LCM archived a host edit of store_id %s as store_id %s (host id %s)",
@@ -2164,6 +2176,21 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                 getattr(self, "_last_archived_revisions", 0)
             ) + revisions
         return revisions
+
+    @property
+    def _ingest_lock(self) -> threading.RLock:
+        """fork: betterlcm — one ingest at a time per engine.
+
+        The session-end flush swaps the engine's identity for the length of one ingest; a
+        concurrent foreground ingest that did not take this lock stored its own turn under the
+        ENDED session (round-4 verify-2 #2). Ordinary ingest takes it too, so a foreground turn
+        either happens entirely before the flush or waits for it.
+        """
+        lock = getattr(self, "_ingest_lock_object", None)
+        if lock is None:
+            lock = threading.RLock()
+            self._ingest_lock_object = lock
+        return lock
 
     @contextlib.contextmanager
     def _ended_session_ingest_identity(self, session_id: str):
@@ -2179,7 +2206,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         if not ended or ended == self._session_id:
             yield
             return
-        with self._publication_lock:
+        with self._publication_lock, self._ingest_lock:
             previous_session = self._session_id
             previous_conversation = self._conversation_id
             previous_cursor = self._ingest_cursor
@@ -4728,8 +4755,16 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         # ingested and fed back to the summariser as raw conversation (round-3 verify-2 #9).
         if content.strip() == marked_loss.MINIMAL_ASSEMBLY_OMISSION_MARKER:
             return True
-        if content.strip().startswith(marked_loss.LEADING_TURNS_DROPPED_PREFIX):
-            return True  # fork: betterlcm — round-3 verify-4 #7
+        stripped_content = content.strip()
+        if (
+            stripped_content.startswith(marked_loss.LEADING_TURNS_DROPPED_PREFIX)
+            and stripped_content.endswith("]")
+            and "\n" not in stripped_content
+        ):
+            # fork: betterlcm — the receipt must BE the message. Matching a prefix let a user
+            # message that quoted it and then added their own instructions be classified as our
+            # scaffolding and dropped (round-4 verify-2 #6).
+            return True
         # fork: betterlcm — every shape assembly can emit must round-trip through this
         # recognition, or the generated prefix is ingested and stored as raw conversation
         # (round-2 verify-2 #5). A prefix whose parts all had to be given up carries only the
@@ -4954,6 +4989,11 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         return redacted_replay_messages
 
     def _ingest_messages(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Persist new messages to the store (fork: serialized by ``_ingest_lock``)."""
+        with self._ingest_lock:
+            return self._ingest_messages_locked(messages)
+
+    def _ingest_messages_locked(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Persist new messages to the store.
 
         Uses a cursor to track which portion of the current messages list

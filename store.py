@@ -1618,6 +1618,38 @@ class MessageStore:
                 found[str(record.get("host_message_id"))] = record  # newest wins
         return found
 
+    def superseded_ids_for(self, session_id: str, store_ids: List[int]) -> Dict[int, int]:
+        """fork: betterlcm — ``{revision row id: the row it supersedes}`` for these rows.
+
+        A revision row is APPENDED at the end of the archive, so its id is not a chronological
+        position. Treating it as one made the frontier jump forward and then back, skipping a
+        row that was still active (round-4 verify-2 #3).
+        """
+        wanted = {int(value) for value in store_ids or []}
+        if not wanted:
+            return {}
+        found: Dict[int, int] = {}
+        batch = _SQLITE_MAX_BOUND_VARIABLES - 2
+        ordered = sorted(wanted)
+        for start in range(0, len(ordered), batch):
+            chunk = ordered[start:start + batch]
+            placeholders = ",".join("?" * len(chunk))
+            rows = self._conn.execute(
+                f"""SELECT store_id, envelope_extra FROM messages
+                    WHERE session_id = ? AND store_id IN ({placeholders})
+                      AND envelope_extra LIKE ?""",
+                [session_id, *chunk, f"%{REVISION_SUPERSEDES_KEY}%"],
+            ).fetchall()
+            for store_id, envelope_extra in rows:
+                try:
+                    envelope = json.loads(envelope_extra or "{}")
+                except (TypeError, ValueError):
+                    continue
+                superseded = int(envelope.get(REVISION_SUPERSEDES_KEY) or 0)
+                if superseded:
+                    found[int(store_id)] = superseded
+        return found
+
     def revision_rows_for(self, session_id: str, store_ids: List[int]) -> List[int]:
         """fork: betterlcm — archived corrections that supersede any of these rows.
 
