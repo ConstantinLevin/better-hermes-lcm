@@ -602,15 +602,12 @@ def test_apply_import_routes_oversized_payloads_through_ingest_protection(tmp_pa
         "SELECT content FROM messages WHERE role = 'user' ORDER BY store_id LIMIT 1"
     ).fetchone()[0]
     db.close()
-    assert content.startswith("[Externalized payload: kind=raw_payload;")
-    assert "IMPORT_RAW_NEEDLE" not in content
-
-    payload_files = list(externalized_dir.glob("*.json"))
-    assert len(payload_files) == 1
-    payload = json.loads(payload_files[0].read_text())
-    assert payload["kind"] == "raw_payload"
-    assert payload["session_id"] == "openclaw-lcm:agent:sammy:runtime-session-1"
-    assert payload["content"] == large_content
+    # fork: better-hermeslcm — ingest-side externalization is retired, so an imported oversized
+    # body is stored WHOLE instead of being replaced by a ref to a file. That is the better
+    # outcome for an import: the archive holds what the source held.
+    assert content == large_content
+    assert "IMPORT_RAW_NEEDLE" in content
+    assert list(externalized_dir.glob("*.json")) == []
 
 
 def test_apply_imports_messages_with_provenance_backup_and_search(tmp_path: Path):

@@ -749,72 +749,17 @@ def _bound_operator_strings(value: Any) -> tuple[Any, int]:
 
 
 def _bounded_inspect_json(response: dict[str, Any]) -> str:
-    """Serialize ``lcm_inspect`` under one final response-size invariant."""
-    payload, truncated_fields = _bound_operator_strings(response)
-    rollup_truncated_fields = (
-        (payload.get("temporal_rollups") or {}).get("truncated_fields") or []
-    )
-    total_truncated_fields = truncated_fields + len(rollup_truncated_fields)
-    payload["char_limit"] = _scaled_cap(_LCM_INSPECT_MAX_RESPONSE_CHARS)
-    payload["truncated"] = bool(total_truncated_fields)
-    if total_truncated_fields:
-        payload["truncated_field_count"] = total_truncated_fields
-    encoded = json.dumps(payload, ensure_ascii=False)
-    if len(encoded) <= _scaled_cap(_LCM_INSPECT_MAX_RESPONSE_CHARS):
-        return encoded
+    """Serialize ``lcm_inspect`` whole.
 
-    # If cardinality rather than one text field exceeds the cap, keep whole
-    # top-level sections in a deterministic priority order.  Never cut encoded
-    # JSON mid-token; omitted sections are reported explicitly.
-    priority = [
-        "read_only",
-        "session_id",
-        "conversation_id",
-        "limit",
-        "temporal_rollups",
-        "runtime_identity",
-        "lineage",
-        "messages",
-        "compaction",
-        "dag",
-        "externalized_refs",
-        "ingest_protection",
-        "filters",
-        "limit_clamped_from",
-    ]
-    compact: dict[str, Any] = {
-        "char_limit": _scaled_cap(_LCM_INSPECT_MAX_RESPONSE_CHARS),
-        "truncated": True,
-        "truncation": {
-            "reason": "response_char_limit",
-            "omitted_top_level_sections": [],
-        },
-    }
-    if total_truncated_fields:
-        compact["truncated_field_count"] = total_truncated_fields
-    retained: list[str] = []
-    omitted: list[str] = []
-    ordered_keys = priority + [key for key in payload if key not in priority]
-    for key in dict.fromkeys(ordered_keys):
-        if key in {"char_limit", "truncated", "truncated_field_count"}:
-            continue
-        if key not in payload:
-            continue
-        compact[key] = payload[key]
-        if len(json.dumps(compact, ensure_ascii=False)) <= _scaled_cap(_LCM_INSPECT_MAX_RESPONSE_CHARS) - 1_000:
-            retained.append(key)
-        else:
-            compact.pop(key)
-            omitted.append(key)
-    compact["truncation"]["omitted_top_level_sections"] = omitted
-    encoded = json.dumps(compact, ensure_ascii=False)
-    while len(encoded) > _scaled_cap(_LCM_INSPECT_MAX_RESPONSE_CHARS) and retained:
-        key = retained.pop()
-        compact.pop(key, None)
-        omitted.append(key)
-        compact["truncation"]["omitted_top_level_sections"] = omitted
-        encoded = json.dumps(compact, ensure_ascii=False)
-    return encoded
+    fork: better-hermeslcm — no response char cap and no field-level cut. Every free-text field
+    used to be chopped to 1,000 characters with a bare "..." — no marker naming what went, no
+    way to get it back — and the whole response was then capped again, dropping top-level
+    sections. `lcm_inspect` is the diagnostic that tells an operator what the engine is doing;
+    cutting its output is how a diagnostic starts lying. The caller bounds the result with
+    `limit`, and if a response is genuinely enormous the host spills an oversized tool result to
+    a file, which is the host's job and already works.
+    """
+    return json.dumps(response, ensure_ascii=False)
 
 
 def _compute_stage(
@@ -2901,37 +2846,22 @@ def _bounded_recent_json(response: dict[str, Any], sections: list[dict[str, Any]
         ]
         return json.dumps(response, ensure_ascii=False)
 
+    # fork: better-hermeslcm — NO response char cap, and no cutting inside a section.
+    #
+    # This used to binary-search a section's content string down until the encoded response fit
+    # a character cap, then set a bare `content_truncated: true` — no cursor, no next offset, no
+    # pointer to the call that returns the rest. The string being cut is a leaf SUMMARY, an
+    # index entry, which is the same cut removed from `node_meta.extract_index_block`.
+    #
+    # It should not be a cap at all. The caller already says how much it wants through `limit`,
+    # so trimming below that is the plugin overriding the agent; and if a response really is
+    # enormous, the HOST spills an oversized tool result to a file and the agent reads what it
+    # needs — a mechanism that already exists and works, which we were duplicating and doing
+    # worse. Sections are returned whole; `returned_sections` vs `total_sections` says whether
+    # `limit` held anything back.
     for section in sections:
         response["sections"].append(section)
         response["returned_sections"] = len(response["sections"])
-        if len(encode()) <= _scaled_cap(_LCM_RECENT_MAX_RESPONSE_CHARS):
-            continue
-
-        response["sections"].pop()
-        response["returned_sections"] = len(response["sections"])
-        content = str(section.get("content") or "")
-        low, high = 0, len(content)
-        best: dict[str, Any] | None = None
-        while low <= high:
-            midpoint = (low + high) // 2
-            candidate = dict(section)
-            candidate["content"] = content[:midpoint]
-            candidate["content_truncated"] = midpoint < len(content)
-            response["sections"].append(candidate)
-            response["returned_sections"] = len(response["sections"])
-            fits = len(encode()) <= _scaled_cap(_LCM_RECENT_MAX_RESPONSE_CHARS)
-            response["sections"].pop()
-            response["returned_sections"] = len(response["sections"])
-            if fits:
-                best = candidate
-                low = midpoint + 1
-            else:
-                high = midpoint - 1
-        if best is not None:
-            response["sections"].append(best)
-            response["returned_sections"] = len(response["sections"])
-        response["truncated"] = True
-        break
 
     if response["returned_sections"] < response["total_sections"]:
         response["truncated"] = True
@@ -2939,10 +2869,28 @@ def _bounded_recent_json(response: dict[str, Any], sections: list[dict[str, Any]
 
 
 def lcm_recent(args: Dict[str, Any], **kwargs) -> str:
-    """Serve conversation rollups or fall back; cross-session rollups are future work."""
+    """Serve conversation rollups; disabled unless the rollup subsystem is on."""
     engine = _require_engine(kwargs)
     if engine is None:
         return json.dumps({"error": "LCM engine not initialized"})
+
+    # fork: better-hermeslcm — this is the front end for the TEMPORAL ROLLUP subsystem, which is
+    # opt-in and off by default. With rollups on it serves purpose-built period summaries. With
+    # them off it silently degrades to "fetch the leaf summaries overlapping this time window",
+    # which bypasses the index instead of using it: the summaries in the prefix exist to show
+    # where to expand, you expand until you reach the leaf you need, and anything never expanded
+    # was not relevant. If that bypass is ever genuinely needed, the index has failed and the
+    # index is what to fix. So the tool answers `status: disabled` unless its subsystem is
+    # running, exactly like `lcm_query_state` does.
+    if not getattr(engine._config, "temporal_rollups_enabled", False):
+        return json.dumps({
+            "status": "disabled",
+            "error": (
+                "temporal rollups are not enabled for this profile; the summaries in the "
+                "active context show where to expand, and lcm_describe / lcm_expand reach "
+                "any node from there"
+            ),
+        })
 
     try:
         window = parse_recent_period(args.get("period"))

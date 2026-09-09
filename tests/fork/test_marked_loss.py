@@ -880,6 +880,7 @@ def test_recent_reports_an_unscannable_window_instead_of_an_empty_one(tmp_path, 
     e = _engine(tmp_path, "recent.db")
     try:
         e.on_session_start("r", platform="cli", context_length=200_000)
+        e._config.temporal_rollups_enabled = True  # the leaf fallback lives inside the subsystem
         monkeypatch.setattr(lcm_tools, "_recent_leaf_sections",
                             lambda *a, **k: (_ for _ in ()).throw(
                                 lcm_tools._RecentIncomplete("more than 4096 summaries match")))
@@ -1008,6 +1009,7 @@ def test_recent_reports_a_real_work_cap_hit_not_an_empty_window(tmp_path):
     e = _engine(tmp_path, "recentcap.db", incremental_max_depth=0)
     try:
         e.on_session_start("rc", platform="cli", context_length=200_000)
+        e._config.temporal_rollups_enabled = True  # the leaf fallback lives inside the subsystem
         cap = lcm_tools._LCM_RECENT_FRONTIER_WORK_LIMIT
         now = time.time()
         nodes = [
@@ -1089,6 +1091,7 @@ def test_recent_says_the_database_was_unavailable_instead_of_empty(tmp_path):
     e = _engine(tmp_path, "closeddag.db")
     try:
         e.on_session_start("cd", platform="cli", context_length=200_000)
+        e._config.temporal_rollups_enabled = True  # the leaf fallback lives inside the subsystem
         e._dag.close()
         payload = json.loads(lcm_tools.lcm_recent({"period": "today"}, engine=e))
         assert payload["complete"] is False
@@ -1263,7 +1266,7 @@ def test_recent_counts_the_window_before_the_display_limit(tmp_path, monkeypatch
     e = _engine(tmp_path, "recentcount.db", incremental_max_depth=0)
     try:
         e.on_session_start("rn", platform="cli", context_length=200_000)
-        e._config.temporal_rollups_enabled = False
+        e._config.temporal_rollups_enabled = True  # the leaf fallback lives inside the subsystem
         now = time.time()
         for index in range(11):
             e._dag.add_node(SummaryNode(

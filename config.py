@@ -13,6 +13,16 @@ except Exception:  # pragma: no cover - optional fallback for minimal installs
 
 logger = logging.getLogger(__name__)
 
+# fork: better-hermeslcm — levers that are not levers. Each of these can only be switched into a
+# violation of the fork's own rules, so a value from the environment or a config file is refused
+# rather than honoured, and the operator is told why instead of being silently overridden. See
+# the field comments on LCMConfig for the reasoning behind each.
+FORCED_OFF_LEVERS: dict[str, object] = {
+    "large_output_externalization_enabled": False,
+    "large_output_active_replay_stubbing_enabled": False,
+    "tool_response_char_scale": 0.0,
+}
+
 
 def _parse_pattern_list(raw: str) -> list[str]:
     return [part.strip() for part in raw.split(",") if part.strip()]
@@ -580,18 +590,32 @@ class LCMConfig:
     # Diagnostics: where the sensitive pattern list came from.
     sensitive_patterns_source: str = "default"
 
-    # -- Large tool-output externalization ---
-    # When enabled, oversized tool results are written to plugin-managed storage
-    # and replaced with compact references in pre-compaction serializer input.
+    # -- Large tool-output externalization — RETIRED, always off ---
+    #
+    # fork: better-hermeslcm — this is not a setting any more. Upstream writes an oversized tool
+    # result to plugin-managed storage and replaces it with a compact ref in the serializer
+    # input. Two reasons that is wrong here:
+    #
+    #   1. The HOST already spills oversized tool output to its own directory, leaves a
+    #      <persisted-output> marker in the transcript, and lets the agent read the file. We
+    #      swallow what the host gives us; doing our own spillover on top duplicates a mechanism
+    #      that already works. (Our archival duty for it is
+    #      `persisted_output_recovery_copy_enabled`, which is on and stays on, because the
+    #      host's copy expires after 24 hours.)
+    #   2. Externalizing an inline body puts a reference into the replay that the agent never
+    #      saw. The active context is supposed to be what happened, not a version of it we
+    #      invented.
+    #
+    # A setting that must never be turned on is not a setting, so this is forced False rather
+    # than left as a default an operator can flip into a doctrine violation. The code path is
+    # kept for now rather than ripped out; see `_retire_forced_off_levers`.
     large_output_externalization_enabled: bool = False
     # Character threshold above which tool results are externalized.
     large_output_externalization_threshold_chars: int = 12_000
     # Explicit storage directory for externalized payloads (empty = auto under hermes home).
     large_output_externalization_path: str = ""
-    # Replace eligible textual tool results with durable compact refs in
-    # provider-visible replay. Current-turn ingest is intercepted immediately;
-    # historical assembly separately respects the protected fresh tail. This
-    # remains opt-in and requires large-output externalization.
+    # RETIRED, always off (fork: better-hermeslcm). Replaces textual tool results with durable
+    # refs in provider-visible replay, and requires the externalization above, which is retired.
     large_output_active_replay_stubbing_enabled: bool = False
     # Token-aware active-replay threshold. The character threshold above still
     # controls ordinary ingest externalization; this threshold controls when a
@@ -835,7 +859,10 @@ class LCMConfig:
     condense_group_cap: int = 0               # condensation groups per compress() (0 = curve)
     serialize_message_max_chars: int = 0      # pre-summariser per-message cap (chars)
     expand_page_tokens: int = 0               # lcm_expand default page size
-    tool_response_char_scale: float = 0.0     # multiplier on tool response char caps
+    # RETIRED, always 0 (fork: better-hermeslcm). It scaled the retrieval tools' response
+    # character caps, and those caps are gone: `limit` is the caller's bound, and an oversized
+    # response is the host's spillover problem. Nothing reads it any more.
+    tool_response_char_scale: float = 0.0
     sqlite_cache_kib: int = 0                 # SQLite cache_size (KiB) for lcm.db
     token_cache_size: int = 0                 # tokens.py lru_cache size
     # Cooldown armed when every summariser route fails (replaces upstream's silent L3
@@ -970,4 +997,18 @@ class LCMConfig:
 
         c.config_sources = config_sources
         c.config_source_warnings = config_source_warnings
+        c._retire_forced_off_levers(config_source_warnings)
         return c
+
+    def _retire_forced_off_levers(self, warnings: list[str] | None = None) -> None:
+        for field, forced in FORCED_OFF_LEVERS.items():
+            if getattr(self, field, forced) == forced:
+                continue
+            setattr(self, field, forced)
+            message = (
+                f"LCM: {field} is retired in this fork and stays {forced!r}; the configured "
+                "value is ignored (see the field comment in config.py for why)"
+            )
+            if warnings is not None:
+                warnings.append(message)
+            logger.warning(message)

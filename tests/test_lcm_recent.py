@@ -232,7 +232,6 @@ def test_lcm_recent_fallback_includes_retained_higher_depth_summary(recent_parts
     # must be returned by the leaf fallback, not only depth-0 leaves
     # (maintainer #389 blocker 2).
     engine, _store = recent_parts
-    engine._config.temporal_rollups_enabled = False  # force the fallback path
     scope = engine.current_session_id
     content_time = _timestamp(date(2026, 7, 15))
     source_id = _add_leaf(
@@ -263,7 +262,11 @@ def test_lcm_recent_fallback_includes_retained_higher_depth_summary(recent_parts
     assert retained_id in returned_ids
 
 
-def test_lcm_recent_disabled_flag_falls_back_even_when_ready(recent_parts):
+def test_lcm_recent_is_disabled_without_its_subsystem(recent_parts):
+    """fork: better-hermeslcm — with rollups off this used to degrade to "fetch the leaf
+    summaries overlapping this window", which bypasses the index instead of using it. The
+    summaries in the prefix exist to show where to expand; anything never expanded was not
+    relevant. So the tool answers `status: disabled`, like `lcm_query_state` does."""
     engine, store = recent_parts
     engine._config.temporal_rollups_enabled = False
     _add_leaf(engine._dag, engine.current_session_id, date(2026, 7, 15), "flag-off leaf")
@@ -271,9 +274,8 @@ def test_lcm_recent_disabled_flag_falls_back_even_when_ready(recent_parts):
 
     result = json.loads(lcm_recent({"period": "date:2026-07-15"}, engine=engine))
 
-    assert result["fallback_reason"] == "temporal_rollups_disabled"
-    assert result["provenance"]["fallback"] is True
-    assert result["sections"][0]["kind"] == "leaf_summary"
+    assert result["status"] == "disabled"
+    assert "lcm_describe" in result["error"] and "lcm_expand" in result["error"]
 
 
 def test_lcm_recent_subday_window_always_falls_back(recent_parts):
@@ -305,9 +307,8 @@ def test_lcm_recent_empty_window_is_a_successful_empty_fallback(recent_parts):
     assert result["returned_sections"] == 0
 
 
-def test_lcm_recent_limit_order_and_response_char_bound(recent_parts):
+def test_lcm_recent_returns_whole_sections_bounded_only_by_limit(recent_parts):
     engine, _store = recent_parts
-    engine._config.temporal_rollups_enabled = False
     target_day = date(2026, 7, 15)
     _add_leaf(engine._dag, engine.current_session_id, target_day, "older " * 6000, timestamp=_timestamp(target_day, 8))
     newest_id = _add_leaf(
@@ -322,14 +323,20 @@ def test_lcm_recent_limit_order_and_response_char_bound(recent_parts):
     raw = lcm_recent({"period": "date:2026-07-15", "limit": 2}, engine=engine)
     result = json.loads(raw)
 
-    assert len(raw) <= 20_000
-    # fork: better-hermeslcm — total_sections is what the WINDOW holds (3), not what the display limit
-    # kept. Counting after the limit made "11 sections, limit 10" report 10 with
-    # truncated=false: a window that reads as fully shown (round-2 verify-3 #9).
+    # fork: better-hermeslcm — no response char cap. The section content is a leaf SUMMARY, an
+    # index entry, and the old cap binary-searched it down to fit and set a bare
+    # content_truncated with no cursor. `limit` is the caller's own bound; an oversized response
+    # is the host's spillover problem, which the host already solves.
+    for section in result["sections"]:
+        assert not section.get("content_truncated"), "a section is returned whole or not at all"
+    assert "older " * 6000 in raw or "newer " * 6000 in raw
+    # total_sections is what the WINDOW holds (3), not what the display limit kept. Counting
+    # after the limit made "11 sections, limit 10" report 10 with truncated=false: a window that
+    # reads as fully shown (round-2 verify-3 #9).
     assert result["total_sections"] == 3
-    assert len(result["sections"]) <= 2
+    assert len(result["sections"]) == 2
     assert result["sections"][0]["node_id"] == newest_id
-    assert result["truncated"] is True
+    assert result["truncated"] is True  # limit held one back
 
 
 def test_lcm_recent_conversation_scope_reports_clamped_limit(recent_parts):
@@ -413,7 +420,6 @@ def test_recent_fallback_suppresses_child_covered_by_overlapping_parent(recent_p
     # suppress the child (contained by an overlapping selected parent) so the
     # limit is not consumed twice.
     engine, _store = recent_parts
-    engine._config.temporal_rollups_enabled = False  # force the leaf fallback
     scope = engine.current_session_id
     day = date(2026, 7, 15)
     content_time = _timestamp(day)
@@ -451,7 +457,6 @@ def test_recent_fallback_suppresses_transitive_child_when_parent_not_selected(
     recent_parts,
 ):
     engine, _store = recent_parts
-    engine._config.temporal_rollups_enabled = False
     scope = engine.current_session_id
     day = date(2026, 7, 15)
     content_time = _timestamp(day)
@@ -498,7 +503,6 @@ def test_recent_fallback_suppresses_transitive_child_when_parent_not_selected(
 
 def test_recent_fallback_collapses_identical_sibling_lineage(recent_parts):
     engine, _store = recent_parts
-    engine._config.temporal_rollups_enabled = False
     scope = engine.current_session_id
     day = date(2026, 7, 15)
     content_time = _timestamp(day)
@@ -533,7 +537,6 @@ def test_recent_fallback_collapses_identical_sibling_lineage(recent_parts):
 
 def test_recent_fallback_fails_closed_on_partial_lineage_overlap(recent_parts):
     engine, _store = recent_parts
-    engine._config.temporal_rollups_enabled = False
     scope = engine.current_session_id
     day = date(2026, 7, 15)
     content_time = _timestamp(day)
@@ -603,7 +606,6 @@ def test_recent_fallback_includes_summary_overlapping_window_edge(recent_parts):
     # this day's content; overlap-based filtering must return it where the old
     # latest_at-only filter dropped it (maintainer #389 blocker: overlap).
     engine, _store = recent_parts
-    engine._config.temporal_rollups_enabled = False  # force the leaf fallback
     scope = engine.current_session_id
     day = date(2026, 7, 15)
     spanning_id = engine._dag.add_node(
@@ -631,7 +633,6 @@ def test_recent_fallback_candidate_work_is_sql_bounded(recent_parts, monkeypatch
     # truncating.  The SQL query now fetches at most the work cap plus one
     # sentinel and returns no potentially non-canonical partial frontier.
     engine, _store = recent_parts
-    engine._config.temporal_rollups_enabled = False
     scope = engine.current_session_id
     content_time = _timestamp(date(2026, 7, 15))
     rows = [

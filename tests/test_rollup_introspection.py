@@ -380,9 +380,11 @@ def test_rollup_operator_surfaces_bound_adversarial_error_text(engine):
     assert len(slash) <= 20_000
     assert "truncated: true" in slash
     assert "truncated_fields: last_error" in slash
-    assert len(inspect_raw) <= 20_000
-    assert inspect["char_limit"] == 20_000
-    assert inspect["truncated"] is True
+    # fork: better-hermeslcm — lcm_inspect no longer caps its own response or cuts free-text
+    # fields; a diagnostic that trims itself is a diagnostic that lies. The bound this test
+    # exercises is the ROLLUP payload's own, which is a different surface (opt-in subsystem,
+    # and its missing continuation is a known open item).
+    assert "char_limit" not in inspect
     assert inspect["temporal_rollups"]["truncated_fields"] == ["last_error"]
     assert len(inspect["temporal_rollups"]["last_error"]) <= 1_000
 

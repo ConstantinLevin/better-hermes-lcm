@@ -811,10 +811,15 @@ class TestConfig:
         assert c.sensitive_patterns_enabled is True
         assert c.sensitive_patterns == ["api_key", "bearer_token"]
         assert c.sensitive_patterns_source == "env"
-        assert c.large_output_externalization_enabled is True
+        # fork: better-hermeslcm — these two are retired: the host already spills oversized tool
+        # output, and externalizing an inline body puts a ref in the replay the agent never saw.
+        # A configured value is refused and the operator is told, not silently honoured.
+        assert c.large_output_externalization_enabled is False
+        assert any("large_output_externalization_enabled is retired" in w
+                   for w in c.config_source_warnings)
         assert c.large_output_externalization_threshold_chars == 4096
         assert c.large_output_externalization_path == "/tmp/lcm-large-outputs"
-        assert c.large_output_active_replay_stubbing_enabled is True
+        assert c.large_output_active_replay_stubbing_enabled is False
         assert c.large_output_active_replay_stub_threshold_tokens == 8192
         assert c.large_output_transcript_gc_enabled is True
 
