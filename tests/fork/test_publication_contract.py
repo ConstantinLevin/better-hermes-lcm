@@ -416,3 +416,54 @@ def test_a_late_session_end_stores_under_the_session_that_ended(tmp_path):
         assert e.current_session_id == "new", "the binding is restored"
     finally:
         e.shutdown()
+
+
+def test_a_rebind_after_publication_does_not_hand_the_new_session_old_context(tmp_path):
+    """round-3 verify-2 #3 / verify-4 #1: the fence guarded publication, but a rebind landing
+    between publication and the caller receiving the result handed the NEW session the old
+    session's summaries and cursor."""
+    from hermes_lcm import escalation
+    cfg = LCMConfig(database_path=str(tmp_path / "assemblyfence.db"), fresh_tail_count=1,
+                    leaf_chunk_tokens=10, incremental_max_depth=0)
+    e = LCMEngine(config=cfg, hermes_home=str(tmp_path))
+    try:
+        e.on_session_start("old", platform="cli", context_length=200_000)
+        e.threshold_tokens = 1
+        e._resolve_window_scaled_settings()
+        messages = [
+            {"role": "user", "content": "u" * 400},
+            {"role": "assistant", "content": "a" * 400},
+            {"role": "user", "content": "the newest turn"},
+        ]
+        e._ingest_messages(messages)
+        e._store.commit()
+
+        original = escalation._call_llm_for_summary
+        escalation._call_llm_for_summary = (
+            lambda *a, **k: "a summary\nExpand for details about: it"
+        )
+        real_publish = e._dag.add_node_with_meta
+        state = {"rebound": False}
+
+        def publish_then_rebind(*args, **kwargs):
+            node_id = real_publish(*args, **kwargs)
+            if not state["rebound"]:
+                state["rebound"] = True
+                # the publication itself is fenced; this lands immediately AFTER it, while the
+                # result is still being assembled
+                e._publication_generation = int(
+                    getattr(e, "_publication_generation", 0)
+                ) + 1
+            return node_id
+
+        e._dag.add_node_with_meta = publish_then_rebind
+        try:
+            returned = e.compress(list(messages), current_tokens=400_000)
+        finally:
+            escalation._call_llm_for_summary = original
+            e._dag.add_node_with_meta = real_publish
+
+        assert returned == messages, "stale assembled context was handed to the caller"
+        assert e._last_compression_status in {"noop", "sanitized"}
+    finally:
+        e.shutdown()

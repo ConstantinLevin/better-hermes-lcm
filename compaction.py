@@ -1479,6 +1479,23 @@ class CompactionMixin:
         logger.info(
             "LCM leaf compaction finished in %.1fms", self._last_compaction_duration_ms
         )
+        # fork: betterlcm — the assembled context belongs to the session it was built from. A
+        # rebind that lands after publication but before the caller receives the result would
+        # hand the NEW session the old session's summaries and cursor (round-3 verify-2 #3 /
+        # verify-4 #1). The publication itself is already fenced under the lock; here the fence
+        # is re-checked, and stale work is returned as an unchanged context instead.
+        with self._publication_lock:
+            if self._publication_fence() != leaf_fence:
+                logger.warning(
+                    "LCM discarding an assembled context built for %s#%s: the session is now "
+                    "%s#%s",
+                    leaf_fence[0], leaf_fence[1], *self._publication_fence(),
+                )
+                self._last_compression_status = "noop"
+                self._last_compression_noop_reason = (
+                    "the session was rebound while this compaction was assembling its result"
+                )
+                return messages
         self._last_compression_status = "compacted"
         self._last_compression_noop_reason = ""
         if recovery_assembly_cap is None:
