@@ -1533,3 +1533,27 @@ def test_a_bounded_assembly_counts_every_message_it_left_behind(tmp_path):
         assert "THE LATEST REQUEST" in recovered_text, recovered
     finally:
         e.shutdown()
+
+
+def test_expansion_synthesis_reports_an_unreadable_source(tmp_path, monkeypatch):
+    """round-3 verify-4 #12: a selected summary whose only source was a nonexistent row
+    produced complete=true with no error inventory — the missing-source pagination was dropped
+    because no message survived to carry it."""
+    import json
+    from hermes_lcm import tools as lcm_tools
+    e = _engine(tmp_path, "synthmissing.db", incremental_max_depth=0)
+    try:
+        e.on_session_start("sm", platform="cli", context_length=200_000)
+        node_id = e._dag.add_node_with_meta(SummaryNode(
+            session_id="sm", depth=0, summary="a summary of a row that is gone",
+            token_count=8, source_token_count=50, source_ids=[999_999],
+            source_type="messages", created_at=time.time()), level=1)
+        monkeypatch.setattr(lcm_tools, "_synthesize_expansion_answer",
+                            lambda **kwargs: "an answer")
+        lcm_tools._LAST_SYNTHESIS_STATUS.unfinished = ""
+        payload = json.loads(lcm_tools.lcm_expand_query(
+            {"prompt": "what happened?", "node_ids": [node_id]}, engine=e))
+        assert payload["complete"] is False, payload
+        assert payload["missing_source_store_ids"] == [999999], payload
+    finally:
+        e.shutdown()

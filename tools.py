@@ -1872,6 +1872,20 @@ def _collect_descendant_evidence_blocks(
     return blocks
 
 
+def _search_reporting_progress(search, query: str, *, progress: Dict[str, Any], **kwargs):
+    """fork: betterlcm — call a search that reports completeness, tolerating one that cannot.
+
+    Host wrappers and test doubles replace these callables; a search that does not accept
+    ``progress`` simply reports nothing, and the caller treats "no report" as "unknown" rather
+    than as "complete" (round-3 verify-4 #12).
+    """
+    try:
+        return search(query, progress=progress, **kwargs)
+    except TypeError:
+        progress.clear()
+        return search(query, **kwargs)
+
+
 def _collect_context_blocks_for_node(
     engine: "LCMEngine",
     node,
@@ -1903,7 +1917,15 @@ def _collect_context_blocks_for_node(
             max_tokens=remaining_tokens,
             hydrate_externalized_content=hydrate_externalized_content,
         )
-        if messages or pagination.get("has_more"):
+        # fork: betterlcm — an EMPTY page whose pagination says sources are missing or the
+        # payload is corrupt must still be reported; dropping the block when no message
+        # survived certified a node whose only source was unreadable as complete
+        # (round-3 verify-4 #12).
+        if (
+            messages
+            or pagination.get("has_more")
+            or pagination.get("complete") is False
+        ):
             block = {
                 "type": "messages",
                 "node_id": node.node_id,
@@ -6206,6 +6228,8 @@ def lcm_expand_query(args: Dict[str, Any], **kwargs) -> str:
     # (round-2 verify-4 #24).
     missing_node_ids: list[int] = []
     unresolved_nodes: list[dict[str, Any]] = []
+    search_incompleteness: list[dict[str, Any]] = []  # fork: round-3 verify-4 #12
+    more_results_beyond_limit: list[str] = []
     if raw_node_ids:
         for node_id in raw_node_ids:
             try:
@@ -6224,8 +6248,28 @@ def lcm_expand_query(args: Dict[str, Any], **kwargs) -> str:
             else:
                 missing_node_ids.append(parsed_node_id)
     elif query:
-        nodes = engine._dag.search(query, session_id=engine.current_session_id, limit=max_results)
-        raw_results = engine._store.search(query, session_id=engine.current_session_id, limit=max_results)
+        # fork: betterlcm — ask BOTH searches how exhaustive they were; query mode reported
+        # complete:true over a capped or degraded scan (round-3 verify-4 #12).
+        node_progress: Dict[str, Any] = {}
+        message_progress: Dict[str, Any] = {}
+        nodes = _search_reporting_progress(
+            engine._dag.search, query, session_id=engine.current_session_id,
+            limit=max_results, progress=node_progress,
+        )
+        raw_results = _search_reporting_progress(
+            engine._store.search, query, session_id=engine.current_session_id,
+            limit=max_results, progress=message_progress,
+        )
+        for scan_name, scan in (("summaries", node_progress), ("messages", message_progress)):
+            if scan.get("complete") is False:
+                search_incompleteness.append({
+                    "source": scan_name,
+                    "scanned_rows": int(scan.get("scanned_rows") or 0),
+                    "candidate_cap": int(scan.get("candidate_cap") or 0),
+                    "work_capped": bool(scan.get("work_capped")),
+                })
+            elif scan.get("more_available"):
+                more_results_beyond_limit.append(scan_name)
     else:
         return json.dumps({"error": "Provide either query or node_ids"})
 
@@ -6466,9 +6510,27 @@ def lcm_expand_query(args: Dict[str, Any], **kwargs) -> str:
     if answer_unfinished:
         payload["answer_truncated"] = True
         payload["answer_truncated_reason"] = answer_unfinished
+    if search_incompleteness:
+        payload["bounded_scans"] = search_incompleteness
+    if more_results_beyond_limit:
+        payload["more_results_available_in"] = sorted(set(more_results_beyond_limit))
+    # fork: betterlcm — a source row this answer could not read makes the answer incomplete,
+    # however the blocks were shaped (round-3 verify-4 #12)
+    unreadable_sources = [
+        block.get("pagination", {}).get("missing_source_store_ids")
+        for block in context_blocks
+        if isinstance(block, dict)
+        and isinstance(block.get("pagination"), dict)
+        and block["pagination"].get("missing_source_store_ids")
+    ]
+    if unreadable_sources:
+        payload["missing_source_store_ids"] = sorted(
+            {int(value) for ids in unreadable_sources for value in ids}
+        )
     payload["complete"] = not (
         missing_node_ids or unresolved_nodes or unprocessed_node_ids
         or answer_unfinished or context_truncated
+        or search_incompleteness or unreadable_sources
     )
     return json.dumps(payload)
 
