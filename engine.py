@@ -3874,8 +3874,16 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                     raise
 
                 try:
+                    # fork: betterlcm — the ENDED session's own conversation, not whatever the
+                    # engine is bound to now. A late callback finalized "old" under the NEW
+                    # conversation, so lifecycle recovery found a finalization record belonging
+                    # to another conversation (round-4 verify-4 #5).
+                    ended_conversation = (
+                        self._lcm_session_last_normal_conversation_id.get(session_id)
+                        or (self._conversation_id if session_id == self._session_id else session_id)
+                    )
                     self._lifecycle.finalize_session(
-                        self._conversation_id,
+                        ended_conversation,
                         session_id,
                         frontier_store_id=self._last_compacted_store_id,
                     )

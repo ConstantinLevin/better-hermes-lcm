@@ -9,6 +9,7 @@ row identity (`store_id`) for DAG/source lookup.
 """
 
 
+import hashlib
 import json
 import logging
 import math
@@ -131,6 +132,19 @@ def message_envelope_fingerprint(msg: Dict[str, Any]) -> str:
         "role": str(msg.get("role") or ""),
         "content": _normalize_content_value(msg.get("content")) or "",
         "tool_calls": msg.get("tool_calls") or None,
+        # fork: betterlcm — the projected columns are part of the envelope's identity too:
+        # changing only the call id, the tool name or the timestamp produced an identical
+        # fingerprint and the edit was never archived (round-4 verify-4 #2).
+        "tool_call_id": str(msg.get("tool_call_id") or ""),
+        "tool_name": str(msg.get("tool_name") or msg.get("name") or ""),
+        # The stored row's "timestamp" column is the INGEST time, which an incoming message
+        # never carries; the host's own time is "observed_at" there. Compare like for like, or
+        # every stored row differs from every incoming one (round-4 verify-4 #2).
+        "timestamp": str(
+            _normalize_observed_at(
+                msg.get("observed_at") if "store_id" in (msg or {}) else msg.get("timestamp")
+            ) or ""
+        ),
         "envelope": envelope,
     }
     try:
@@ -143,7 +157,12 @@ def host_message_id_of(msg: Dict[str, Any]) -> Optional[str]:
     for key in _HOST_MESSAGE_ID_KEYS:
         value = msg.get(key)
         if isinstance(value, (str, int)) and str(value).strip():
-            return str(value).strip()[:200]
+            text = str(value).strip()
+            if len(text) <= 200:
+                return text
+            # fork: betterlcm — truncating collided two distinct long ids onto one identity
+            # (round-4 verify-4 #2). A digest keeps them apart and stays indexable.
+            return text[:160] + ":" + hashlib.sha256(text.encode("utf-8")).hexdigest()[:32]
     return None
 
 
@@ -1651,6 +1670,25 @@ class MessageStore:
         return found
 
     def revision_rows_for(self, session_id: str, store_ids: List[int]) -> List[int]:
+        """Every correction that supersedes these rows, following CHAINS.
+
+        fork: betterlcm — a correction of a correction was outside every published leaf,
+        because only the direct supersession edge was followed (round-4 verify-4 #3).
+        """
+        seen: set = set()
+        frontier = {int(value) for value in store_ids or []}
+        collected: List[int] = []
+        for _hop in range(16):  # a bounded walk; chains are short in practice
+            direct = self._direct_revision_rows_for(session_id, sorted(frontier))
+            fresh = [store_id for store_id in direct if store_id not in seen]
+            if not fresh:
+                break
+            seen.update(fresh)
+            collected.extend(fresh)
+            frontier = set(fresh)
+        return sorted(set(collected) - {int(value) for value in store_ids or []})
+
+    def _direct_revision_rows_for(self, session_id: str, store_ids: List[int]) -> List[int]:
         """fork: betterlcm — archived corrections that supersede any of these rows.
 
         A correction is stored as its own row, so the leaf covering the original must cover the

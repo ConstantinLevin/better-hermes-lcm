@@ -7,6 +7,7 @@ from datetime import date, datetime, timezone
 from enum import Enum
 from pathlib import Path
 import dataclasses
+import contextlib
 import json
 import math
 import os
@@ -1910,6 +1911,21 @@ def _delete_clean_candidates_atomically(engine, session_ids: set[str]) -> dict[s
             "lifecycle_skipped": 0,
         }
 
+    # fork: betterlcm — cleanup owns the message connection for the whole destructive
+    # transaction. Without the store's write lock, an ordinary append on another thread
+    # committed cleanup's half-finished deletion: the raw rows were gone, cleanup then failed,
+    # and a summary still pointed at them (round-4 verify-4 #4).
+    write_lock = getattr(engine._store, "_write_lock", None)
+    lock_context = write_lock if write_lock is not None else contextlib.nullcontext()
+    with lock_context:
+        return _delete_clean_candidates_in_owned_transaction(
+            engine, session_ids, conn, protected_session_ids
+        )
+
+
+def _delete_clean_candidates_in_owned_transaction(
+    engine, session_ids: set[str], conn, protected_session_ids: set[str]
+) -> dict[str, int]:
     try:
         conn.execute("BEGIN IMMEDIATE")
         SummaryDAG.stage_delete_session_scope(conn, session_ids)

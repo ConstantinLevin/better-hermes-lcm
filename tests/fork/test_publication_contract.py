@@ -552,3 +552,43 @@ def test_a_consumed_revision_row_does_not_move_the_frontier_forward(tmp_path):
         assert e._last_compacted_store_id <= max(chronological)
     finally:
         e.shutdown()
+
+
+def test_a_correction_of_a_correction_is_still_covered(tmp_path):
+    """round-4 verify-4 #3: only the direct supersession edge was followed, so a correction of
+    a correction sat outside every published leaf while the receipt advertised one newer
+    version."""
+    from hermes_lcm.store import MessageStore
+    store = MessageStore(str(tmp_path / "chain.db"))
+    try:
+        original = store.append("s", {"role": "user", "content": "v1"}, source="cli")
+        first = store.append("s", {"role": "user", "content": "v2",
+                                   "lcm_supersedes_store_id": original}, source="cli")
+        second = store.append("s", {"role": "user", "content": "v3",
+                                    "lcm_supersedes_store_id": first}, source="cli")
+        store.commit()
+        assert store.revision_rows_for("s", [original]) == [first, second]
+        assert store.superseded_ids_for("s", [second]) == {second: first}
+    finally:
+        store.close()
+
+
+def test_an_edit_that_changes_only_a_projected_field_is_archived(tmp_path):
+    """round-4 verify-4 #2: the revision fingerprint omitted the projected columns, so changing
+    only a tool_call_id, a tool name or the host's timestamp produced an identical fingerprint
+    and the edit was never archived."""
+    from hermes_lcm.store import message_envelope_fingerprint
+
+    base = {"role": "tool", "content": "result", "tool_call_id": "c1", "message_id": "m1"}
+    assert message_envelope_fingerprint(base) != message_envelope_fingerprint(
+        {**base, "tool_call_id": "c2"})
+    assert message_envelope_fingerprint(base) != message_envelope_fingerprint(
+        {**base, "tool_name": "terminal"})
+    assert message_envelope_fingerprint({**base, "timestamp": 1.0}) != (
+        message_envelope_fingerprint({**base, "timestamp": 2.0}))
+
+    # ... and two long host ids stay distinct
+    from hermes_lcm.store import host_message_id_of
+    long_a = "x" * 250 + "A"
+    long_b = "x" * 250 + "B"
+    assert host_message_id_of({"message_id": long_a}) != host_message_id_of({"message_id": long_b})
