@@ -466,6 +466,19 @@ def acknowledgement_only_marker(content: str) -> str:
     )
 
 
+INTERNAL_REPLAY_MARKER = (
+    "[LCM: this turn's internal reasoning is not replayed to the model; the turn is stored "
+    "whole in the raw store — lcm_recent or lcm_expand it]"
+)
+
+
+def internal_replay_marker_part(structured: bool) -> Any:
+    """The same receipt shaped for a structured content list."""
+    if structured:
+        return {"type": "text", "text": INTERNAL_REPLAY_MARKER}
+    return INTERNAL_REPLAY_MARKER
+
+
 def revision_rows_marker(store_ids: List[int]) -> str:
     """Name archived corrections that supersede rows this node covers.
 

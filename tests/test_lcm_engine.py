@@ -18,6 +18,7 @@ import hermes_lcm.engine as lcm_engine
 import hermes_lcm.tools as lcm_tools
 
 from agent.context_engine import ContextEngine
+from hermes_lcm.marked_loss import INTERNAL_REPLAY_MARKER
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.dag import SummaryNode
 from hermes_lcm.engine import LCMEngine
@@ -10596,7 +10597,8 @@ class TestEngineCompress:
         result = engine.compress(messages)
 
         assert len(result) == len(messages)
-        assert result[-1]["content"] == "Visible answer"
+        # fork: betterlcm — the strip leaves its receipt on the turn it cut
+        assert result[-1]["content"] == f"Visible answer\n{INTERNAL_REPLAY_MARKER}"
         assert engine._last_compression_status == "sanitized"
         assert engine._last_compression_noop_reason == ""
 
@@ -21493,7 +21495,7 @@ class TestAssemblyToolPairGuardrail:
         result = instance._assemble_context(sys_msg, tail_messages)
 
         expected_tool_call_msg = dict(tool_call_msg)
-        expected_tool_call_msg["content"] = ""
+        expected_tool_call_msg["content"] = INTERNAL_REPLAY_MARKER
         assert expected_tool_call_msg in result
         assert tool_result_msg in result
         call_index = result.index(expected_tool_call_msg)
@@ -21720,9 +21722,15 @@ class TestAssemblyToolPairGuardrail:
 
         assert active_context[2] == {
             "role": "assistant",
-            "content": [{"type": "text", "text": "visible final"}],
+            "content": [
+                {"type": "text", "text": "visible final"},
+                {"type": "text", "text": INTERNAL_REPLAY_MARKER},
+            ],
         }
-        assert active_context[3] == {"role": "assistant", "content": "string final"}
+        assert active_context[3] == {
+            "role": "assistant",
+            "content": f"string final\n{INTERNAL_REPLAY_MARKER}",
+        }
         rows = instance._store.get_session_messages("mixed-internal-cleanup-test")
         assert rows[2]["content"] == json.dumps(mixed_content, ensure_ascii=False, sort_keys=True)
         assert rows[3]["content"] == "<think>hidden</think>string final"
@@ -21753,7 +21761,10 @@ class TestAssemblyToolPairGuardrail:
         assert active_context == [
             {"role": "system", "content": "sys"},
             {"role": "user", "content": "question"},
-            {"role": "assistant", "content": [{"type": "text", "text": "visible final"}]},
+            {"role": "assistant", "content": [
+                {"type": "text", "text": "visible final"},
+                {"type": "text", "text": INTERNAL_REPLAY_MARKER},
+            ]},
         ]
         assert first._store.get_session_count(session_id) == 3
         first.shutdown()
@@ -21799,7 +21810,11 @@ class TestAssemblyToolPairGuardrail:
 
         active_context = instance.compress(messages)
 
-        assert active_context[2] == {"role": "assistant", "content": "", "tool_calls": [tool_call]}
+        assert active_context[2] == {
+            "role": "assistant",
+            "content": INTERNAL_REPLAY_MARKER,
+            "tool_calls": [tool_call],
+        }
         assert active_context[3] == {"role": "tool", "tool_call_id": "call_lookup", "content": "result"}
         rows = instance._store.get_session_messages(session_id)
         assert rows[2]["content"] == "<think>hidden</think>"
@@ -21829,7 +21844,7 @@ class TestAssemblyToolPairGuardrail:
         first = LCMEngine(config=config)
         first.on_session_start(session_id, context_length=200000)
         active_context = first.compress(messages)
-        assert active_context[2]["content"] == ""
+        assert active_context[2]["content"] == INTERNAL_REPLAY_MARKER
         assert first._store.get_session_count(session_id) == 4
         first.shutdown()
 
@@ -21969,7 +21984,10 @@ class TestAssemblyToolPairGuardrail:
         active_context = instance.compress(messages)
         rows = instance._store.get_session_messages(session_id)
 
-        assert active_context[2]["content"] == [{"type": "text", "text": "visible final"}]
+        assert active_context[2]["content"] == [
+            {"type": "text", "text": "visible final"},
+            {"type": "text", "text": INTERNAL_REPLAY_MARKER},
+        ]
         assert rows[2]["content"] == json.dumps(mixed_content, ensure_ascii=False, sort_keys=True)
         assert instance._get_store_ids_for_messages([active_context[2]]) == [rows[2]["store_id"]]
 
@@ -21998,7 +22016,7 @@ class TestAssemblyToolPairGuardrail:
         active_context = instance.compress(messages)
         rows = instance._store.get_session_messages(session_id)
 
-        assert active_context[2]["content"] == ""
+        assert active_context[2]["content"] == INTERNAL_REPLAY_MARKER
         assert rows[2]["content"] == "<think>hidden</think>"
         assert instance._get_store_ids_for_messages([active_context[2]]) == [rows[2]["store_id"]]
 

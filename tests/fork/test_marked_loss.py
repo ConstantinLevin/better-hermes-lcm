@@ -204,9 +204,11 @@ def test_assembly_depth_cap_hit_is_marked(tmp_path):
 
 
 def test_an_assistant_turn_dropped_as_internal_only_is_named_in_the_prefix(tmp_path):
-    """Audit p05 SA01: active-context cleanup drops assistant turns whose only content was
+    """Audit p05 SA01: active-context cleanup removed assistant turns whose only content was
     internal/reasoning material. Upstream logged that for the operator; the agent's own view
-    of its history was simply one turn shorter with nothing to say so."""
+    of its history was simply one turn shorter with nothing to say so. The turn now keeps its
+    position and carries the receipt itself; only under assembly budget pressure is it held
+    out, and then the prefix names it."""
     e = _engine(tmp_path, incremental_max_depth=0)
     try:
         tail = [
@@ -216,9 +218,55 @@ def test_an_assistant_turn_dropped_as_internal_only_is_named_in_the_prefix(tmp_p
         ]
         assembled = e._assemble_context(None, tail)
         rendered = "\n".join(str(m.get("content")) for m in assembled)
-        assert "[LCM assembly omissions" in rendered
-        assert "held only internal/reasoning content" in rendered
+        assert marked_loss.INTERNAL_REPLAY_MARKER in rendered
         assert all("internal only" not in str(m.get("content")) for m in assembled)
+        # under budget pressure the receipt-only turn is held out and NAMED instead
+        squeezed = e._assemble_context(None, tail, assembly_cap_override=200)
+        squeezed_text = "\n".join(str(m.get("content")) for m in squeezed)
+        assert "[LCM assembly omissions" in squeezed_text
+        assert "held only internal/reasoning content" in squeezed_text
+    finally:
+        e.shutdown()
+
+
+def test_below_threshold_cleanup_leaves_the_receipt_in_the_returned_context(tmp_path):
+    """The gap this closes: only `_assemble_context` named internal removals.
+
+    Every other path that hands a context back — below-threshold cleanup, bypass trimming,
+    forced overflow recovery — stripped `<think>` and said nothing, so the model saw a turn
+    that silently differed from the row the store holds. The receipt now travels with the
+    turn, which also means it can never displace the caller's newest message.
+    """
+    e = _engine(tmp_path, context_threshold=0.95, fresh_tail_count=10)
+    try:
+        e.on_session_start("marked-session", context_length=200_000)
+        messages = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "what did you decide?"},
+            {"role": "assistant", "content": "<think>DECISION: cancel</think>We cancel."},
+        ]
+        returned = e.compress(messages)
+        assert returned[-1]["content"] == f"We cancel.\n{marked_loss.INTERNAL_REPLAY_MARKER}"
+        assert returned[-2] == {"role": "user", "content": "what did you decide?"}
+        rows = e._store.get_session_messages("marked-session")
+        assert rows[2]["content"] == "<think>DECISION: cancel</think>We cancel."
+    finally:
+        e.shutdown()
+
+
+def test_a_blank_turn_is_dropped_without_claiming_a_removal(tmp_path):
+    """A receipt is a claim that something was removed; an empty turn removes nothing."""
+    e = _engine(tmp_path, context_threshold=0.95, fresh_tail_count=10)
+    try:
+        e.on_session_start("marked-session", context_length=200_000)
+        returned = e.compress([
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": [{"type": "text", "text": ""}]},
+            {"role": "assistant", "content": "hello"},
+        ])
+        rendered = "\n".join(str(m.get("content")) for m in returned)
+        assert marked_loss.INTERNAL_REPLAY_MARKER not in rendered
     finally:
         e.shutdown()
 

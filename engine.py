@@ -111,6 +111,7 @@ from .schemas import (
 )
 from .sanitize import (
     _clean_active_assistant_message,
+    _is_internal_replay_receipt_only,
     _should_drop_active_assistant_message,
 )
 from .session_patterns import (
@@ -6916,6 +6917,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         anchor_part: Optional[str] = None
         summary_budget = None
         omitted_tail_messages = 0  # fork: betterlcm
+        receipt_only_turns = 0  # fork: betterlcm — internal-only turns held out of the budget
         if assembly_cap is not None:
             used = count_message_tokens(leading_msg) if leading_msg is not None else 0
             kept_tail_reversed: list[Dict[str, Any]] = []
@@ -6924,6 +6926,18 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                 assembly_tail_messages,
                 insert_missing_tool_stubs=False,
             )
+            # fork: betterlcm — a turn that is now nothing BUT the internal-removal receipt is
+            # taken out before the budget pass (upstream dropped it in cleanup) and named in
+            # the omission marker below, so a receipt can never displace a live message.
+            receipt_only_turns = sum(
+                1 for message in tail_for_selection
+                if _is_internal_replay_receipt_only(message)
+            )
+            if receipt_only_turns:
+                tail_for_selection = [
+                    message for message in tail_for_selection
+                    if not _is_internal_replay_receipt_only(message)
+                ]
             skipped_tail_gap = False
             # fork: betterlcm — count EVERY message this loop leaves behind. Both `break`s
             # abandoned the whole older remainder without counting it, so a receipt said "1
@@ -7070,7 +7084,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         # fork: betterlcm — whatever was left out is named, so absence from the prefix
         # never reads as absence from history. That includes the assistant turns the
         # active-context cleanup below is about to drop for holding only internal content.
-        dropped_internal_turns = sum(
+        dropped_internal_turns = receipt_only_turns + sum(
             1 for message in tail_selected
             if isinstance(message, dict) and _should_drop_active_assistant_message(message)
         )

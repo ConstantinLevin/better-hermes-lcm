@@ -16,6 +16,7 @@ from __future__ import annotations
 from typing import Any, Dict
 
 from .escalation import _strip_reasoning_blocks
+from .marked_loss import INTERNAL_REPLAY_MARKER, internal_replay_marker_part
 
 
 _VISIBLE_TEXT_PART_TYPES = {"text", "input_text", "output_text"}
@@ -153,21 +154,96 @@ def _sanitize_active_assistant_content(content: Any) -> Any | None:
     return content if str(content).strip() else None
 
 
+def _mark_internal_removal(cleaned_content: Any) -> Any:
+    """fork: betterlcm — say, in the replay itself, that this turn was cut.
+
+    Upstream stripped ``<think>`` (and reasoning/analysis parts) out of the assistant turns it
+    replays and left nothing behind: the model saw a turn that silently differed from the one
+    the store holds. Only ``_assemble_context`` counted the removals, so every other path that
+    returns an active context (below-threshold cleanup, bypass trimming, forced overflow
+    recovery) reported none. The receipt travels with the turn instead, so it is positionally
+    neutral — it can never displace the caller's newest message — and it is a fixed string, so
+    a replayed turn still matches its stored row through ``reconcile``.
+    """
+    if isinstance(cleaned_content, str):
+        if INTERNAL_REPLAY_MARKER in cleaned_content:
+            return cleaned_content
+        text = cleaned_content.rstrip()
+        return f"{text}\n{INTERNAL_REPLAY_MARKER}" if text else INTERNAL_REPLAY_MARKER
+    if isinstance(cleaned_content, list):
+        if any(INTERNAL_REPLAY_MARKER in str(part) for part in cleaned_content):
+            return cleaned_content
+        structured = any(isinstance(part, dict) for part in cleaned_content) or not cleaned_content
+        return list(cleaned_content) + [internal_replay_marker_part(structured)]
+    if isinstance(cleaned_content, dict):
+        if INTERNAL_REPLAY_MARKER in str(cleaned_content):
+            return cleaned_content
+        return [cleaned_content, internal_replay_marker_part(True)]
+    return cleaned_content
+
+
+_TEXT_BEARING_KEYS = (
+    "text", "content", "value", "thinking", "reasoning", "summary", "data", "input", "output",
+)
+
+
+def _content_carries_text(value: Any) -> bool:
+    """Did this content hold anything at all? A blank turn loses nothing when it is dropped."""
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, list):
+        return any(_content_carries_text(item) for item in value)
+    if isinstance(value, dict):
+        return any(
+            _content_carries_text(value.get(key))
+            for key in _TEXT_BEARING_KEYS
+            if key in value
+        )
+    return False
+
+
 def _clean_active_assistant_message(msg: Dict[str, Any]) -> Dict[str, Any] | None:
     if msg.get("role") != "assistant":
         return msg
     if "content" not in msg:
         return msg
-    cleaned_content = _sanitize_active_assistant_content(msg.get("content"))
+    original_content = msg.get("content")
+    cleaned_content = _sanitize_active_assistant_content(original_content)
     if cleaned_content is None:
-        if not msg.get("tool_calls"):
-            return None
+        # fork: betterlcm — a turn holding ONLY internal content is not dropped without a
+        # trace either: the receipt takes its place, so the model still sees that a turn
+        # happened here and can read it whole from the store. A turn that held NOTHING is
+        # still dropped outright — an empty turn loses nothing, and inventing a receipt for
+        # it would be a false claim of removal.
+        if not _content_carries_text(original_content):
+            return None if not msg.get("tool_calls") else msg
         cleaned_content = ""
-    if cleaned_content == msg.get("content"):
+    if cleaned_content == original_content:
         return msg
     cleaned = dict(msg)
-    cleaned["content"] = cleaned_content
+    cleaned["content"] = _mark_internal_removal(cleaned_content)
     return cleaned
+
+
+def _is_internal_replay_receipt_only(msg: Any) -> bool:
+    """A turn whose whole replayed body is the internal-removal receipt.
+
+    fork: betterlcm — such a turn carries no content of its own, so under assembly budget
+    pressure it is dropped and named in the prefix's omission marker instead of competing
+    with the caller's live messages for room.
+    """
+    if not isinstance(msg, dict) or msg.get("role") != "assistant" or msg.get("tool_calls"):
+        return False
+    content = msg.get("content")
+    if isinstance(content, str):
+        return content.strip() == INTERNAL_REPLAY_MARKER
+    if isinstance(content, list) and len(content) == 1:
+        part = content[0]
+        if isinstance(part, str):
+            return part.strip() == INTERNAL_REPLAY_MARKER
+        if isinstance(part, dict):
+            return str(part.get("text") or "").strip() == INTERNAL_REPLAY_MARKER
+    return False
 
 
 def _should_drop_active_assistant_message(msg: Dict[str, Any]) -> bool:

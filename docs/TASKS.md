@@ -293,6 +293,12 @@ at 256k and no longer do:
 | `serialize_message_max_chars` | both curve endpoints are 4 chars/token of their own anchor window (1,048,576 at 256k, 4,000,000 at 1M), so the summariser sees whole messages at every window. `0` (no window known yet) means NO CAP — `engine.py` used to clamp that to 64 chars. An explicit operator cap is still honoured and still cuts only through a sized `[LCM elided …]` marker. |
 | externalization fallback | when externalization is disabled or its path is unwritable, upstream truncated the inline tool body to 3000 chars. The body now stays inline and whole. Two upstream tests (`test_lcm_core.py`) were rewritten to assert that. |
 
+### Ninth pass — core only (the opt-in subsystems stay in, stay off, stay unaudited)
+
+| what was lost | now |
+|---|---|
+| active-context cleanup stripped `<think>` / reasoning parts out of every replayed assistant turn and said so only in the log. Only `_assemble_context` counted it; below-threshold cleanup, bypass trimming and forced-overflow recovery reported nothing. | the turn carries `marked_loss.INTERNAL_REPLAY_MARKER` itself (`sanitize._mark_internal_removal`). It is positionally neutral, so it can never displace the caller's newest message, and it is a fixed string, so `reconcile` still maps the replayed turn back to its stored row. A turn that held NOTHING is still dropped outright — inventing a receipt for an empty turn would be a false claim of removal. Under an assembly cap, a turn that is now *only* the receipt is held out of the budget pass and named in the prefix instead (`_is_internal_replay_receipt_only`). |
+
 Rejected in this pass: a completion-cue/negation gate on `_source_supports_assertion_value`
 (verify-4 #23). Every whitelist of completion verbs rejects real ones ("I submitted the
 report"), and a wrong rejection drops an assertion silently — that is loss too. Left open.
