@@ -9,6 +9,7 @@ unchanged.
 """
 
 import importlib
+import json
 import inspect  # fork: betterlcm
 import logging
 from typing import Any, Dict, List, Optional
@@ -538,9 +539,7 @@ class BypassMixin:
         # number of messages nor their size, so a bypassed session could lose most of its
         # history behind a sentence that read like boilerplate (audit p05 BY01).
         dropped = messages[head_count:len(messages) - tail_count]
-        dropped_chars = sum(
-            len(str(normalize_content_value(message.get("content")) or "")) for message in dropped
-        )
+        dropped_chars = sum(self._bypass_envelope_chars(message) for message in dropped)
         marker = {
             "role": "user",
             "content": marked_loss.bypass_omission_marker(len(dropped), dropped_chars),
@@ -552,6 +551,23 @@ class BypassMixin:
         # receipt (and the fork's first version of it) claimed "8 messages dropped" while nine
         # had gone (verify-4 #17).
         return self._refresh_bypass_receipt(messages, trimmed)
+
+    @staticmethod
+    def _bypass_envelope_chars(message: Dict[str, Any]) -> int:
+        """fork: betterlcm — the size of everything a dropped message carried.
+
+        A dropped assistant turn's tool CALLS are part of what was removed; counting content
+        alone reported "~2 chars" for a message holding 10,000 characters of arguments
+        (round-2 verify-4 #29).
+        """
+        total = len(str(normalize_content_value(message.get("content")) or ""))
+        calls = message.get("tool_calls")
+        if calls:
+            try:
+                total += len(json.dumps(calls, ensure_ascii=False, default=str))
+            except Exception:  # pragma: no cover - defensive
+                total += len(str(calls))
+        return total
 
     def _refresh_bypass_receipt(
         self,
@@ -565,7 +581,7 @@ class BypassMixin:
         """
         def _chars(messages: List[Dict[str, Any]]) -> int:
             return sum(
-                len(str(normalize_content_value(message.get("content")) or ""))
+                self._bypass_envelope_chars(message)
                 for message in messages
                 if not marked_loss.is_bypass_omission_marker(message)
             )

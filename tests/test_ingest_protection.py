@@ -1335,7 +1335,10 @@ def test_ingest_externalizes_tool_calls_function_arguments(tmp_path):
     raw_message = json.loads(lcm_tools.lcm_expand({"store_id": store_id, "max_tokens": 100_000}, engine=engine))
     assert raw_message["externalized_refs"] == [ref]
     assert raw_message["externalized_payloads"][0]["field_path"] == "tool_calls[0].function.arguments"
-    assert "tool_calls" not in raw_message
+    # fork: betterlcm — the row's calls are rendered (round-2 verify-4 #20); what they contain
+    # here is the externalized-payload placeholder, not the payload
+    assert "[Externalized LCM ingest payload:" in raw_message["tool_calls"]
+    assert "data:image" not in raw_message["tool_calls"]
 
 
 def test_ingest_preserves_json_argument_scaffold_when_externalizing_payload(tmp_path):
@@ -1858,7 +1861,11 @@ def test_store_id_expand_never_returns_raw_historical_tool_calls(tmp_path):
     raw_message_text = lcm_tools.lcm_expand({"store_id": store_id, "max_tokens": 100_000}, engine=engine)
     raw_message = json.loads(raw_message_text)
 
-    assert "tool_calls" not in raw_message
+    # fork: betterlcm — the calls are RETURNED now (omitting them answered "this is the whole
+    # row" while hiding what the agent did, round-2 verify-4 #20), but their arguments go
+    # through the compaction argument sanitiser, so a legacy row's inline payload is a marker
+    # and never the raw bytes.
+    assert "tool_calls" in raw_message
     assert DATA_URI not in raw_message_text
     assert DATA_PAYLOAD[:120] not in raw_message_text
 

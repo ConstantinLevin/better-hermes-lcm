@@ -1368,6 +1368,20 @@ class MessageStore:
             found.extend(int(row[0]) for row in rows)
         return sorted(set(found) - excluded)
 
+    def tool_result_store_ids(self, session_id: str, tool_call_id: str,
+                              *, limit: int = 10) -> List[int]:
+        """fork: betterlcm — rows that ARE the archived result of this call (round-2 verify-4 #19)."""
+        call_id = str(tool_call_id or "").strip()
+        if not call_id:
+            return []
+        rows = self._conn.execute(
+            """SELECT store_id FROM messages
+               WHERE session_id = ? AND role = 'tool' AND tool_call_id = ?
+               ORDER BY store_id LIMIT ?""",
+            (session_id, call_id, int(max(1, limit))),
+        ).fetchall()
+        return [int(row[0]) for row in rows]
+
     # -- Search -------------------------------------------------------------
 
     def search(self, query: str, session_id: str | None = None,

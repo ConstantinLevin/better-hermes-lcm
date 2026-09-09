@@ -10,6 +10,7 @@ formatting, and the store/dag/lifecycle connection handling lives in one place.
 from __future__ import annotations
 
 from datetime import datetime
+import errno
 import os
 from pathlib import Path
 import sqlite3
@@ -83,6 +84,18 @@ def _create_unique_backup_file(backup_dir: Path, stem: str, timestamp: str) -> P
     return candidate
 
 
+# Errors that mean "this platform/filesystem does not support the operation", as opposed to a
+# real I/O failure that makes the backup non-durable.
+_UNSUPPORTED_FSYNC_ERRNOS = frozenset(
+    value for value in (
+        getattr(errno, "EINVAL", None), getattr(errno, "ENOTSUP", None),
+        getattr(errno, "EOPNOTSUPP", None), getattr(errno, "EPERM", None),
+        getattr(errno, "EACCES", None), getattr(errno, "EISDIR", None),
+        getattr(errno, "ENOSYS", None), getattr(errno, "EBADF", None),
+    ) if value is not None
+)
+
+
 def _fsync_backup(path: Path) -> None:
     """Flush the finished snapshot and its directory entry to disk.
 
@@ -98,12 +111,18 @@ def _fsync_backup(path: Path) -> None:
     directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
     try:
         directory_fd = os.open(path.parent, directory_flags)
-    except OSError:  # pragma: no cover - platforms without directory descriptors
+    except OSError as exc:  # platforms without directory descriptors
+        if exc.errno not in _UNSUPPORTED_FSYNC_ERRNOS:
+            raise
         return
     try:
         os.fsync(directory_fd)
-    except OSError:  # pragma: no cover - directory fsync unsupported
-        pass
+    except OSError as exc:
+        # fork: betterlcm — "this platform cannot fsync a directory" and "the disk refused the
+        # write" were both swallowed, so a backup whose directory entry never reached the disk
+        # was reported as a durable one (round-2 verify-4 #37). Only the former is tolerated.
+        if exc.errno not in _UNSUPPORTED_FSYNC_ERRNOS:
+            raise
     finally:
         os.close(directory_fd)
 

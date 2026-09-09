@@ -156,16 +156,39 @@ ASSEMBLY_OMISSION_MARKER_HEADER = (
 )
 
 
-def missing_tool_result_stub(tool_call_id: str) -> str:
+def missing_tool_result_stub(tool_call_id: str, *, store_ids: Sequence[int] | None = None,
+                             archived: bool | None = None,
+                             elsewhere_in_window: bool = False) -> str:
     """Stand in for a tool result the replay window does not contain.
 
     fork: betterlcm — upstream's stub said the result was "in the context summary above", which
     was a claim about a summary nobody had verified: with an empty DAG the reader was sent to
-    something that did not exist (verify-4 #10). This says what is true and how to get it.
+    something that did not exist (verify-4 #10). Naming the raw store unconditionally was the
+    same mistake one level down: a call that NEVER received a result was described as archived
+    and findable (round-2 verify-4 #19). ``archived`` distinguishes "stored, here is where"
+    from "never received"; ``None`` means the store could not be consulted.
     """
+    call = tool_call_id or "?"
+    if elsewhere_in_window and not store_ids:
+        return (
+            "[LCM: this call's result cannot be replayed at this position; the result for it "
+            f"appears elsewhere in this window and is quoted in the receipt below "
+            f"(tool_call_id={call})]"
+        )
+    if archived is False:
+        return (
+            "[LCM: this call's result is not in the replayed window, and no result for it is "
+            f"in the raw store either — none was ever received (tool_call_id={call})]"
+        )
+    if store_ids:
+        ids = ", ".join(str(store_id) for store_id in list(store_ids)[:10])
+        return (
+            "[LCM: this call's result is not in the replayed window; it is archived — "
+            f"lcm_expand(store_id={ids}) (tool_call_id={call})]"
+        )
     return (
-        "[LCM: this call's result is not in the replayed window. It is in the raw store — "
-        f"lcm_grep or lcm_expand for tool_call_id={tool_call_id or '?'}]"
+        "[LCM: this call's result is not in the replayed window, and whether it is archived "
+        f"could not be checked here — try lcm_grep or lcm_expand for tool_call_id={call}]"
     )
 
 
@@ -234,18 +257,38 @@ def excluded_reply_marker(store_ids: List[int]) -> str:
 RECEIPT_LINE_PREFIX = "[LCM:"
 
 
+# fork: betterlcm — EVERY marker spelling this module writes, not only "[LCM:". Inheritance
+# recognised the colon form alone, so a child carrying a rotate marker ("[LCM rotate marker] …
+# nothing here is summarised") condensed into a parent with no warning at all: the reader was
+# told the parent covered material that was never summarised (round-2 verify-4 #18).
+_MARKER_LINE_PREFIXES = (
+    RECEIPT_LINE_PREFIX,
+    ROTATE_MARKER_PREFIX,
+    COMPACT_ASSEMBLY_OMISSION_PREFIX,
+    ASSEMBLY_OMISSION_MARKER_HEADER,
+    BYPASS_OMISSION_PREFIX,
+)
+
+
+def is_marker_line(line: str) -> bool:
+    """True for a line this module wrote to record a removal or an unsummarised span."""
+    stripped = str(line or "").strip()
+    return any(stripped.startswith(prefix) for prefix in _MARKER_LINE_PREFIXES)
+
+
 def inherited_receipts(summaries: Iterable[str]) -> List[str]:
-    """Every ``[LCM: …]`` receipt line found in these summaries, de-duplicated in order.
+    """Every marker line found in these summaries, de-duplicated in order.
 
     fork: betterlcm — a condensed parent is written by the summariser, which has no obligation
     to reproduce a receipt its sources carried. Merging them into the parent keeps the record
-    of what was excluded attached to the node that now stands for it (verify-4 #8).
+    of what was excluded attached to the node that now stands for it (verify-4 #8), and every
+    spelling counts, not only the ``[LCM:`` one (round-2 verify-4 #18).
     """
     seen: List[str] = []
     for summary in summaries:
         for line in str(summary or "").splitlines():
             stripped = line.strip()
-            if stripped.startswith(RECEIPT_LINE_PREFIX) and stripped not in seen:
+            if is_marker_line(stripped) and stripped not in seen:
                 seen.append(stripped)
     return seen
 

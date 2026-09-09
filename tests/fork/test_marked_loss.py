@@ -1206,3 +1206,88 @@ def test_a_user_message_that_quotes_a_receipt_and_adds_a_decision_is_stored(tmp_
         assert stored, "the user's decision was not stored"
     finally:
         e.shutdown()
+
+
+def test_a_missing_tool_result_stub_only_promises_what_exists(tmp_path):
+    """round-2 verify-4 #19: the stub told the reader the result was in the raw store and
+    could be found by tool_call_id — for a call that had never received a result at all, over
+    an empty store. Three different situations were being described with one sentence."""
+    e = _engine(tmp_path, "stub.db", incremental_max_depth=0)
+    try:
+        e.on_session_start("st", platform="cli", context_length=200_000)
+        never = e._sanitize_tool_pairs([
+            {"role": "assistant", "tool_calls": [
+                {"id": "never", "function": {"name": "t", "arguments": "{}"}}]},
+        ])
+        assert "none was ever received" in never[1]["content"], never[1]["content"]
+
+        store_id = e._store.append("st", {"role": "tool", "tool_call_id": "archived",
+                                          "content": "the real result"}, source="cli")
+        e._store.commit()
+        archived = e._sanitize_tool_pairs([
+            {"role": "assistant", "tool_calls": [
+                {"id": "archived", "function": {"name": "t", "arguments": "{}"}}]},
+        ])
+        assert f"lcm_expand(store_id={store_id})" in archived[1]["content"], archived[1]["content"]
+    finally:
+        e.shutdown()
+
+
+def test_condensation_inherits_every_marker_spelling_not_only_the_colon_one(tmp_path):
+    """round-2 verify-4 #18: inheritance recognised "[LCM:" alone, so a child carrying a rotate
+    marker — the one that says its span was never summarised at all — condensed into a parent
+    with no warning, and the parent read as an ordinary summary of summarised material."""
+    from hermes_lcm import escalation, marked_loss
+    e = _engine(tmp_path, "spelling.db", condensation_fanin=2, incremental_max_depth=2)
+    try:
+        e.on_session_start("sp", platform="cli", context_length=200_000)
+        rotate = marked_loss.rotate_marker_summary(
+            session_id="sp", store_ids=[1, 2], message_count=2, token_count=40,
+            roles=["user", "assistant"], first_head="first", last_head="last")
+        children = []
+        for index, text in enumerate((rotate, "an ordinary leaf\nExpand for details about: x")):
+            children.append(e._dag.add_node_with_meta(SummaryNode(
+                session_id="sp", depth=0, summary=text, token_count=60, source_token_count=200,
+                source_ids=[index + 1], source_type="messages",
+                created_at=time.time() + index), level=1))
+        original = escalation._call_llm_for_summary
+        escalation._call_llm_for_summary = lambda *a, **k: "merged\nExpand for details about: merged"
+        try:
+            e._condense_summary_nodes([e._dag.get_node(node_id) for node_id in children])
+        finally:
+            escalation._call_llm_for_summary = original
+        parent = next(n for n in e._dag.get_session_nodes("sp") if n.depth == 1)
+        assert marked_loss.ROTATE_MARKER_PREFIX in parent.summary, parent.summary
+    finally:
+        e.shutdown()
+
+
+def test_raw_row_expansion_renders_the_row_s_tool_calls(tmp_path):
+    """round-2 verify-4 #20: lcm_expand(store_id=…) returned an assistant row's text with
+    has_more=false and never mentioned the tool call stored on the same row — a recovery path
+    answering "this is the whole row" while omitting what the agent actually did."""
+    import json
+    from hermes_lcm import tools as lcm_tools
+    e = _engine(tmp_path, "rawcalls.db", incremental_max_depth=0)
+    try:
+        e.on_session_start("rw", platform="cli", context_length=200_000)
+        store_id = e._store.append("rw", {
+            "role": "assistant", "content": "reading the file",
+            "tool_calls": [{"id": "c1", "type": "function", "function": {
+                "name": "read", "arguments": json.dumps({"path": "/etc/hosts"})}}],
+        }, source="cli")
+        e._store.commit()
+        payload = json.loads(lcm_tools.lcm_expand({"store_id": store_id}, engine=e))
+        assert "read" in payload["tool_calls"], payload
+        assert "/etc/hosts" in payload["tool_calls"]
+
+        paged = json.loads(lcm_tools.lcm_expand(
+            {"store_id": store_id, "max_tokens": 8}, engine=e))
+        if paged.get("tool_calls_truncated"):
+            continuation = paged["tool_calls_continue_with"]
+            rest = json.loads(lcm_tools.lcm_expand(
+                {k: v for k, v in continuation.items() if k != "tool"} | {"max_tokens": 400},
+                engine=e))
+            assert rest["tool_calls"], "the continuation returned no tool calls"
+    finally:
+        e.shutdown()

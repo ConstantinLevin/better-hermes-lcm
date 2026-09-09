@@ -161,3 +161,31 @@ def test_recovered_bytes_are_kept_even_when_the_durable_copy_cannot_be_written(t
         assert any("recovered host-output archive row" in node.summary for node in nodes)
     finally:
         engine.shutdown()
+
+
+def test_a_truncated_payload_file_is_not_a_successful_empty_result(tmp_path):
+    """round-2 verify-4 #33: a payload file holding only {"content_chars": 200} loaded
+    successfully with content "", so a half-written artifact read as a recovered empty result
+    — an empty answer where bytes are missing is exactly the unmarked loss this fork removes."""
+    import json as _json
+    from hermes_lcm.config import LCMConfig
+    from hermes_lcm.externalize import get_large_output_storage_dir, load_externalized_payload
+
+    home = tmp_path / "home"
+    cfg = LCMConfig(database_path=str(home / "lcm.db"))
+    directory = get_large_output_storage_dir(cfg, hermes_home=str(home), create=True)
+    (directory / "half.json").write_text(_json.dumps({"content_chars": 200}), encoding="utf-8")
+    payload = load_externalized_payload("half.json", config=cfg, hermes_home=str(home))
+    assert payload is not None
+    assert payload["corrupt"] is True
+    assert "truncated" in payload["corrupt_reason"]
+
+    (directory / "short.json").write_text(
+        _json.dumps({"content": "abc", "content_chars": 200}), encoding="utf-8")
+    short = load_externalized_payload("short.json", config=cfg, hermes_home=str(home))
+    assert short["corrupt"] is True and short["content"] == "abc"
+
+    (directory / "good.json").write_text(
+        _json.dumps({"content": "abc", "content_chars": 3}), encoding="utf-8")
+    good = load_externalized_payload("good.json", config=cfg, hermes_home=str(home))
+    assert good.get("corrupt") is not True and good["content"] == "abc"

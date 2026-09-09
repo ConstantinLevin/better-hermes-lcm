@@ -2030,6 +2030,22 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                 "rather than published under the new session"
             )
 
+    def _archived_tool_result_store_ids(self, tool_call_id: str) -> Optional[List[int]]:
+        """fork: betterlcm — store rows holding a result for this call, or None if unknown.
+
+        Returns [] when the store answered and holds nothing for that call: the difference
+        between "archived, here is where" and "never received" is exactly what the stub was
+        claiming without checking (round-2 verify-4 #19).
+        """
+        call_id = str(tool_call_id or "").strip()
+        if not call_id:
+            return []
+        try:
+            return self._store.tool_result_store_ids(self._session_id, call_id)
+        except Exception:  # pragma: no cover - a degraded store must not block assembly
+            logger.debug("LCM could not check the archive for a missing tool result", exc_info=True)
+            return None
+
     def _persist_frontier_marker(self) -> None:
         if not self._session_id or not self._conversation_id:
             return
@@ -5719,6 +5735,15 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         dropped_tool_results = 0
         inserted_stub_results = 0
         orphaned: List[Dict[str, Any]] = []  # fork: betterlcm — results with no call here
+        # fork: betterlcm — call ids that DO have a result somewhere in this window, even one
+        # that cannot be replayed at its own position. A stub saying "none was ever received"
+        # over content the orphan receipt then quotes is its own false statement
+        # (round-2 verify-4 #19).
+        result_ids_in_window = {
+            str(message.get("tool_call_id") or "").strip()
+            for message in messages
+            if str(message.get("role") or "") == "tool"
+        }
 
         i = 0
         while i < len(messages):
@@ -5763,12 +5788,24 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                         sanitized.append(queued.pop(0))
                         continue
                     if insert_missing_tool_stubs:
+                        # fork: betterlcm — say what is true. The old stub claimed the result
+                        # was in the summary above, with nothing establishing that any summary
+                        # covered it (verify-4 #10); saying "it is in the raw store" without
+                        # looking was the same mistake for a call that never received a result
+                        # (round-2 verify-4 #19), so the store is actually consulted.
+                        archived_ids = self._archived_tool_result_store_ids(expected_id)
+                        in_window = expected_id in result_ids_in_window
                         sanitized.append({
                             "role": "tool",
-                            # fork: betterlcm — say what is true. The old stub claimed the
-                            # result was in the summary above, with nothing establishing that
-                            # any summary covered it (verify-4 #10).
-                            "content": marked_loss.missing_tool_result_stub(expected_id),
+                            "content": marked_loss.missing_tool_result_stub(
+                                expected_id,
+                                store_ids=archived_ids,
+                                archived=(
+                                    None if archived_ids is None and not in_window
+                                    else bool(archived_ids) or in_window
+                                ),
+                                elsewhere_in_window=in_window,
+                            ),
                             "tool_call_id": expected_id,
                         })
                         inserted_stub_results += 1

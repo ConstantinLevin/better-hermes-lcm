@@ -964,7 +964,29 @@ def load_externalized_payload(ref: str, *, config, hermes_home: str = "") -> Dic
     except (OSError, json.JSONDecodeError):
         return None
     summary = _externalized_summary(path, payload)
-    summary["content"] = payload.get("content", "")
+    # fork: betterlcm — a parseable file is not a valid payload. A file holding only
+    # {"content_chars": 200} loaded "successfully" with content "", so a truncated or
+    # half-written artifact read as a recovered empty result (round-2 verify-4 #33). Missing
+    # or short content is an explicit corruption outcome, not an empty value.
+    content = payload.get("content")
+    if not isinstance(content, str):
+        summary["content"] = ""
+        summary["corrupt"] = True
+        summary["corrupt_reason"] = (
+            "the payload file has no string 'content' field; it is truncated or was never "
+            "finished being written"
+        )
+        return summary
+    declared = _normalized_content_size(payload.get("content_chars"))
+    if declared is not None and declared != len(content):
+        summary["content"] = content
+        summary["corrupt"] = True
+        summary["corrupt_reason"] = (
+            f"the payload declares {declared} characters and holds {len(content)}; "
+            "it is truncated"
+        )
+        return summary
+    summary["content"] = content
     return summary
 
 

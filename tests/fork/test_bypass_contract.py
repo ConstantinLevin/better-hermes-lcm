@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from hermes_lcm.config import LCMConfig
+from hermes_lcm import marked_loss
 from hermes_lcm.engine import LCMEngine
 
 
@@ -153,5 +154,31 @@ def test_the_receipt_counts_what_actually_went(tmp_path):
         once = marked_loss.compact_bypass_omission_marker(receipt["content"])
         twice = marked_loss.compact_bypass_omission_marker(once)
         assert marked_loss.bypass_omission_counts(twice) == (counted, chars)
+    finally:
+        e.shutdown()
+
+
+def test_the_bypass_receipt_counts_tool_call_arguments_too(tmp_path):
+    """round-2 verify-4 #29: dropping an assistant turn carrying 10,000 characters of tool-call
+    arguments produced a receipt saying about two characters had gone — the receipt existed and
+    understated the loss by three orders of magnitude."""
+    e = _bypassed_engine(tmp_path, "bypasscalls.db")
+    try:
+        e.protect_first_n = 1
+        e.protect_last_n = 1
+        big = "x" * 10_000
+        messages = [
+            {"role": "user", "content": "keep me"},
+            {"role": "assistant", "content": "ok", "tool_calls": [
+                {"id": "c1", "type": "function",
+                 "function": {"name": "terminal", "arguments": big}}]},
+            {"role": "user", "content": "and me"},
+        ]
+        result = e._fallback_tail_compaction(messages, target_tokens=100_000)
+        receipt = next(str(m.get("content") or "") for m in result
+                       if marked_loss.is_bypass_omission_marker(m))
+        counts = marked_loss.bypass_omission_counts(receipt)
+        assert counts is not None
+        assert counts[1] >= 10_000, receipt
     finally:
         e.shutdown()

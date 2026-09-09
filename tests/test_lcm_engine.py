@@ -22210,11 +22210,12 @@ class TestAssemblyToolPairGuardrail:
         self._assert_provider_tool_sequence_valid(result)
         assert result[1]["role"] == "tool"
         assert result[1]["tool_call_id"] == "call_late"
-        # fork: betterlcm — the stub says what is true (the result is in the raw store), not
-        # that a summary above covers it, and the late result itself is named rather than
-        # dropped in silence (verify-4 #10)
-        assert "not in the replayed window" in result[1]["content"]
-        assert "lcm_expand" in result[1]["content"]
+        # fork: betterlcm — the stub says what is true, not that a summary above covers it, and
+        # the late result itself is named rather than dropped in silence (verify-4 #10). Here
+        # the result IS in this window, just not replayable at this position: claiming it was
+        # archived (or never received) would both be false (round-2 verify-4 #19).
+        assert "cannot be replayed at this position" in result[1]["content"]
+        assert "quoted in the receipt below" in result[1]["content"]
         assert all(msg.get("content") != "late result" for msg in result)
         rendered = "\n".join(str(msg.get("content") or "") for msg in result)
         assert "answered no call in this replay window" in rendered

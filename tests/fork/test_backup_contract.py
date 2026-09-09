@@ -116,3 +116,37 @@ def test_the_suite_cannot_reach_live_storage(tmp_path):
     ]
     default = LCMConfig()
     assert default.database_path == "" or "lcm-tests-home-" in default.database_path
+
+
+def test_a_directory_fsync_that_really_fails_is_not_reported_as_a_durable_backup(tmp_path, monkeypatch):
+    """round-2 verify-4 #37: every directory-fsync error was treated as "this platform does not
+    support it", so an EIO — the disk refusing the write the operator took the backup FOR —
+    was swallowed and the backup reported as durable."""
+    import errno
+    import os as _os
+    from hermes_lcm import maintenance
+
+    target = tmp_path / "snapshot.sqlite3"
+    target.write_text("data", encoding="utf-8")
+    real_fsync = _os.fsync
+    calls = {"n": 0}
+
+    def failing_fsync(fd):
+        calls["n"] += 1
+        if calls["n"] == 1:  # the file itself succeeds
+            return real_fsync(fd)
+        raise OSError(errno.EIO, "input/output error")
+
+    monkeypatch.setattr(maintenance.os, "fsync", failing_fsync)
+    with pytest.raises(OSError):
+        maintenance._fsync_backup(target)
+
+    def unsupported_fsync(fd):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return real_fsync(fd)
+        raise OSError(errno.EINVAL, "not supported here")
+
+    calls["n"] = 0
+    monkeypatch.setattr(maintenance.os, "fsync", unsupported_fsync)
+    maintenance._fsync_backup(target)  # tolerated, as before
