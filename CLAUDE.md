@@ -15,19 +15,23 @@ Read this before touching anything. Then read [`FORK.md`](FORK.md) (the maintena
 
 **b) Optimise for large context windows** (up to 1M tokens) without degrading small ones. Every value that is a *preference* is a smooth weighted interpolation between two anchors — 256k and 1M — resolved through `window_scaling.py`. **Never a band switch, never an `if window > X` branch.**
 
-**c) Take what lossless-claw does better.** [lossless-claw](https://github.com/Martian-Engineering/lossless-claw) (TypeScript, OpenClaw) solves the same problem; where it is better *for this fork's purpose*, port it. **The goal is to be strictly superior to upstream hermes-lcm** — better on the no-loss axis without being worse on any other. See `docs/claw-comparison/`.
+**c) Take what lossless-claw does better.** [lossless-claw](https://github.com/Martian-Engineering/lossless-claw) (TypeScript, OpenClaw) solves the same problem; where it is better *for this fork's purpose*, port it. **The goal is to be strictly superior to upstream hermes-lcm** — better on the no-loss axis without being worse on any other. Audit prompts are in `docs/claw-comparison/prompts/`; what each round decided is a pass entry in `docs/TASKS.md`.
 
 ## The rule that is most often gotten wrong
 
-> **The 256k anchor carries upstream's TUNING VALUES. It never carries upstream's LOSS.**
+> **Upstream is the FLOOR — never worse than it — not the target. The 256k anchor carries upstream's TUNING VALUES, never upstream's LOSS.**
 
-Thresholds, chunk sizes, timeouts, concurrency, budgets: at 256k these resolve to upstream's own numbers. Truncation, silent drops, unmarked removals and false completeness claims are removed at **every** window. A cut that fires at 256k but not at 1M is a **defect in this fork**, not fidelity to upstream. The 256k DAG therefore deliberately differs from upstream's wherever upstream truncated.
+A value takes upstream's number at 256k only when it is a genuine *preference*: a cost, latency or headroom tradeoff where upstream's choice is as good as any other. Thresholds, timeouts, wall clocks, depth caps and cache sizes are like that.
+
+Where a value decides **how much is lost, or how coarse the index is**, upstream's number is not adopted at any window — it is decided on merit. That covers truncation and silent drops, and also: the leaf chunk (the granularity of the index), the pass cap and drain stop (whether a backlog can drain at all), the fresh tail (how much stays verbatim), the condensation gate (when the frontier is coarsened), and summariser concurrency.
+
+A cut that fires at 256k but not at 1M is a **defect in this fork**. "That is what upstream does" is a description, never a justification — it is the exact sentence that let a whole-backlog leaf chunk survive four audit rounds here. If you find yourself writing it in a comment, you are about to ship the bug this fork exists to remove.
 
 ## Architecture: where the fork's code lives
 
-Fork logic goes in **new modules** so upstream merges stay reviewable; upstream files get small, marked `# fork: betterlcm` hooks.
+Fork logic goes in **new modules** so upstream merges stay reviewable; upstream files get small, marked `# fork: better-hermeslcm` hooks.
 
-> **Naming:** the project, the repository and the branch are **better-hermeslcm**. Two identifiers deliberately keep the older `betterlcm` spelling and must NOT be renamed: the in-code marker `# fork: betterlcm` (it is the grep token every audit report and every line of `docs/fork-touchpoints.md` cites) and the migration row `betterlcm_node_meta_v1` (it exists in live databases). Grep for `# fork: betterlcm` to find every fork hook.
+> **Naming:** the project, the repository and the branch are **better-hermeslcm**. Two identifiers deliberately keep the older `betterlcm` spelling and must NOT be renamed: the in-code marker `# fork: better-hermeslcm` (it is the grep token every audit report and every line of `docs/fork-touchpoints.md` cites) and the migration row `betterlcm_node_meta_v1` (it exists in live databases). Grep for `# fork: better-hermeslcm` to find every fork hook.
 
 Fork modules: `window_scaling.py` (the anchor table and curve), `window_scaled_mixin.py` (`effective_*` resolution), `marked_loss.py` (**every marker the fork emits**), `host_cooldown.py`, `leaf_pipeline.py`, `node_meta.py`, `coverage_doctor.py`, `errors.py`.
 

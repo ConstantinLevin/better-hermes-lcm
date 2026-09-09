@@ -167,7 +167,7 @@ def _call_structured_assertion_llm(
     }
     apply_lcm_model_route(call_kwargs, model)
     response = call_llm(**call_kwargs)
-    # fork: betterlcm — a truncated generation is not a payload (round-3 verify-4 #27)
+    # fork: better-hermeslcm — a truncated generation is not a payload (round-3 verify-4 #27)
     from .escalation import unfinished_generation_reason
     unfinished = unfinished_generation_reason(response)
     if unfinished:
@@ -177,7 +177,7 @@ def _call_structured_assertion_llm(
     content = response.choices[0].message.content
     if not isinstance(content, str):
         content = str(content) if content else ""
-    # fork: betterlcm — a JSON payload is parsed UNTOUCHED. Stripping reasoning blocks first
+    # fork: better-hermeslcm — a JSON payload is parsed UNTOUCHED. Stripping reasoning blocks first
     # rewrote a literal "A <think>evidence</think>B" inside the payload into "A B", changing
     # the evidence before it was validated (round-4 verify-4 #22).
     raw_content = content.strip()

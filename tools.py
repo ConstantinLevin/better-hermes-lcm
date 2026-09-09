@@ -136,19 +136,19 @@ def _combined_result_sort_key(result: dict[str, Any], sort: str) -> tuple:
         return (rank_tier, -sort_timestamp, type_bias, role_bias, rank_value, 0.0, float("inf"))
     return (rank_tier, -sort_timestamp, type_bias, 0, rank_value, 0.0, role_bias)
 
-# fork: betterlcm — the engine each tool call was handed, visible to helpers that have no
+# fork: better-hermeslcm — the engine each tool call was handed, visible to helpers that have no
 # engine parameter (see _scaled_cap). Set on the calling thread by _require_engine.
 _CURRENT_TOOL_ENGINE = threading.local()
 
 
 def _require_engine(kwargs: Dict[str, Any]) -> "LCMEngine | None":
     engine = kwargs.get("engine")
-    _CURRENT_TOOL_ENGINE.engine = engine  # fork: betterlcm
+    _CURRENT_TOOL_ENGINE.engine = engine  # fork: better-hermeslcm
     return engine if engine is not None else None
 
 
 def _node_index_block_payload(engine: Any, node: Any, *, max_chars: int = 4_000) -> Dict[str, Any]:
-    """fork: betterlcm — the sidecar's multi-line index block for a node result, only when the
+    """fork: better-hermeslcm — the sidecar's multi-line index block for a node result, only when the
     node has one (upstream result shapes are unchanged otherwise).
 
     The block is stored whole, but a RESPONSE is bounded: attaching an unbounded multiline
@@ -162,7 +162,7 @@ def _node_index_block_payload(engine: Any, node: Any, *, max_chars: int = 4_000)
     try:
         meta = store.read(int(node.node_id))
     except Exception as exc:
-        # fork: betterlcm — "this node has no sidecar" and "its sidecar could not be read" are
+        # fork: better-hermeslcm — "this node has no sidecar" and "its sidecar could not be read" are
         # different answers. Returning {} for both made a description of a node WITH a stored
         # index look like a node without one (round-2 verify-4 #26).
         logger.warning("LCM could not read node metadata for %s: %s", node.node_id, exc)
@@ -195,7 +195,7 @@ def _node_index_block_payload(engine: Any, node: Any, *, max_chars: int = 4_000)
 
 def _node_index_slice_payload(engine: Any, node: Any, *, offset: int = 0,
                               max_chars: int = 4_000) -> Dict[str, Any]:
-    """fork: betterlcm — one page of a node's stored index block, from ``offset``.
+    """fork: better-hermeslcm — one page of a node's stored index block, from ``offset``.
 
     The block is stored whole; only the RESPONSE is bounded, and every bounded response says
     where the rest is and how to ask for it (verify-4 #14).
@@ -205,7 +205,7 @@ def _node_index_slice_payload(engine: Any, node: Any, *, offset: int = 0,
         return {}
     try:
         meta = store.read(int(node.node_id))
-    except Exception as exc:  # fork: betterlcm — see _node_index_block_payload
+    except Exception as exc:  # fork: better-hermeslcm — see _node_index_block_payload
         logger.warning("LCM could not read node metadata for %s: %s", node.node_id, exc)
         return {
             "index_block_unavailable": True,
@@ -247,7 +247,7 @@ def _node_index_slice_payload(engine: Any, node: Any, *, offset: int = 0,
 
 
 def _unresolved_node_error(engine: "LCMEngine", node_id, status) -> str:
-    """fork: betterlcm — "not found" vs "could not be resolved" (round-2 verify-4 #21).
+    """fork: better-hermeslcm — "not found" vs "could not be resolved" (round-2 verify-4 #21).
 
     A retained node behind more hops than the reachability bound, or behind a failed parent
     read, was reported exactly like a node that does not exist: an exhausted search presented
@@ -274,7 +274,7 @@ def _unresolved_node_error(engine: "LCMEngine", node_id, status) -> str:
 def _get_session_node(engine: "LCMEngine", node_id: int, *, status=None):
     """A node the caller may expand.
 
-    fork: betterlcm — authorization is REACHABILITY from the current session, not session
+    fork: better-hermeslcm — authorization is REACHABILITY from the current session, not session
     equality. `/new` carries the retained depths into the new session and leaves their children
     with the old one, so a node the caller legitimately reached through
     ``lcm_expand(node_id=parent)`` would otherwise be unexpandable one hop later: the tool hands
@@ -294,7 +294,7 @@ def _is_reachable_from_current_session(engine: "LCMEngine", node: Any, *,
                                        status=None) -> bool:
     """True when some ancestor of ``node`` belongs to the caller's current session.
 
-    fork: betterlcm — ``status`` receives ``unresolved_reason`` when the answer is "the search
+    fork: better-hermeslcm — ``status`` receives ``unresolved_reason`` when the answer is "the search
     ran out" rather than "there is no such ancestor" (round-2 verify-4 #21).
     """
     current = engine.current_session_id
@@ -314,7 +314,7 @@ def _is_reachable_from_current_session(engine: "LCMEngine", node: Any, *,
         parents: list[int] = []
         for child_id in frontier:
             try:
-                # fork: betterlcm — ask for THIS session's parents first, so a node with more
+                # fork: better-hermeslcm — ask for THIS session's parents first, so a node with more
                 # parents than the reverse-edge cap cannot hide its legitimate current-session
                 # parent behind them (verify-4 #16).
                 parent_ids = engine._dag.get_parent_node_ids(child_id, session_id=current)
@@ -512,7 +512,7 @@ _LCM_INSPECT_MAX_RESPONSE_CHARS = 20_000
 
 
 def _scaled_cap(base: int, engine: Any = None) -> int:
-    """fork: betterlcm — tool response char caps scale with the window (x1 at 256k, x4 at 1M).
+    """fork: better-hermeslcm — tool response char caps scale with the window (x1 at 256k, x4 at 1M).
 
     The cap sites live in helpers without an engine parameter, so the scale comes from the
     engine the current tool call was handed (_require_engine), else the engine bound to the
@@ -1082,7 +1082,7 @@ def lcm_compute(args: Dict[str, Any], **kwargs) -> str:
 
 
 def _preanswer_evidence_enabled(engine: "LCMEngine") -> bool:
-    """fork: betterlcm — the activation boundary for the pre-answer evidence subsystem.
+    """fork: better-hermeslcm — the activation boundary for the pre-answer evidence subsystem.
 
     `lcm_query_state` and `lcm_retrieve` already answer `status: disabled` until their flag is
     set. `lcm_compile_evidence` and `lcm_evidence_pack` were advertised AND dispatched
@@ -1276,7 +1276,7 @@ _TEMPORAL_ROLLUP_STATUSES = ("ready", "stale", "building", "failed")
 
 
 def _sanitized_tool_calls_for_response(tool_calls: Any) -> Any:
-    """fork: betterlcm — tool calls rendered for a reader, with inline payloads marked.
+    """fork: better-hermeslcm — tool calls rendered for a reader, with inline payloads marked.
 
     Raw-row expansion used to omit stored tool calls entirely and still answer has_more=false
     (round-2 verify-4 #20). They are returned now; the arguments go through the compaction
@@ -1431,7 +1431,7 @@ def _pagination_payload(
     next_source_offset: int | None,
     next_content_offset: int,
     has_more: bool,
-    tool_calls_offset: int = 0,          # fork: betterlcm — see _expand_message_sources
+    tool_calls_offset: int = 0,          # fork: better-hermeslcm — see _expand_message_sources
     next_tool_calls_offset: int = 0,
 ) -> dict[str, Any]:
     if not has_more:
@@ -1464,8 +1464,8 @@ def _expand_message_sources(
     source_offset: int = 0,
     source_limit: int | None = None,
     content_offset: int = 0,
-    tool_calls_offset: int = 0,  # fork: betterlcm — resume a paged tool-call rendering
-    envelope_offset: int = 0,  # fork: betterlcm — resume a paged envelope rendering
+    tool_calls_offset: int = 0,  # fork: better-hermeslcm — resume a paged tool-call rendering
+    envelope_offset: int = 0,  # fork: better-hermeslcm — resume a paged envelope rendering
     hydrate_externalized_content: bool = False,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     from .tokens import count_tokens
@@ -1483,13 +1483,13 @@ def _expand_message_sources(
     stored_by_id = engine._store.get_batch(source_ids)
 
     messages: list[dict[str, Any]] = []
-    missing_source_ids: list[int] = []  # fork: betterlcm — sources that could not be read
+    missing_source_ids: list[int] = []  # fork: better-hermeslcm — sources that could not be read
     budget_used = 0
     next_source_offset: int | None = source_offset
     next_content_offset = content_offset
     next_tool_calls_offset = 0
-    next_envelope_offset = 0  # fork: betterlcm — the envelope has a cursor of its own
-    corrupt_payload_refs: list[dict[str, Any]] = []  # fork: betterlcm (round-3 verify-3)
+    next_envelope_offset = 0  # fork: better-hermeslcm — the envelope has a cursor of its own
+    corrupt_payload_refs: list[dict[str, Any]] = []  # fork: better-hermeslcm (round-3 verify-3)
     has_more = source_offset < total_sources
 
     for relative_index, store_id in enumerate(source_ids):
@@ -1502,7 +1502,7 @@ def _expand_message_sources(
             break
         stored = stored_by_id.get(store_id)
         if not stored:
-            # fork: betterlcm — a source that cannot be read is not a source that was read.
+            # fork: better-hermeslcm — a source that cannot be read is not a source that was read.
             # Skipping it silently made a leaf whose only source was missing look like an
             # exhausted, complete expansion (verify-4 #15).
             missing_source_ids.append(int(store_id))
@@ -1526,7 +1526,7 @@ def _expand_message_sources(
             if ref_payload is not None and ref_payload.get("kind") != "ingest_payload":
                 externalized = ref_payload
             if ref_payload is not None and ref_payload.get("corrupt"):
-                # fork: betterlcm — the loader detects a truncated/half-written payload; an
+                # fork: better-hermeslcm — the loader detects a truncated/half-written payload; an
                 # expansion that dropped the flag answered with empty content and
                 # has_more=false, i.e. a successful-looking empty result (round-3 verify-3).
                 corrupt_payload_refs.append({
@@ -1559,14 +1559,14 @@ def _expand_message_sources(
         if content_source == "externalized_payload":
             expanded["transcript_content"] = transcript_content
 
-        # fork: betterlcm — an assistant turn's tool CALLS are part of what it said. Omitting
+        # fork: better-hermeslcm — an assistant turn's tool CALLS are part of what it said. Omitting
         # them made a call-only assistant message expand as empty content with
         # `has_more: false` — a recovery path reporting success while returning nothing of what
         # the agent actually did (audit p02 T04 / audit A #11). The arguments are counted
         # against the same budget and paged with their own offset rather than dumped whole.
         stored_tool_calls = stored.get("tool_calls")
         call_slice = None
-        # fork: betterlcm — the envelope slice (normal or corrupt) is tracked with the other
+        # fork: better-hermeslcm — the envelope slice (normal or corrupt) is tracked with the other
         # fields, so it can be charged to the budget and consulted by the continuation
         # decision. Leaving it out of both meant a 20,000-character envelope returned 15,991
         # characters and reported has_more=false (round-5 verify-6 #6).
@@ -1601,7 +1601,7 @@ def _expand_message_sources(
                     "tool_calls_offset": call_slice["next_content_offset"],
                     "envelope_offset": envelope_offset if source_index == source_offset else 0,
                 }
-        # fork: betterlcm — the host fields the columns do not project belong to this row too;
+        # fork: better-hermeslcm — the host fields the columns do not project belong to this row too;
         # node expansion omitted them while reporting completion (round-3 verify-4 #8), and
         # then returned them WHOLE, which put a 200,000-character reasoning field inside a
         # 50-token request (round-4 verify-2 #8). Same bounded representation as the raw path.
@@ -1648,7 +1648,7 @@ def _expand_message_sources(
                     ),
                 }
         if stored.get("envelope_corrupt"):
-            # fork: betterlcm — corrupt envelope JSON is not an empty envelope, and the raw
+            # fork: better-hermeslcm — corrupt envelope JSON is not an empty envelope, and the raw
             # text is not exempt from paging: it was returned whole (after a silent 20,000-char
             # cut in the store) with no cursor, so a large corrupt envelope either blew the
             # caller's budget or lost its tail with nothing to say so.
@@ -1725,13 +1725,13 @@ def _expand_message_sources(
                         expanded["externalized"] = externalized
                         break
         messages.append(expanded)
-        # fork: betterlcm — the rendered tool calls are charged to the SAME budget. Leaving
+        # fork: better-hermeslcm — the rendered tool calls are charged to the SAME budget. Leaving
         # them out gave every call-only row the whole remaining allowance and let a bounded
         # expansion return several times its budget (verify-1 on T04).
         budget_used += count_tokens(sliced["content"])
         if call_slice is not None:
             budget_used += count_tokens(call_slice["content"])
-        # fork: betterlcm — the envelope is charged too, and an unfinished envelope keeps the
+        # fork: better-hermeslcm — the envelope is charged too, and an unfinished envelope keeps the
         # source open. Neither happened, so a reader could be told the row was complete while
         # thousands of characters of host metadata were still unread (round-5 verify-6 #6).
         if envelope_slice is not None:
@@ -1742,7 +1742,7 @@ def _expand_message_sources(
             or (envelope_slice is not None and envelope_slice["content_truncated"])
         ):
             next_source_offset = source_index
-            # fork: betterlcm — a FINISHED body reports next_content_offset 0. Re-using that
+            # fork: better-hermeslcm — a FINISHED body reports next_content_offset 0. Re-using that
             # zero while staying on the same source restarted the body on every page: a
             # 196-character body with a 100-character call took 101 pages and returned 19,600
             # characters of body (round-2 verify-2 #8). Body and calls need independent EOF
@@ -1751,7 +1751,7 @@ def _expand_message_sources(
                 sliced["next_content_offset"] if sliced["has_more"]
                 else sliced["content_offset"] + sliced["content_returned_chars"]
             )
-            # fork: betterlcm — a FINISHED field parks its cursor at its own end, exactly like
+            # fork: better-hermeslcm — a FINISHED field parks its cursor at its own end, exactly like
             # the body above. Resetting to 0 made a continuation for one field re-send another
             # field the caller already had in full (round-5 verify-6 #6).
             next_tool_calls_offset = (
@@ -1786,7 +1786,7 @@ def _expand_message_sources(
         next_tool_calls_offset=next_tool_calls_offset,
         has_more=has_more,
     )
-    # fork: betterlcm — every cursor travels with the page, or following the continuation
+    # fork: better-hermeslcm — every cursor travels with the page, or following the continuation
     # restarts a field the caller already has (round-5 verify-6 #6).
     pagination["envelope_offset"] = envelope_offset
     if has_more:
@@ -1798,7 +1798,7 @@ def _expand_message_sources(
             f"{len(missing_source_ids)} source row(s) referenced by this node could not be read"
         )
     elif corrupt_payload_refs:
-        # fork: betterlcm — a corrupt externalized payload is not an empty one (round-3 verify-3)
+        # fork: better-hermeslcm — a corrupt externalized payload is not an empty one (round-3 verify-3)
         pagination["complete"] = False
         pagination["corrupt_payloads"] = corrupt_payload_refs
         pagination["incomplete_reason"] = (
@@ -1813,7 +1813,7 @@ def _expand_message_sources(
 
 
 def _authorized_child_node(engine: Any, child_id: Any) -> Any:
-    """fork: betterlcm — a recorded child of an already-authorized node.
+    """fork: better-hermeslcm — a recorded child of an already-authorized node.
 
     Upstream required every descendant to belong to the *current* session. That was true while
     `/new` DELETED the shallower nodes; the fork keeps them with the old session and carries
@@ -1879,7 +1879,7 @@ def _expand_child_nodes(
                 "depth": child.depth,
                 "summary": rendered_summary,
                 "summary_truncated": was_truncated,
-                # fork: betterlcm — where the REST of this summary is. Pointing at expansion
+                # fork: better-hermeslcm — where the REST of this summary is. Pointing at expansion
                 # returned the child's sources, never the omitted suffix of its own summary
                 # (round-3 verify-4 #13).
                 **({
@@ -1917,12 +1917,12 @@ def _expand_child_nodes(
         has_more=has_more,
     )
     if missing_child_ids:
-        # fork: betterlcm — a recorded child that is no longer in the DAG is reported, never
+        # fork: better-hermeslcm — a recorded child that is no longer in the DAG is reported, never
         # silently skipped: an expansion that returns fewer sources than the node records must
         # say so, or it reads as a complete answer.
         pagination["missing_source_node_ids"] = missing_child_ids
         pagination["incomplete"] = True
-        # fork: betterlcm — say it in the SAME field every other path uses. `incomplete=True`
+        # fork: better-hermeslcm — say it in the SAME field every other path uses. `incomplete=True`
         # alone was invisible to the block filter and to the synthesis completeness check, so a
         # parent whose children were all missing answered complete=true (round-5 verify-6 #7).
         pagination["complete"] = False
@@ -2037,7 +2037,7 @@ def _collect_descendant_evidence_blocks(
 
 
 def _search_reporting_progress(search, query: str, *, progress: Dict[str, Any], **kwargs):
-    """fork: betterlcm — call a search that reports completeness, tolerating one that cannot.
+    """fork: better-hermeslcm — call a search that reports completeness, tolerating one that cannot.
 
     Host wrappers and test doubles replace these callables; a search that does not accept
     ``progress`` simply reports nothing, and the caller treats "no report" as "unknown" rather
@@ -2081,7 +2081,7 @@ def _collect_context_blocks_for_node(
             max_tokens=remaining_tokens,
             hydrate_externalized_content=hydrate_externalized_content,
         )
-        # fork: betterlcm — an EMPTY page whose pagination says sources are missing or the
+        # fork: better-hermeslcm — an EMPTY page whose pagination says sources are missing or the
         # payload is corrupt must still be reported; dropping the block when no message
         # survived certified a node whose only source was unreadable as complete
         # (round-3 verify-4 #12).
@@ -2099,7 +2099,7 @@ def _collect_context_blocks_for_node(
             blocks.append(block)
     elif node.source_type == "nodes":
         children, pagination = _expand_child_nodes(engine, node, max_tokens=remaining_tokens)
-        # fork: betterlcm — a child block that carries ONLY a failure (a recorded child that
+        # fork: better-hermeslcm — a child block that carries ONLY a failure (a recorded child that
         # cannot be read) is the block that matters. Dropping it when no child survived let a
         # parent whose children were all missing synthesise as complete=true (round-5
         # verify-6 #7), the same defect already fixed above for message sources.
@@ -2243,7 +2243,7 @@ def _context_content_token_count(blocks: list[dict[str, Any]]) -> int:
     return total
 
 
-# fork: betterlcm — where the synthesis route's termination status is left for the caller.
+# fork: better-hermeslcm — where the synthesis route's termination status is left for the caller.
 # A thread-local rather than a parameter: test doubles and host wrappers replace
 # _synthesize_expansion_answer wholesale, and they must keep working unchanged.
 _LAST_SYNTHESIS_STATUS = threading.local()
@@ -2292,7 +2292,7 @@ def _synthesize_expansion_answer(
     if not isinstance(content, str):
         content = str(content) if content else ""
     from .escalation import _TRUNCATED_FINISH_REASONS, _strip_reasoning_blocks
-    # fork: betterlcm — a synthesised answer that stopped at the generation limit was returned
+    # fork: better-hermeslcm — a synthesised answer that stopped at the generation limit was returned
     # as an ordinary complete answer (round-2 verify-4 #24). The caller labels it.
     finish_reason = str(getattr(choice, "finish_reason", "") or "").strip().lower()
     response_status = str(getattr(response, "status", "") or "").strip().lower()
@@ -2363,7 +2363,7 @@ def _serialize_loaded_message(
         item["tool_calls"] = row.get("tool_calls")
     if row.get("tool_name"):
         item["tool_name"] = row.get("tool_name")
-    # fork: betterlcm — the host envelope is part of the row. This serializer returned content
+    # fork: better-hermeslcm — the host envelope is part of the row. This serializer returned content
     # and the column fields only, so a tool result carrying is_error/exit_code came back as
     # plain text and a failed operation read exactly like a successful one, with
     # content_truncated=false and has_more=false claiming the row was complete
@@ -2664,7 +2664,7 @@ def _recent_conversation_scope_session_ids(engine: "LCMEngine") -> list[str]:
 
 
 class _RecentIncomplete(Exception):
-    """fork: betterlcm — the recent-window scan could not complete. Distinct from an empty
+    """fork: better-hermeslcm — the recent-window scan could not complete. Distinct from an empty
     window, which is a real answer."""
 
 
@@ -2676,7 +2676,7 @@ def _recent_leaf_sections(
 ) -> tuple[list[dict[str, Any]], int]:
     """Load fallback nodes without retaining their TEMP-staging snapshot.
 
-    fork: betterlcm — returns ``(sections, total_matching)``. The display limit used to be
+    fork: better-hermeslcm — returns ``(sections, total_matching)``. The display limit used to be
     applied before the count was taken, so eleven matching sections with ``limit=10`` reported
     ``total_sections=10`` and ``truncated=false`` — a window that reads as fully shown
     (round-2 verify-3 #9).
@@ -2684,7 +2684,7 @@ def _recent_leaf_sections(
     with engine._dag._db_lock:
         connection = engine._dag.connection
         if connection is None:
-            # fork: betterlcm — a closed/unavailable DAG is not an empty window (verify-4 #13)
+            # fork: better-hermeslcm — a closed/unavailable DAG is not an empty window (verify-4 #13)
             raise _RecentIncomplete(
                 "the summary database is not available; this window could not be scanned"
             )
@@ -2705,7 +2705,7 @@ def _recent_leaf_sections_staged(
 ) -> tuple[list[dict[str, Any]], int]:
     connection = engine._dag.connection
     if connection is None:
-        raise _RecentIncomplete(  # fork: betterlcm — see above (verify-4 #13)
+        raise _RecentIncomplete(  # fork: better-hermeslcm — see above (verify-4 #13)
             "the summary database is not available; this window could not be scanned"
         )
     # Include retained higher-depth/carry-forward summaries, not just depth-0
@@ -2747,7 +2747,7 @@ def _recent_leaf_sections_staged(
                     "bound; returning no partial frontier",
                     _LCM_RECENT_FRONTIER_WORK_LIMIT,
                 )
-                # fork: betterlcm — "too much matched to scan safely" is not "nothing happened".
+                # fork: better-hermeslcm — "too much matched to scan safely" is not "nothing happened".
                 # Returning a bare [] made the serializer report zero sections with
                 # truncated=false, i.e. an exhaustive negative over history that exists
                 # (audit p02 T16).
@@ -2790,7 +2790,7 @@ def _recent_leaf_sections_staged(
                 limit=_LCM_RECENT_FRONTIER_WORK_LIMIT,
             )
     except _RecentIncomplete:
-        # fork: betterlcm — the work-cap signal must reach the caller. The broad handler below
+        # fork: better-hermeslcm — the work-cap signal must reach the caller. The broad handler below
         # swallowed it and returned [], so an unscannable window was reported as an empty one
         # again (audit p02 T16; verify-1 found the surviving path).
         raise
@@ -2835,7 +2835,7 @@ def _recent_leaf_sections_staged(
             )
         ]
     except Exception as exc:
-        # fork: betterlcm — failing CLOSED here returned an empty, "complete" window over
+        # fork: better-hermeslcm — failing CLOSED here returned an empty, "complete" window over
         # history that exists: the same false exhaustive negative the work cap already had
         # to be taught not to give (round-2 verify-3 #9).
         logger.warning("LCM recent canonical frontier failed: %s", exc, exc_info=True)
@@ -2880,7 +2880,7 @@ def _recent_rollup_sections(rollups: list[dict[str, object]]) -> list[dict[str, 
 def _bounded_recent_json(response: dict[str, Any], sections: list[dict[str, Any]],
                          *, total_matching: int | None = None) -> str:
     response["sections"] = []
-    # fork: betterlcm — the number the WINDOW holds, counted before the display limit
+    # fork: better-hermeslcm — the number the WINDOW holds, counted before the display limit
     response["total_sections"] = (
         len(sections) if total_matching is None else int(total_matching)
     )
@@ -2973,7 +2973,7 @@ def lcm_recent(args: Dict[str, Any], **kwargs) -> str:
             sections, total_matching = _recent_leaf_sections(
                 engine, window, requested_scope, limit
             )
-        except _RecentIncomplete as exc:          # fork: betterlcm
+        except _RecentIncomplete as exc:          # fork: better-hermeslcm
             sections, total_matching, incomplete_reason = [], 0, str(exc)
         except Exception as exc:                  # fork: a read failure is not an empty window
             logger.warning("LCM recent fallback read failed: %s", exc)
@@ -2994,7 +2994,7 @@ def lcm_recent(args: Dict[str, Any], **kwargs) -> str:
         "limit": limit,
         "char_limit": _scaled_cap(_LCM_RECENT_MAX_RESPONSE_CHARS),
         "mode": "leaf_summary_fallback" if fallback else "rollup",
-        # fork: betterlcm — say plainly when the window could not be scanned
+        # fork: better-hermeslcm — say plainly when the window could not be scanned
         "complete": not incomplete_reason,
         **({"incomplete_reason": incomplete_reason} if incomplete_reason else {}),
         # ``provenance.rollups`` is filled by _bounded_recent_json from the
@@ -3143,12 +3143,12 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
     current_session_id = engine.current_session_id
     has_current_session = bool(current_session_id)
     results: list[Dict[str, Any]] = []
-    search_failures: list[Dict[str, str]] = []  # fork: betterlcm — see the except blocks below
+    search_failures: list[Dict[str, str]] = []  # fork: better-hermeslcm — see the except blocks below
     bounded_scans: list[Dict[str, Any]] = []  # fork: scans that stopped at a work cap
     more_results_available = False  # fork: exact page, corpus holds more (round-2 verify-2 #11)
 
     def _scan_note(source_name: str, scan: Dict[str, Any]) -> Dict[str, Any] | None:
-        """fork: betterlcm — classify one scan: exact, more-to-come, or actually capped.
+        """fork: better-hermeslcm — classify one scan: exact, more-to-come, or actually capped.
 
         A full ordered page is the correct answer even when the corpus holds more matches;
         reporting it as a work-cap failure taught the agent to distrust exact results.
@@ -3174,7 +3174,7 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
             "reason": reason,
             "work_capped": bool(scan.get("work_capped")),
         }
-    # fork: betterlcm — if the current turn could not be stored, this search cannot see it.
+    # fork: better-hermeslcm — if the current turn could not be stored, this search cannot see it.
     # The engine logged the failure and the tool still answered "no matching history"
     # (verify-4 #11): a false exhaustive negative over content that just reached the plugin.
     consecutive_ingest_failures = int(getattr(engine, "_consecutive_ingest_failures", 0) or 0)
@@ -3185,7 +3185,7 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
             "error": str(getattr(engine, "_last_ingest_error", "") or "ingest failed")[:300],
         }
         if unarchived_revisions:
-            # fork: betterlcm — a host EDIT that could not be archived means the corrected
+            # fork: better-hermeslcm — a host EDIT that could not be archived means the corrected
             # text was never stored; naming the ids says which history is unreliable here
             # (round-5 verify-6 #4).
             entry["unarchived_revision_host_ids"] = unarchived_revisions[:20]
@@ -3218,7 +3218,7 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
                     )
                 )
         except Exception as exc:
-            # fork: betterlcm — a search that FAILED is not a search that found nothing. The
+            # fork: better-hermeslcm — a search that FAILED is not a search that found nothing. The
             # agent cannot tell "not in history" from "history was unreadable", so an empty
             # result here becomes false negative evidence over fully retained data.
             logger.warning("Message search failed: %s", exc)
@@ -3487,12 +3487,12 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
         response["externalized_refs"] = externalized_refs
     if externalized_scan is not None:
         response["externalized_scan"] = externalized_scan
-    # fork: betterlcm — say how the raw query was interpreted whenever anything was dropped
+    # fork: better-hermeslcm — say how the raw query was interpreted whenever anything was dropped
     interpretation = describe_query_interpretation(query)
     if interpretation["dropped_tokens"]:
         response["query_interpretation"] = interpretation
     if search_failures or bounded_scans:
-        # fork: betterlcm — a partial, failed or work-capped search must never look like an
+        # fork: better-hermeslcm — a partial, failed or work-capped search must never look like an
         # exhaustive negative. The hits that did succeed are kept; the caller is told what did
         # not run and what stopped early (audit p05 SQ03).
         if search_failures:
@@ -3509,7 +3509,7 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
     else:
         response["complete"] = True
     if more_results_available:
-        # fork: betterlcm — an EXACT page over a corpus that holds more matches. This is not a
+        # fork: better-hermeslcm — an EXACT page over a corpus that holds more matches. This is not a
         # failure and must not read as one: it is the ordinary "there is a next page" signal.
         response["more_results_available"] = True
         response.setdefault(
@@ -4970,7 +4970,7 @@ def _lcm_recall_fts_arm(
     )
     if "error" in payload:
         return [], payload
-    # fork: betterlcm — the arm's own completeness travels with its hits. A grep result that
+    # fork: better-hermeslcm — the arm's own completeness travels with its hits. A grep result that
     # said complete:false with its failures and work caps was converted to ([], None) here, so
     # recall answered as if the full-text arm had run cleanly (round-2 verify-4 #23).
     incompleteness: dict[str, Any] = {}
@@ -5440,7 +5440,7 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
         else:
             arm_hits["fts"] = hits
             if fts_error is not None:
-                # fork: betterlcm — the arm RAN but not exhaustively; its hits are kept and its
+                # fork: better-hermeslcm — the arm RAN but not exhaustively; its hits are kept and its
                 # incompleteness is disclosed instead of being erased (round-2 verify-4 #23).
                 coverage["fts"] = "bounded"
                 degraded_reasons.append(
@@ -6041,13 +6041,13 @@ def lcm_describe(args: Dict[str, Any], **kwargs) -> str:
         if node is None:
             return _unresolved_node_error(engine, node_id, reach_status)
         info = engine._dag.describe_subtree(node_id)
-        # fork: betterlcm — a truncated index block names THIS call as its continuation, so
+        # fork: better-hermeslcm — a truncated index block names THIS call as its continuation, so
         # this call has to be able to return the rest of it. It returned subtree metadata and
         # nothing else, which left the omitted topics advertised but unreachable
         # (verify-4 #14 / p02 T01).
         index_offset = _parse_non_negative_int(args.get("index_offset", 0), 0)
         info.update(_node_index_slice_payload(engine, node, offset=index_offset))
-        # fork: betterlcm — a node's OWN summary is pageable here. A truncated child summary
+        # fork: better-hermeslcm — a node's OWN summary is pageable here. A truncated child summary
         # said summary_truncated=true and pointed at expansion, which returns the child's
         # SOURCES, so the omitted suffix of the summary itself was advertised and unreachable
         # (round-3 verify-4 #13).
@@ -6140,7 +6140,7 @@ def lcm_expand(args: Dict[str, Any], **kwargs) -> str:
             "error": "node_id, externalized_ref, or store_id is required",
         })
 
-    # fork: betterlcm — the default page is window-weighted (4000 at 256k, 32000 at 1M)
+    # fork: better-hermeslcm — the default page is window-weighted (4000 at 256k, 32000 at 1M)
     default_page_tokens = int(getattr(engine, "effective_expand_page_tokens", 4000) or 4000)
     max_tokens = _parse_positive_int(args.get("max_tokens", default_page_tokens), default_page_tokens)
     raw_hydrate = args.get("hydrate", False)
@@ -6166,7 +6166,7 @@ def lcm_expand(args: Dict[str, Any], **kwargs) -> str:
         if payload is None:
             return json.dumps({"error": f"Externalized payload {externalized_ref} not found in current session"})
         if payload.get("corrupt"):
-            # fork: betterlcm — the loader detected a truncated/half-written artifact; returning
+            # fork: better-hermeslcm — the loader detected a truncated/half-written artifact; returning
             # its (empty or short) content with has_more=false answered a broken payload as a
             # successful empty one (round-3 verify-3).
             return json.dumps({
@@ -6231,7 +6231,7 @@ def lcm_expand(args: Dict[str, Any], **kwargs) -> str:
             "next_content_offset": sliced["next_content_offset"],
             "has_more": sliced["has_more"],
         }
-        # fork: betterlcm — the host fields the columns do not project (name, reasoning
+        # fork: better-hermeslcm — the host fields the columns do not project (name, reasoning
         # metadata, error flags, provider ids) are stored; an expansion that omitted them
         # returned a different message from the one the host sent (round-2 verify-4 #4). They
         # are CHARGED to the same budget and paged with their own cursor: returning a
@@ -6242,7 +6242,7 @@ def lcm_expand(args: Dict[str, Any], **kwargs) -> str:
         if isinstance(stored.get("envelope"), dict) and stored["envelope"]:
             from .tokens import count_tokens as _count_tokens_envelope
             rendered_envelope = json.dumps(stored["envelope"], ensure_ascii=False, default=str)
-            # fork: betterlcm — the budget is spent ONCE, in order: content, then the
+            # fork: better-hermeslcm — the budget is spent ONCE, in order: content, then the
             # envelope, then the calls. Giving each field the whole remainder let two fields
             # spend the same tokens and their continuations cycle (round-4 verify-2 #9).
             envelope_budget = max(0, max_tokens - raw_budget_used)
@@ -6271,7 +6271,7 @@ def lcm_expand(args: Dict[str, Any], **kwargs) -> str:
                     "tool_calls_offset": tool_calls_offset,
                 }
         elif stored.get("envelope_corrupt"):
-            # fork: betterlcm — the raw-store path did not report envelope corruption AT ALL:
+            # fork: better-hermeslcm — the raw-store path did not report envelope corruption AT ALL:
             # it reported a row with no envelope and has_more=false, so the reader was told the
             # whole row had been returned while the host fields sat unreadable in the column.
             from .tokens import count_tokens as _count_tokens_corrupt
@@ -6299,7 +6299,7 @@ def lcm_expand(args: Dict[str, Any], **kwargs) -> str:
                     "envelope_offset": raw_slice["next_content_offset"],
                     "tool_calls_offset": tool_calls_offset,
                 }
-        # fork: betterlcm — an assistant turn's tool CALLS are part of what it said. Node
+        # fork: better-hermeslcm — an assistant turn's tool CALLS are part of what it said. Node
         # expansion renders and pages them; the raw-row path returned the text with
         # has_more=false and no mention of the calls at all, so a recovery path answered
         # "this is the whole row" while omitting stored content (round-2 verify-4 #20).
@@ -6490,7 +6490,7 @@ def lcm_expand_query(args: Dict[str, Any], **kwargs) -> str:
 
     nodes = []
     raw_results: list[dict[str, Any]] = []
-    # fork: betterlcm — an explicitly requested node that does not resolve must be NAMED. It
+    # fork: better-hermeslcm — an explicitly requested node that does not resolve must be NAMED. It
     # used to disappear into the ordinary "No matching summaries" answer, so a caller asking
     # about node 7 was told nothing matched rather than that node 7 was not there
     # (round-2 verify-4 #24).
@@ -6516,11 +6516,11 @@ def lcm_expand_query(args: Dict[str, Any], **kwargs) -> str:
             else:
                 missing_node_ids.append(parsed_node_id)
     elif query:
-        # fork: betterlcm — ask BOTH searches how exhaustive they were; query mode reported
+        # fork: better-hermeslcm — ask BOTH searches how exhaustive they were; query mode reported
         # complete:true over a capped or degraded scan (round-3 verify-4 #12).
         node_progress: Dict[str, Any] = {}
         message_progress: Dict[str, Any] = {}
-        # fork: betterlcm — ask for ONE MORE than the caller's limit: requesting exactly the
+        # fork: better-hermeslcm — ask for ONE MORE than the caller's limit: requesting exactly the
         # limit cannot tell "these are all the matches" from "the corpus holds more", and the
         # answer then claimed completeness over a capped selection (round-4 verify-4 #13).
         nodes = _search_reporting_progress(
@@ -6553,7 +6553,7 @@ def lcm_expand_query(args: Dict[str, Any], **kwargs) -> str:
     if not nodes and not raw_results:
         answer = "No matching summaries or raw messages found in the current session."
         if search_incompleteness:
-            # fork: betterlcm — an empty result from a capped or failed scan is not an absence
+            # fork: better-hermeslcm — an empty result from a capped or failed scan is not an absence
             # (round-4 verify-4 #13)
             answer = (
                 "No matches were found, but the search did not run exhaustively; this is not "
@@ -6588,7 +6588,7 @@ def lcm_expand_query(args: Dict[str, Any], **kwargs) -> str:
 
     context_blocks = []
     context_budget_used = 0
-    # fork: betterlcm — nodes the caller explicitly asked for that this call will not process
+    # fork: better-hermeslcm — nodes the caller explicitly asked for that this call will not process
     unprocessed_node_ids = [int(node.node_id) for node in nodes[max_results:]]
     for node in nodes[:max_results]:
         remaining_context_tokens = max(0, context_max_tokens - context_budget_used)
@@ -6712,7 +6712,7 @@ def lcm_expand_query(args: Dict[str, Any], **kwargs) -> str:
         bool(item.get("summary_truncated")) or bool(item.get("pagination", {}).get("has_more"))
         for item in context_pagination
     )
-    # fork: betterlcm — a FIELD left unread makes the context truncated too. Only whole-page
+    # fork: better-hermeslcm — a FIELD left unread makes the context truncated too. Only whole-page
     # `has_more` and summary truncation counted, so a row whose envelope or tool calls were cut
     # reached synthesis and the answer still said context_truncated=false (round-5 verify-6 #7).
     _TRUNCATED_FIELD_FLAGS = (
@@ -6774,7 +6774,7 @@ def lcm_expand_query(args: Dict[str, Any], **kwargs) -> str:
     model = engine._config.expansion_model or engine._config.summary_model or ""
     timeout = engine.effective_expansion_timeout_ms / 1000  # fork: curved
     try:
-        _LAST_SYNTHESIS_STATUS.unfinished = ""  # fork: betterlcm — see below
+        _LAST_SYNTHESIS_STATUS.unfinished = ""  # fork: better-hermeslcm — see below
         answer = _synthesize_expansion_answer(
             prompt=prompt,
             context_blocks=context_blocks,
@@ -6808,7 +6808,7 @@ def lcm_expand_query(args: Dict[str, Any], **kwargs) -> str:
         "matches": matches,
         "raw_matches": raw_matches,
     }
-    # fork: betterlcm — everything the caller asked for that this answer does NOT cover
+    # fork: better-hermeslcm — everything the caller asked for that this answer does NOT cover
     # (round-2 verify-4 #24): nodes that do not exist, nodes the bound could not resolve,
     # nodes beyond max_results, and an answer the route stopped mid-sentence.
     if missing_node_ids:
@@ -6827,7 +6827,7 @@ def lcm_expand_query(args: Dict[str, Any], **kwargs) -> str:
         payload["bounded_scans"] = search_incompleteness
     if more_results_beyond_limit:
         payload["more_results_available_in"] = sorted(set(more_results_beyond_limit))
-    # fork: betterlcm — a source row this answer could not read makes the answer incomplete,
+    # fork: better-hermeslcm — a source row this answer could not read makes the answer incomplete,
     # however the blocks were shaped (round-3 verify-4 #12)
     unreadable_sources = [
         block.get("pagination", {}).get("missing_source_store_ids")
@@ -6840,7 +6840,7 @@ def lcm_expand_query(args: Dict[str, Any], **kwargs) -> str:
         payload["missing_source_store_ids"] = sorted(
             {int(value) for ids in unreadable_sources for value in ids}
         )
-    # fork: betterlcm — completeness is the conjunction of EVERY traversal and hydration
+    # fork: better-hermeslcm — completeness is the conjunction of EVERY traversal and hydration
     # outcome, not just the missing-raw-row one. A corrupt externalized payload and a missing
     # child node both set `complete=False` on their own block, and both were ignored here, so
     # the answer read as fully expanded over evidence that was never available
@@ -7630,7 +7630,7 @@ def lcm_status(args: Dict[str, Any], **kwargs) -> str:
             "skipped": int(getattr(engine, "_proactive_recall_skipped_count", 0) or 0),
             "timeout": int(getattr(engine, "_proactive_recall_timeout_count", 0) or 0),
         },
-        "window_scaling": engine.window_scaling_status(),  # fork: betterlcm
+        "window_scaling": engine.window_scaling_status(),  # fork: better-hermeslcm
         "config_sources": config_sources,
         "config_source_warnings": config_source_warnings,
         "ignored_config_yaml_lcm_keys": ignored_config_yaml_lcm_keys,
@@ -7881,7 +7881,7 @@ def lcm_doctor(args: Dict[str, Any], **kwargs) -> str:
 
     # 3. Orphaned DAG nodes (nodes referencing sources that don't exist)
     try:
-        # fork: betterlcm — BOTH source types, and the population is named. The check walked
+        # fork: better-hermeslcm — BOTH source types, and the population is named. The check walked
         # only message-source nodes with the default node limit, so a node referencing a
         # nonexistent CHILD NODE was told "all nodes have valid sources", and a session with
         # more nodes than the limit was certified from a sample (round-2 verify-4 #34).
@@ -8022,7 +8022,7 @@ def lcm_doctor(args: Dict[str, Any], **kwargs) -> str:
             "detail": f"{usage_pct}% used, compaction triggers at {threshold_pct}%",
         })
 
-    # fork: betterlcm — index coverage (opt-in: it reads every node's sources)
+    # fork: better-hermeslcm — index coverage (opt-in: it reads every node's sources)
     coverage_report = None
     if args.get("coverage"):
         from .coverage_doctor import coverage_check, session_coverage

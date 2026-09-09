@@ -93,7 +93,7 @@ exactly when "strictly better than upstream" can silently stop being true.
 `plugin.yaml` keeps upstream's version string (four upstream tests pin it; the fork is
 identified by this file and `git log`). The live `lcm.db` gains the
 `lcm_node_meta` table on first use; an upstream build classifies such a DB as newer (drop the
-table and the `betterlcm_node_meta_v1` row in `lcm_migration_state` to go back).
+table and the `better_hermeslcm_node_meta_v1` row in `lcm_migration_state` to go back).
 Fork code is kept in NEW modules wherever possible so upstream files receive only small,
 localized hook calls. The complete list of upstream files touched, with the reason for each
 touch, is in `docs/fork-touchpoints.md` — read it before resolving a conflict: it tells you
@@ -103,7 +103,8 @@ change upstream also made (reconcile). Every fork-only test lives under `tests/f
 ## Tracking lossless-claw (the second maintenance duty)
 The fork was inspired by [lossless-claw](https://github.com/Martian-Engineering/lossless-claw)
 (OpenClaw, TypeScript). Watch **commits, not only tags** — the last version analysed in depth is
-**v1.0.0** (`docs/claw-comparison/v1.0.0.md`). On every release *or* meaningful commit past it:
+**v1.0.0**; what that round decided is recorded in `docs/TASKS.md` (sections C and G), not as a
+report in this repository. On every release *or* meaningful commit past it:
 1. Clone the release tag to a temp dir (`git clone --depth 1 --branch vX.Y.Z … /tmp/lossless-claw-vX.Y.Z`).
 2. Compare it deeply against this fork, one agent per aspect, code-level with citations on both
    sides: (1) compaction/DAG algorithm, (2) loss avoidance/provenance/recovery, (3) summariser
@@ -112,7 +113,9 @@ The fork was inspired by [lossless-claw](https://github.com/Martian-Engineering/
 3. Keep only findings where claw is genuinely better *for this fork's purpose* (no loss; 1M
    without degrading 256k) or fixes something the hermes-lcm base does badly. Port them into
    the fork modules, with tests under `tests/fork/`, and record each ported item (and each
-   rejected one, with the reason) in `docs/claw-comparison/vX.Y.Z.md`.
+   rejected one, with the reason) as a pass entry in `docs/TASKS.md`. Ported work lives in the
+   code; rejected work lives in the backlog with its reason. A separate findings document is
+   neither, and does not ship.
 4. **Treat a claw BUGFIX as a lead, not only as a port candidate.** Both projects solve the same
    problem, so a bug claw fixed very often exists here in an analogous shape — different code,
    same mistake. For each fix, find the corresponding place in this fork and prove by probe

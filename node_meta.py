@@ -1,4 +1,4 @@
-"""fork: betterlcm — sidecar table ``lcm_node_meta`` (escalation level + index block).
+"""fork: better-hermeslcm — sidecar table ``lcm_node_meta`` (escalation level + index block).
 
 ``summary_nodes`` rows decode positionally, the v5 shape classifier fails closed on any
 unregistered core column and the rollup trigger SQL is byte-compared, so per-node data the
@@ -14,7 +14,7 @@ fork adds lives in its own feature table rather than in a new core column:
   and as a flat JSON field in several tool paths.
 
 The table is created idempotently from the DAG's own init (recorded as the named
-``betterlcm_node_meta_v1`` migration step) and its prefix ``lcm_node`` is registered with
+``better_hermeslcm_node_meta_v1`` migration step) and its prefix ``lcm_node`` is registered with
 the classifier so a base-build check treats it as a known feature family. Rows cascade
 with node deletes through ``SummaryDAG.delete_node_batch``.
 """
@@ -28,7 +28,13 @@ from typing import Dict, Iterable, Optional
 from .db_bootstrap import mark_migration_step_complete
 
 NODE_META_TABLE = "lcm_node_meta"
-MIGRATION_STEP = "betterlcm_node_meta_v1"
+MIGRATION_STEP = "better_hermeslcm_node_meta_v1"
+# fork: better-hermeslcm — the step was named `betterlcm_node_meta_v1` before the project was
+# renamed, and that row exists in every database written by an earlier build. The step is
+# idempotent (the table creation is `IF NOT EXISTS`), so a database carrying only the old name
+# is not broken by the new one — but the old row is retired explicitly rather than left behind
+# as a second, silently-diverging record of the same migration.
+LEGACY_MIGRATION_STEPS = ("betterlcm_node_meta_v1",)
 INDEX_BLOCK_MARKER = "Expand for details about:"
 INDEX_BLOCK_MAX_CHARS = 1600  # historical: the cut this fork removed (see extract_index_block)
 
@@ -56,13 +62,21 @@ def ensure_node_meta_table(conn: sqlite3.Connection) -> None:
         """
     )
     mark_migration_step_complete(conn, MIGRATION_STEP)
+    # retire the pre-rename row so one migration is not recorded under two names
+    for legacy_step in LEGACY_MIGRATION_STEPS:
+        try:
+            conn.execute(
+                "DELETE FROM lcm_migration_state WHERE step_name = ?", (legacy_step,)
+            )
+        except sqlite3.DatabaseError:  # pragma: no cover - the table may predate this column
+            pass
 
 
 def extract_index_block(summary: str) -> str:
     """Everything after the LAST ``Expand for details about:`` marker, whitespace-normalised
     per line. Empty when the summary carries no marker.
 
-    fork: betterlcm — this used to be cut at 1,600 characters, which sliced the index in the
+    fork: better-hermeslcm — this used to be cut at 1,600 characters, which sliced the index in the
     middle of a topic: a 200-topic block ended partway through topic 84, and the tools that
     surface the sidecar showed the cut copy with no continuation. Cutting the index is exactly
     the loss this fork exists to remove, and the block is bounded by the summary that contains
@@ -101,7 +115,7 @@ class NodeMetaStore:
 
     def write_statement(self, node_id: int, *, level: int, summary: str = "",
                         index_block: Optional[str] = None) -> None:
-        """fork: betterlcm — the same write, WITHOUT its own commit.
+        """fork: better-hermeslcm — the same write, WITHOUT its own commit.
 
         For callers that publish the node and its sidecar in one transaction, so a summary can
         never become visible without the level and index block that describe it (audit p05
@@ -145,7 +159,7 @@ class NodeMetaStore:
         ids = [int(node_id) for node_id in node_ids]
         if not ids:
             return
-        # fork: betterlcm — batched under SQLite's bound-variable ceiling (verify-3 p04 ST5)
+        # fork: better-hermeslcm — batched under SQLite's bound-variable ceiling (verify-3 p04 ST5)
         for start in range(0, len(ids), 900):
             chunk = ids[start:start + 900]
             placeholders = ",".join("?" for _ in chunk)

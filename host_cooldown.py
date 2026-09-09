@@ -1,4 +1,4 @@
-"""Compression-failure cooldown for a plugin engine (fork: betterlcm).
+"""Compression-failure cooldown for a plugin engine (fork: better-hermeslcm).
 
 Hermes only implements cooldown / "compression blocked" handling for its built-in
 ``ContextCompressor``: on an exception from a *plugin* engine's ``compress()`` the host
@@ -63,7 +63,7 @@ class HostCooldownMixin:
         return max(0.0, value)
 
     def _cooldown_applies_to_current_session(self) -> bool:
-        """fork: betterlcm — a failure cools down the session that suffered it.
+        """fork: better-hermeslcm — a failure cools down the session that suffered it.
 
         The deadline lives on the engine, and the engine outlives a session: after `/new` or a
         foreground rebind the next session inherited a block it never earned. Backoff for
@@ -86,7 +86,7 @@ class HostCooldownMixin:
         )
 
     def on_session_reset(self) -> None:  # type: ignore[override]
-        """fork: betterlcm — a reset ends the session the cooldown was armed for."""
+        """fork: better-hermeslcm — a reset ends the session the cooldown was armed for."""
         self.clear_compression_failure_cooldown()
         parent = getattr(super(), "on_session_reset", None)
         if callable(parent):
@@ -186,7 +186,7 @@ class HostCooldownMixin:
         return result
 
     def _compaction_lock_object(self):
-        # fork: betterlcm — normally constructed in LCMEngine.__init__ (see H01). The lazy
+        # fork: better-hermeslcm — normally constructed in LCMEngine.__init__ (see H01). The lazy
         # branch remains only for objects that mix this in without that constructor; it is not
         # the ordinary path, so it cannot re-introduce the two-locks race for the engine.
         lock = getattr(self, "_compaction_lock", None)

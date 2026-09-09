@@ -1,4 +1,4 @@
-"""fork: betterlcm — a summary and everything that describes it become visible together, and
+"""fork: better-hermeslcm — a summary and everything that describes it become visible together, and
 the raw frontier never calls a row uncompacted that a published summary already covers
 (audit p05 CP02 / CP03)."""
 import sqlite3

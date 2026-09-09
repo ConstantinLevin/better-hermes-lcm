@@ -1,4 +1,4 @@
-"""fork: betterlcm — nothing may be lost before the summariser sees it, and when a route does
+"""fork: better-hermeslcm — nothing may be lost before the summariser sees it, and when a route does
 fail the reason has to survive so the leaf-rescue path can act on it (audit p05 PB01 / ES03)."""
 import json
 
@@ -169,7 +169,7 @@ def test_an_extraction_note_names_the_rows_it_came_from(tmp_path, monkeypatch):
         "[USER]: ship it", str(tmp_path / "notes"), session_id="s1", source_store_ids=[7, 8, 9]
     ) is True
     note = next((tmp_path / "notes").glob("*.md")).read_text()
-    # fork: betterlcm — contiguous ids collapse into a range so the COMPLETE manifest fits on
+    # fork: better-hermeslcm — contiguous ids collapse into a range so the COMPLETE manifest fits on
     # one line however long the segment is (round-3 verify-3)
     assert "store_ids=7-9 (3 row(s))" in note
     assert "sha256:" in note

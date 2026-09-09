@@ -27,7 +27,7 @@ from .sqlite_util import _is_sqlite_locked_error
 
 @contextmanager
 def _sqlite_savepoint_if_possible(conn: sqlite3.Connection):
-    """fork: betterlcm — read a rollup and its lineage inside one consistent snapshot.
+    """fork: better-hermeslcm — read a rollup and its lineage inside one consistent snapshot.
 
     A deferred read transaction is enough: SQLite gives every statement in it the same view.
     If the connection is already in a transaction (the caller owns one) this is a no-op.
@@ -170,7 +170,7 @@ class RollupStore:
         period_start: str,
         scope: str,
     ) -> dict[str, object] | None:
-        # fork: betterlcm — the row and its lineage are read in ONE snapshot. Reading them in
+        # fork: better-hermeslcm — the row and its lineage are read in ONE snapshot. Reading them in
         # two statements let a concurrent rebuild land in between, so a returned "ready" rollup
         # carried generation one's text and fingerprint with generation two's source ids: a
         # summary attributed to sources it was not built from (verify-4 #20).

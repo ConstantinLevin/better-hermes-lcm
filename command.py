@@ -1276,13 +1276,13 @@ def _doctor_source_apply_text(engine) -> str:
 
 
 def _doctor_coverage_text(engine) -> str:
-    """fork: betterlcm — `/lcm doctor coverage`."""
+    """fork: better-hermeslcm — `/lcm doctor coverage`."""
     from .coverage_doctor import coverage_check, session_coverage
 
     report = session_coverage(engine, engine.current_session_id)
     check = coverage_check(report)
     lines = [
-        "LCM index coverage (fork: betterlcm)",
+        "LCM index coverage (fork: better-hermeslcm)",
         f"- session: {report['session_id']}",
         f"- nodes scored: {report['scored_nodes']} of {report['nodes']}",
         (f"- aggregate: {report['aggregate_fraction']:.0%} of index-bearing entities discoverable "
@@ -1869,7 +1869,7 @@ def _doctor_retention_text(engine) -> str:
 
 
 class CleanupWouldBreakProvenance(RuntimeError):
-    """fork: betterlcm — deleting these sessions would strand a summary outside them."""
+    """fork: better-hermeslcm — deleting these sessions would strand a summary outside them."""
 
     def __init__(self, node_ids: list[int], store_ids: list[int]) -> None:
         self.node_ids = node_ids
@@ -1911,7 +1911,7 @@ def _delete_clean_candidates_atomically(engine, session_ids: set[str]) -> dict[s
             "lifecycle_skipped": 0,
         }
 
-    # fork: betterlcm — cleanup owns the message connection for the whole destructive
+    # fork: better-hermeslcm — cleanup owns the message connection for the whole destructive
     # transaction. Without the store's write lock, an ordinary append on another thread
     # committed cleanup's half-finished deletion: the raw rows were gone, cleanup then failed,
     # and a summary still pointed at them (round-4 verify-4 #4).
@@ -1931,7 +1931,7 @@ def _delete_clean_candidates_in_owned_transaction(
         SummaryDAG.stage_delete_session_scope(conn, session_ids)
         scope_table = SummaryDAG.DELETE_SESSION_SCOPE_TABLE
 
-        # fork: betterlcm — refuse to delete anything a node OUTSIDE the deletion set still
+        # fork: better-hermeslcm — refuse to delete anything a node OUTSIDE the deletion set still
         # points at. `/new` retains the deeper summaries in the new session and leaves their
         # children with the old one, so cleaning the predecessor could break a parent in a
         # session the operator never selected: the retained node stays, its lineage does not,
@@ -2057,7 +2057,7 @@ def _delete_clean_candidates_in_owned_transaction(
         lifecycle_skipped = scoped_count - lifecycle_deleted
         conn.commit()
     except BaseException:
-        # fork: betterlcm — BaseException, not Exception: a KeyboardInterrupt or a host
+        # fork: better-hermeslcm — BaseException, not Exception: a KeyboardInterrupt or a host
         # cancellation mid-cleanup left the deletion transaction open, and a later unrelated
         # commit made those deletes permanent (verify-4 #4).
         try:
@@ -2116,7 +2116,7 @@ def _doctor_clean_apply_text(engine) -> str:
     session_ids = {item["session_id"] for item in candidates}
     try:
         deleted = _delete_clean_candidates_atomically(engine, session_ids)
-    except CleanupWouldBreakProvenance as exc:   # fork: betterlcm
+    except CleanupWouldBreakProvenance as exc:   # fork: better-hermeslcm
         return "\n".join([
             "LCM doctor clean apply",
             "status: refused",
@@ -5128,7 +5128,7 @@ def handle_lcm_command(raw_args: str | None, engine) -> str:
             return _doctor_source_text(engine)
         if len(rest) == 1 and rest[0].lower() == "retention":
             return _doctor_retention_text(engine)
-        if len(rest) == 1 and rest[0].lower() == "coverage":  # fork: betterlcm
+        if len(rest) == 1 and rest[0].lower() == "coverage":  # fork: better-hermeslcm
             return _doctor_coverage_text(engine)
         if len(rest) == 2 and rest[0].lower() == "clean" and rest[1].lower() == "apply":
             return _doctor_clean_apply_text(engine)

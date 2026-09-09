@@ -9,7 +9,7 @@ import importlib
 import tempfile as _bootstrap_tempfile
 from pathlib import Path
 
-# fork: betterlcm — isolate the run from live storage BEFORE anything imports the plugin
+# fork: better-hermeslcm — isolate the run from live storage BEFORE anything imports the plugin
 # (audit E, E07). A test that builds an LCMEngine without an explicit database_path resolves
 # to $HERMES_HOME/lcm.db, and inherited LCM_* variables would silently change what is being
 # tested. Nothing here is a claim that the suite currently writes to live data; it removes
@@ -76,7 +76,7 @@ if pkg_name not in sys.modules:
                 pass  # some modules may fail (e.g. engine needs agent)
 
 
-# ── fork: betterlcm ──────────────────────────────────────────────────────────────────────
+# ── fork: better-hermeslcm ──────────────────────────────────────────────────────────────────────
 # Upstream's tests ran compactions without any LLM and silently relied on the deterministic
 # L3 truncation fallback to produce "summaries". The fork removed L3 (every summariser
 # failure now arms a cooldown and leaves the raw messages in place), so the suite needs an

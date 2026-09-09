@@ -1,4 +1,4 @@
-"""End-to-end no-loss exercise against the DEPLOYED betterlcm plugin (fork: betterlcm).
+"""End-to-end no-loss exercise against the DEPLOYED better-hermeslcm plugin.
 
 Not a unit test: it drives the engine the way the host does — feeding compress()'s own return
 value back as the next turn's context — over a long, tool-heavy conversation, then checks the

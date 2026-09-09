@@ -1620,7 +1620,7 @@ class TestEscalationStripReasoning:
             assert envelope["operation"] == "lcm_summary_l1"
             bounded_source = envelope["sources"][0]
             original_source = adversarial + "\n\n---\n\n" + second_summary
-            # fork: betterlcm — the envelope carries the source WHOLE (audit p05 PB01)
+            # fork: better-hermeslcm — the envelope carries the source WHOLE (audit p05 PB01)
             assert bounded_source["content"] == original_source
             assert "content_truncated" not in bounded_source
             assert session_id not in messages[1]["content"]
@@ -8199,7 +8199,7 @@ class TestMessageFiltering:
         dependent_ids = [row["store_id"] for row in rows if "dependent assistant reply" in row["content"]]
         nodes = engine._dag.get_session_nodes("user-123")
         assert dependent_ids
-        # fork: betterlcm — the reply stays out of the summariser input and out of active
+        # fork: better-hermeslcm — the reply stays out of the summariser input and out of active
         # context, but a row this leaf CONSUMED must remain reachable from it: it is a
         # source of the node and is named there as not summarised (audit p05 CP01).
         assert any(dependent_ids[0] in node.source_ids for node in nodes)
@@ -8269,7 +8269,7 @@ class TestMessageFiltering:
         dependent_ids = [row["store_id"] for row in rows if "trailing dependent assistant reply" in row["content"]]
         nodes = engine._dag.get_session_nodes("user-123")
         assert dependent_ids
-        # fork: betterlcm — the reply stays out of the summariser input and out of active
+        # fork: better-hermeslcm — the reply stays out of the summariser input and out of active
         # context, but a row this leaf CONSUMED must remain reachable from it: it is a
         # source of the node and is named there as not summarised (audit p05 CP01).
         assert any(dependent_ids[0] in node.source_ids for node in nodes)
@@ -8799,7 +8799,7 @@ class TestMessageFiltering:
         ]
         nodes = engine._dag.get_session_nodes("user-123")
         assert dependent_ids
-        # fork: betterlcm — the reply stays out of the summariser input and out of active
+        # fork: better-hermeslcm — the reply stays out of the summariser input and out of active
         # context, but a row this leaf CONSUMED must remain reachable from it: it is a
         # source of the node and is named there as not summarised (audit p05 CP01).
         assert any(dependent_ids[0] in node.source_ids for node in nodes)
@@ -10166,7 +10166,7 @@ class TestEngineCompress:
 
         assert "keep this real user content" in serialized
         assert "[ASSISTANT]: keep this real assistant content" in serialized
-        # fork: betterlcm — the noise turns are still kept OUT of the summariser's input, but
+        # fork: better-hermeslcm — the noise turns are still kept OUT of the summariser's input, but
         # the removal is by wording, not by a trusted synthetic-origin signal, so each one
         # leaves a one-line receipt instead of disappearing (round-4 verify-4 #8).
         assert "[ASSISTANT]: ACK" not in serialized
@@ -10533,7 +10533,7 @@ class TestEngineCompress:
         serialized = engine._serialize_messages(messages)
 
         assert "I can still explain the plan" in serialized
-        # fork: betterlcm — an unmatched call is serialized and marked, not dropped
+        # fork: better-hermeslcm — an unmatched call is serialized and marked, not dropped
         assert "terminal(" in serialized
         assert "noisy-orphan" in serialized
         assert "[no tool result in this chunk]" in serialized
@@ -10565,7 +10565,7 @@ class TestEngineCompress:
         assert "read_file(" in serialized
         assert "README says hello" in serialized
         assert "standalone legacy payload" in serialized
-        # fork: betterlcm — the unmatched call stays, marked; the matched one is unmarked
+        # fork: better-hermeslcm — the unmatched call stays, marked; the matched one is unmarked
         assert "stale orphan args" in serialized
         assert 'terminal({"command": "stale orphan args"}) [no tool result in this chunk]' in serialized
         assert 'read_file({"path": "README.md"}) [no' not in serialized
@@ -10597,7 +10597,7 @@ class TestEngineCompress:
         result = engine.compress(messages)
 
         assert len(result) == len(messages)
-        # fork: betterlcm — the strip leaves its receipt on the turn it cut
+        # fork: better-hermeslcm — the strip leaves its receipt on the turn it cut
         assert result[-1]["content"] == f"Visible answer\n{INTERNAL_REPLAY_MARKER}"
         assert engine._last_compression_status == "sanitized"
         assert engine._last_compression_noop_reason == ""
@@ -11540,7 +11540,7 @@ class TestEngineCompress:
             token_pairs.append((last_pressure_tokens, count_messages_tokens(candidate_raw)))
             return candidate_raw[:1]
 
-        # fork: betterlcm — the leaf loop now has a wall clock at EVERY window (it chunks at
+        # fork: better-hermeslcm — the leaf loop now has a wall clock at EVERY window (it chunks at
         # every window), so the deadline reaches the summariser here too.
         def fake_summary(chunk, focus_topic=None, deadline=None):
             return chunk, count_messages_tokens(chunk), "Window summary.\nExpand for details about: current window", 1, 0
@@ -12014,7 +12014,7 @@ class TestEngineCompress:
         engine.compress(messages, current_tokens=900)
 
         depth1 = engine._dag.get_session_nodes("test-session", depth=1)
-        # fork: betterlcm — this test is about the SUPPRESSION being bypassed, not about how
+        # fork: better-hermeslcm — this test is about the SUPPRESSION being bypassed, not about how
         # many groups one call may publish. Upstream condenses one group per call because it
         # produces one leaf per call; this fork chunks at every window, so `condense_group_cap`
         # absorbs one compaction's worth of leaves and more than one group may land here.
@@ -12313,7 +12313,7 @@ class TestSessionRetainDepth:
             ))
         assert len(engine._dag.get_session_nodes("test-session")) == 3
         engine.on_session_reset()
-        # fork: betterlcm — nodes are never deleted; retain 0 just carries nothing
+        # fork: better-hermeslcm — nodes are never deleted; retain 0 just carries nothing
         assert len(engine._dag.get_session_nodes("test-session")) == 3
         assert engine.carry_over_new_session_context("test-session", "next-session") == 0
         assert engine._dag.get_session_nodes("next-session") == []
@@ -12331,7 +12331,7 @@ class TestSessionRetainDepth:
                 source_type="messages", created_at=time.time(),
             ))
         engine.on_session_reset()
-        # fork: betterlcm — nothing deleted; d2+ carry over, d0/d1 stay with the old session
+        # fork: better-hermeslcm — nothing deleted; d2+ carry over, d0/d1 stay with the old session
         remaining = engine._dag.get_session_nodes("test-session")
         assert len(remaining) == 4
         assert engine.carry_over_new_session_context("test-session", "next-session") == 2
@@ -12369,7 +12369,7 @@ class TestSessionRetainDepth:
         moved = engine.carry_over_new_session_context("old-session", "new-session")
 
         assert moved == 2
-        # fork: betterlcm — the d0/d1 nodes stay with the old session instead of being deleted
+        # fork: better-hermeslcm — the d0/d1 nodes stay with the old session instead of being deleted
         assert sorted(n.depth for n in engine._dag.get_session_nodes("old-session")) == [0, 1]
         new_nodes = engine._dag.get_session_nodes("new-session")
         assert len(new_nodes) == 2
@@ -12615,7 +12615,7 @@ class TestSessionRollover:
         assert engine._session_id == "new-session"
         assert engine._session_platform == "cli"
         assert engine._store.get_session_count("old-session") == 3
-        # fork: betterlcm — d0/d1 stay with the old session instead of being deleted
+        # fork: better-hermeslcm — d0/d1 stay with the old session instead of being deleted
         assert sorted(n.depth for n in engine._dag.get_session_nodes("old-session")) == [0, 1]
         new_nodes = engine._dag.get_session_nodes("new-session")
         assert len(new_nodes) == 2
@@ -12657,7 +12657,7 @@ class TestSessionRollover:
         s3_nodes = engine._dag.get_session_nodes("s3")
         assert len(s3_nodes) == 3
         assert sorted(node.summary for node in s3_nodes) == ["fresh d2", "seed d2", "seed d3"]
-        # fork: betterlcm — the shallow node stays with s2 instead of being deleted
+        # fork: better-hermeslcm — the shallow node stays with s2 instead of being deleted
         assert [node.summary for node in engine._dag.get_session_nodes("s2")] == ["fresh d0"]
         assert engine._session_id == "s3"
 
@@ -12720,7 +12720,7 @@ class TestSessionRollover:
                 "from_current_session": True,
             }
         ]
-        # fork: betterlcm — the shallow node is kept with the old session, out of current scope
+        # fork: better-hermeslcm — the shallow node is kept with the old session, out of current scope
         pruned_node = engine._dag.get_node(pruned_node_id)
         assert pruned_node is not None and pruned_node.session_id == "old-retrieval"
         assert engine._store.get_session_count("old-retrieval") == 1
@@ -20881,7 +20881,7 @@ class TestAssemblyGuardrails:
         config = LCMConfig(
             fresh_tail_count=10,
             database_path=str(tmp_path / "lcm_guardrail_summary.db"),
-            max_assembly_tokens=252,  # fork: betterlcm — empty-hint fallback text (+21 chars per node)
+            max_assembly_tokens=252,  # fork: better-hermeslcm — empty-hint fallback text (+21 chars per node)
         )
         instance = LCMEngine(config=config)
         instance._session_id = "guardrail-session"
@@ -21218,7 +21218,7 @@ class TestAssemblyGuardrails:
 
         result = instance.compress(messages, current_tokens=110)
 
-        # fork: betterlcm — the assistant turn really was dropped, so the prefix carries the
+        # fork: better-hermeslcm — the assistant turn really was dropped, so the prefix carries the
         # minimal receipt saying so; upstream returned the anchor and the tail in silence
         # (round-3 verify-4 #6).
         from hermes_lcm import marked_loss
@@ -22247,7 +22247,7 @@ class TestAssemblyToolPairGuardrail:
         self._assert_provider_tool_sequence_valid(result)
         assert result[1]["role"] == "tool"
         assert result[1]["tool_call_id"] == "call_late"
-        # fork: betterlcm — the stub says what is true, not that a summary above covers it, and
+        # fork: better-hermeslcm — the stub says what is true, not that a summary above covers it, and
         # the late result itself is named rather than dropped in silence (verify-4 #10). Here
         # the result IS in this window, just not replayable at this position: claiming it was
         # archived (or never received) would both be false (round-2 verify-4 #19).
@@ -22291,7 +22291,7 @@ class TestAssemblyToolPairGuardrail:
         self._assert_provider_tool_sequence_valid(result)
 
     def test_sanitize_tool_pairs_reorders_parallel_results_instead_of_dropping_them(self, tmp_path):
-        """fork: betterlcm — upstream kept the first result and replaced every later
+        """fork: better-hermeslcm — upstream kept the first result and replaced every later
         out-of-order one with an "earlier conversation" stub, so a real tool result the agent
         had already received was deleted to satisfy an ORDERING constraint. The results are
         complete and identifiable by call id, so the fork reorders them to match the call
@@ -23677,11 +23677,11 @@ class TestEngineTools:
             "total_sources": 5,
             "next_source_offset": 3,
             "next_content_offset": 0,
-            # fork: betterlcm — an assistant turn's tool calls are paged too (audit p02 T04),
+            # fork: better-hermeslcm — an assistant turn's tool calls are paged too (audit p02 T04),
             # and an expansion says whether every source it names could be read (verify-4 #15)
             "tool_calls_offset": 0,
             "next_tool_calls_offset": 0,
-            # fork: betterlcm — the envelope has a cursor of its own and travels with the page
+            # fork: better-hermeslcm — the envelope has a cursor of its own and travels with the page
             # (round-5 verify-6 #6)
             "envelope_offset": 0,
             "next_envelope_offset": 0,

@@ -1,4 +1,4 @@
-"""fork: betterlcm — the bypass path bounds ignored/stateless/auxiliary context through the
+"""fork: better-hermeslcm — the bypass path bounds ignored/stateless/auxiliary context through the
 host's native compressor. Two upstream behaviours turned host decisions into loss:
 BY02 an abort became a destructive trim reported as success, and BY03 one unsupported
 constructor keyword sent bypassed summarisation to a different model/route than configured."""

@@ -38,7 +38,7 @@ _MAX_QUOTE_CHARS = 24_000
 _MAX_LABEL_CHARS = 300
 _MAX_NUMERIC_DIGITS = 1_000
 _MAX_DECIMAL_ABS = Decimal("1e308")
-# fork: betterlcm — a COMPLETE numeric lexeme. Without the boundaries, "1e3 USD" offered 1 and
+# fork: better-hermeslcm — a COMPLETE numeric lexeme. Without the boundaries, "1e3 USD" offered 1 and
 # 3 as explicit numbers and grounding accepted an operand worth 3 from a quote that says 1000
 # (round-3 verify-4 #19). A fragment of a number is not a number the quote states.
 _NUMBER_RE = re.compile(
@@ -609,7 +609,7 @@ def _explicit_numbers(text: str) -> list[int | Decimal]:
     ]
     values.extend(
         _WORD_NUMBERS[match.group(0).casefold()]
-        # fork: betterlcm — a whole WORD-number, not a component of one: "twenty-five" offered
+        # fork: better-hermeslcm — a whole WORD-number, not a component of one: "twenty-five" offered
         # 5 (round-3 verify-4 #19).
         for match in re.finditer(
             r"(?<![\w-])(?:" + "|".join(_WORD_NUMBERS) + r")(?![\w-])",
@@ -636,7 +636,7 @@ def _numeric_values_match(parsed: int | Decimal, value: int | float) -> bool:
         return False
     if isinstance(value, int):
         return parsed == value
-    # fork: betterlcm — EXACT. An absolute 1e-9 tolerance accepted 0 as the value of a quote
+    # fork: better-hermeslcm — EXACT. An absolute 1e-9 tolerance accepted 0 as the value of a quote
     # saying 0.0000000001 (round-3 verify-4 #19); a value the quote does not state is not
     # grounded in it. Decimal(str(float)) is exact for the literals a quote can contain.
     return Decimal(parsed) == converted
@@ -660,7 +660,7 @@ def _clauses(text: str) -> list[str]:
 def _clause_containing_value(quote: str, value) -> "str | None":
     """The single clause of ``quote`` that states ``value``, or None when that is ambiguous.
 
-    fork: betterlcm — presence in the quote is not attribution. "Alice paid 10 USD; Bob paid
+    fork: better-hermeslcm — presence in the quote is not attribution. "Alice paid 10 USD; Bob paid
     30 USD" contains both names and both numbers, so label=Alice value=30 passed every check
     and the computation attached genuine citations to a relationship they do not support
     (round-3 verify-4 #18/#19). When two clauses state the same value the quote does not
@@ -889,7 +889,7 @@ def _ground_one(
         return None, error
     if label and label.casefold() not in quote.casefold():
         return None, "label is not explicit in its exact quote"
-    # fork: betterlcm — presence is not attribution, and a quote can state a value in order to
+    # fork: better-hermeslcm — presence is not attribution, and a quote can state a value in order to
     # DENY it (round-3 verify-4 #18/#19).
     if value not in (None, "") and isinstance(value, (int, float, str)):
         clause = _clause_containing_value(quote, value)
@@ -1064,7 +1064,7 @@ def _format_number(value: int | float | Decimal) -> str:
     if decimal_value == decimal_value.to_integral_value():
         return str(int(decimal_value))
     rendered = format(round(decimal_value, 6), "f").rstrip("0").rstrip(".")
-    # fork: betterlcm — display rounding must not turn a real quantity into a different one:
+    # fork: better-hermeslcm — display rounding must not turn a real quantity into a different one:
     # 0.0000000001 rendered as "0", so the reader saw $0 for a nonzero cost
     # (round-4 verify-4 #19). A value that rounds away keeps its exact form.
     if Decimal(rendered or "0") != decimal_value:
@@ -1646,7 +1646,7 @@ def verify_final_answer(candidate: Any, trace: ComputationTrace) -> Verification
         return VerificationDecision(
             "fallback", "candidate omits or changes a grounded entity"
         )
-    # fork: betterlcm — ONLY the canonical answer is verifiable here. Preserving the numbers,
+    # fork: better-hermeslcm — ONLY the canonical answer is verifiable here. Preserving the numbers,
     # units and entities was satisfied by arbitrary added prose ("The project was approved and
     # deployed", round-2 verify-5 #1), and a per-sentence grounding check was satisfied in turn
     # by an unsupported claim that merely named a grounded entity ("Alice authorized fraud",

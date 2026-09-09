@@ -55,7 +55,7 @@ def _prepare_private_backup_directory(path: Path) -> None:
     finally:
         os.close(fd)
 
-# fork: betterlcm — backup helpers. A backup is the fork's last line of defence against loss,
+# fork: better-hermeslcm — backup helpers. A backup is the fork's last line of defence against loss,
 # so it may never overwrite another backup, never share a scratch file with a concurrent
 # writer, and never report success for bytes that are still only in the page cache
 # (audit p05 MT01 / MT02 / MT03).
@@ -118,7 +118,7 @@ def _fsync_backup(path: Path) -> None:
     try:
         os.fsync(directory_fd)
     except OSError as exc:
-        # fork: betterlcm — "this platform cannot fsync a directory" and "the disk refused the
+        # fork: better-hermeslcm — "this platform cannot fsync a directory" and "the disk refused the
         # write" were both swallowed, so a backup whose directory entry never reached the disk
         # was reported as a durable one (round-2 verify-4 #37). Only the former is tolerated.
         if exc.errno not in _UNSUPPORTED_FSYNC_ERRNOS:
@@ -134,7 +134,7 @@ def flush_engine_connections(engine) -> None:
     ``rotate_backup_database`` (rolling backup) so the connection-flush
     contract stays in one place.
     """
-    # fork: betterlcm — a flush must never commit ANOTHER operation's unfinished transaction.
+    # fork: better-hermeslcm — a flush must never commit ANOTHER operation's unfinished transaction.
     # Calling this between a node INSERT and its metadata write committed the node without its
     # sidecar, and the publisher's rollback could no longer undo it (round-3 verify-4 #2). Both
     # stores expose their write locks; take them, so a publication in flight finishes first.
@@ -192,7 +192,7 @@ def backup_database(engine) -> dict[str, Any]:
         _restrict_existing_sqlite_artifacts(backup_path)
         _fsync_backup(backup_path)  # fork: durable before we report success
     except (OSError, sqlite3.Error) as exc:
-        # fork: betterlcm — an incomplete snapshot must not be left behind looking like one.
+        # fork: better-hermeslcm — an incomplete snapshot must not be left behind looking like one.
         try:
             if backup_path is not None and backup_path.exists():
                 backup_path.unlink()
@@ -237,7 +237,7 @@ def rotate_backup_database(engine) -> dict[str, Any]:
         _restrict_existing_sqlite_artifacts(backup_path)
         flush_engine_connections(engine)
 
-        # fork: betterlcm — a per-call scratch file. Every rotate used to write
+        # fork: better-hermeslcm — a per-call scratch file. Every rotate used to write
         # "<slot>.tmp", so two rotates running together wrote one file: the loser's snapshot
         # was replaced mid-write and the winner renamed a database another writer was still
         # filling in (audit p05 MT02).

@@ -22,7 +22,7 @@ import weakref
 from pathlib import Path
 from typing import Any, Dict
 
-# fork: betterlcm — how far the host-session ancestry walk follows parent links before it
+# fork: better-hermeslcm — how far the host-session ancestry walk follows parent links before it
 # gives up. Upstream stopped at 32, which a deep agent tree can exceed; see
 # ``_session_has_auxiliary_ancestor`` (audit p05 AX03).
 _ANCESTRY_WALK_MAX_HOPS = 256
@@ -506,7 +506,7 @@ class AuxiliarySessionMixin:
         log_prefix = str(getattr(caller_self, "log_prefix", "") or "").strip()
         if log_prefix.startswith("[subagent-"):
             return True
-        # fork: betterlcm — a restricted TOOLSET is not an identity. Upstream returned True for
+        # fork: better-hermeslcm — a restricted TOOLSET is not an identity. Upstream returned True for
         # any agent whose toolsets were a nonempty subset of {"memory", "skills"}, so a
         # legitimate foreground agent restricted to those tools was classified auxiliary and
         # its conversation was never stored at all — storage bypassed without the operator
@@ -526,7 +526,7 @@ class AuxiliarySessionMixin:
 
     @staticmethod
     def _has_auxiliary_identity(caller_self: object) -> bool:
-        """fork: betterlcm — is this frame identified as an auxiliary/child agent at all?
+        """fork: better-hermeslcm — is this frame identified as an auxiliary/child agent at all?
 
         Only an explicit marker counts: a subagent log prefix or a parent/auxiliary attribute the
         host set. Restricted tools alone never do, and neither does an ephemeral system prompt
@@ -749,7 +749,7 @@ class AuxiliarySessionMixin:
             finally:
                 conn.close()
         except Exception as exc:  # pragma: no cover - defensive against host DB drift
-            # fork: betterlcm — say that the answer is unknown rather than merely negative
+            # fork: better-hermeslcm — say that the answer is unknown rather than merely negative
             logger.warning(
                 "LCM auxiliary child probe failed for %s (%s); treating it as foreground "
                 "(its conversation WILL be stored)",
@@ -795,7 +795,7 @@ class AuxiliarySessionMixin:
             return False
         visited: set[str] = set()
         current = session_id
-        # fork: betterlcm — a bounded or failed walk is UNKNOWN, not a proven negative
+        # fork: better-hermeslcm — a bounded or failed walk is UNKNOWN, not a proven negative
         # (audit p05 AX03). The answer stays "not auxiliary" on purpose: classifying a
         # session as auxiliary means its conversation is never stored, and unrecoverable
         # non-storage is a worse outcome than a rebind. But the uncertainty is now said out

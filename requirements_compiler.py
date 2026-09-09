@@ -1276,7 +1276,7 @@ def _baseline_identity(
 def _deferred_material_count(refs, contract, *, engine) -> int:
     """How many unexamined references could change this answer.
 
-    fork: betterlcm — a budget that stopped after twelve references hid a thirteenth saying 20
+    fork: better-hermeslcm — a budget that stopped after twelve references hid a thirteenth saying 20
     points behind twelve saying 15, and the result still certified sufficiency
     (round-3 verify-4 #15). Unexamined NOISE is not a reason to refuse a certificate; an
     unexamined row that states a value of the requested kind is. Content only, no hydration.
@@ -1284,7 +1284,7 @@ def _deferred_material_count(refs, contract, *, engine) -> int:
     if not refs or contract is None:
         return 0
     unit = str(getattr(contract, "requested_unit", "") or "").casefold()
-    # fork: betterlcm — when the question NAMES its operands, a deferred reference matters only
+    # fork: better-hermeslcm — when the question NAMES its operands, a deferred reference matters only
     # if it mentions one of them; "Unrelated recipe note 11." cannot change "how much time do I
     # save by cycling instead of walking?" (round-4 verify-4 #15, keeping the saturated-baseline
     # behaviour intact).
@@ -1323,7 +1323,7 @@ def _deferred_material_count(refs, contract, *, engine) -> int:
             material += 1  # unreadable: it could be anything
             continue
         folded = content.casefold()
-        # fork: betterlcm — a NUMBER can be spelled out, and a unit can be named in words:
+        # fork: better-hermeslcm — a NUMBER can be spelled out, and a unit can be named in words:
         # requiring a digit and the literal canonical unit missed "twenty points" and
         # "20 dollars" against unit "usd", so a contradicting reference screened as irrelevant
         # (round-4 verify-4 #15).
@@ -1430,7 +1430,7 @@ def _base_result(
 
 
 def _finish(result: dict[str, Any], *, started: float) -> dict[str, Any]:
-    # fork: betterlcm — one place where a certificate is refused. Candidates the budgets never
+    # fork: better-hermeslcm — one place where a certificate is refused. Candidates the budgets never
     # examined can change the answer, and a unit clause the grammatical filter could not read
     # leaves an enumeration unproven (round-3 verify-4 #15/#16).
     metrics = result.get("metrics") or {}
@@ -1447,7 +1447,7 @@ def _finish(result: dict[str, Any], *, started: float) -> dict[str, Any]:
                 if unparsed else
                 f"{deferred} unexamined candidate reference(s) state values of this kind"
             )
-        # fork: betterlcm — refusing coverage has to revoke the CERTIFICATE, not merely one
+        # fork: better-hermeslcm — refusing coverage has to revoke the CERTIFICATE, not merely one
         # label: the Bali/Kyoto fixture reported finite_coverage=false and still returned
         # computation_sufficient with "1 vacation" and a populated context
         # (round-4 verify-4 #16).
@@ -1863,7 +1863,7 @@ def _source_event_clause(
     )
 
 
-# fork: betterlcm — verbs that place a clause OUTSIDE the counted event on purpose (buying a
+# fork: better-hermeslcm — verbs that place a clause OUTSIDE the counted event on purpose (buying a
 # vacation package is not taking one). A clause carrying one of these was read and deliberately
 # excluded; a clause carrying none was not read at all, and that difference decides whether an
 # exhausted row scan proves exhaustive enumeration (round-3 verify-4 #16).
@@ -1910,7 +1910,7 @@ def _finite_enumeration(
         "scanned_rows": int(scan.get("returned_rows") or 0),
         "truncated": bool(scan.get("truncated")),
         "material_clauses": 0,
-        # fork: betterlcm — clauses that mention the requested unit but the grammatical filter
+        # fork: better-hermeslcm — clauses that mention the requested unit but the grammatical filter
         # could not read either way. Dropping them before counting turned an exhausted ROW scan
         # into an exhaustive EVENT interpretation (round-3 verify-4 #16).
         "unparsed_unit_clauses": 0,
@@ -2195,7 +2195,7 @@ def compile_preanswer_evidence(
             baseline.append(hydrated)
             if len(baseline) >= limits.max_hydrated_candidates:
                 break
-    # fork: betterlcm — what this call never looked at, and how much of it matters
+    # fork: better-hermeslcm — what this call never looked at, and how much of it matters
     # (round-3 verify-4 #15)
     deferred_refs = list(ranked_baseline_input[examined:])
     result = _base_result(

@@ -47,7 +47,7 @@ from .sanitize import _clean_active_assistant_message
 
 import logging
 
-from .store import (  # fork: betterlcm
+from .store import (  # fork: better-hermeslcm
     host_message_id_of,
     is_revision_row,
     message_envelope_fingerprint,
@@ -899,7 +899,7 @@ class ReconcileMixin:
                 self._session_id,
                 limit=tail_limit,
             )
-            # fork: betterlcm — an archived correction is appended at the END of the archive; it
+            # fork: better-hermeslcm — an archived correction is appended at the END of the archive; it
             # is not a position in the replayed conversation, and matching it chronologically
             # made reconciliation skip every row between (round-3 verify-2 #8).
             if not is_revision_row(row)
@@ -1181,7 +1181,7 @@ class ReconcileMixin:
                 ids_by_message_id[id(msg)] = candidates[match_idx]["store_id"]
                 store_idx = match_idx + 1
 
-        # fork: betterlcm — a message the host EDITED no longer matches the row it was first
+        # fork: better-hermeslcm — a message the host EDITED no longer matches the row it was first
         # stored as; its durable copy is the archived correction, which is appended at the end
         # and deliberately kept out of the chronological walk above. Resolve those by the host's
         # own id, so an edited turn still maps and compaction can still publish

@@ -306,7 +306,7 @@ def call_selective_auxiliary_selector(
         raise ValueError(f"selector returned an unfinished generation ({unfinished})")
     content = response.choices[0].message.content
     text = str(content or "").strip()
-    # fork: betterlcm — see round-4 verify-4 #22
+    # fork: better-hermeslcm — see round-4 verify-4 #22
     try:
         json.loads(text)
     except Exception:

@@ -12,24 +12,24 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from . import marked_loss  # fork: betterlcm
-from .errors import ExtractionUnavailableError  # fork: betterlcm
+from . import marked_loss  # fork: better-hermeslcm
+from .errors import ExtractionUnavailableError  # fork: better-hermeslcm
 from .model_routing import apply_lcm_model_route
-from .prompt_boundary import build_untrusted_data_messages  # fork: betterlcm
+from .prompt_boundary import build_untrusted_data_messages  # fork: better-hermeslcm
 
-# fork: betterlcm — reasons that mean the model was cut off (mirrors escalation).
+# fork: better-hermeslcm — reasons that mean the model was cut off (mirrors escalation).
 _TRUNCATED_FINISH_REASONS = frozenset({
     "length", "max_tokens", "max_output_tokens", "content_filter", "incomplete",
 })
 
 logger = logging.getLogger(__name__)
 
-# fork: betterlcm — no whitespace in the payload class. With ``\s`` in it the match ran past
+# fork: better-hermeslcm — no whitespace in the payload class. With ``\s`` in it the match ran past
 # the URI and swallowed the ordinary words after it ("…;base64,AAAA hello world decision"
 # erased the sentence), so prose vanished from the summariser input with only a media marker
 # left behind (audit p05 EX02). A line-wrapped payload now simply stops at the first newline:
 # the remainder stays in the text, which costs a little size and loses nothing.
-# fork: betterlcm — the payload stops AT its padding. With "=" inside the repeated class, a
+# fork: better-hermeslcm — the payload stops AT its padding. With "=" inside the repeated class, a
 # padded URI followed immediately by prose ("…AAAA==hello") ate the word after the padding
 # (round-2 verify-3 #12); base64 admits no data character after "=", so anchoring the padding
 # at the end gives the word back.
@@ -68,7 +68,7 @@ def _at_line_end(text: str, index: int) -> bool:
     return not text[index:line_end].strip()
 
 
-# fork: betterlcm — the instruction half of the extraction prompt, for the trusted system role.
+# fork: better-hermeslcm — the instruction half of the extraction prompt, for the trusted system role.
 EXTRACTION_INSTRUCTIONS = """Extract decisions, commitments, outcomes, and rules from the supplied
 conversation segment.
 
@@ -103,7 +103,7 @@ def _call_extraction_llm(prompt: "str | list[dict[str, str]]", model: str = "",
                           timeout: float | None = None) -> Optional[str]:
     """Call the Hermes auxiliary LLM for extraction.
 
-    fork: betterlcm — a provider failure raises instead of returning ``None``. Returning None
+    fork: better-hermeslcm — a provider failure raises instead of returning ``None``. Returning None
     for both "the model said there was nothing" and "the call never happened" made a missing
     extraction indistinguishable from a successful negative assessment (audit p05 EX08).
     A generation that stopped at its limit is a failure too, not a finished extraction
@@ -146,7 +146,7 @@ def _sanitize_string_media(text: str) -> str:
     if not _MEDIA_DATA_URI_RE.search(text):
         return text
 
-    # fork: betterlcm — how MANY attachments, not merely "some": two inline data URIs in one
+    # fork: better-hermeslcm — how MANY attachments, not merely "some": two inline data URIs in one
     # string collapsed into a single indication, so the summariser could not tell one image
     # from six (round-2 verify-4 #15).
     media_count = len(_MEDIA_DATA_URI_RE.findall(text))
@@ -199,7 +199,7 @@ _STRUCTURED_OUTCOME_KEYS = ("is_error", "status", "error_code", "tool_use_id", "
 
 
 def _structured_outcome_suffix(block: Dict[str, Any]) -> str:
-    """fork: betterlcm — the outcome fields that sit BESIDE a block's text (audit p05 EX03)."""
+    """fork: better-hermeslcm — the outcome fields that sit BESIDE a block's text (audit p05 EX03)."""
     parts: List[str] = []
     for key in _STRUCTURED_OUTCOME_KEYS:
         if key not in block:
@@ -213,7 +213,7 @@ def _structured_outcome_suffix(block: Dict[str, Any]) -> str:
 
 # Keys a rendered block already accounts for: its own type, the streams that are rendered, the
 # outcome fields appended as a suffix, and the identity fields the metadata form prints.
-# fork: betterlcm — keys that carry no content of their own. Everything else is inventoried by
+# fork: better-hermeslcm — keys that carry no content of their own. Everything else is inventoried by
 # the branch that did NOT render it: exempting "text"/"content" globally hid them in the media
 # branch, which renders neither, and citations/annotations are substantive (round-3 verify-4 #9).
 _ACCOUNTED_BLOCK_KEYS = frozenset(
@@ -222,7 +222,7 @@ _ACCOUNTED_BLOCK_KEYS = frozenset(
 
 
 def _unrendered_field_receipt(block: Dict[str, Any], rendered_keys, prefix: str = "") -> str:
-    """fork: betterlcm — name substantive fields the rendering does not show.
+    """fork: better-hermeslcm — name substantive fields the rendering does not show.
 
     A typed text block carrying ``{"text": "stdout", "content": "stderr FAILED",
     "extra": "FATAL"}`` rendered "stdout" and dropped the rest with nothing in its place
@@ -235,7 +235,7 @@ def _unrendered_field_receipt(block: Dict[str, Any], rendered_keys, prefix: str 
             continue
         if key in rendered_keys or key in _ACCOUNTED_BLOCK_KEYS:
             continue
-        # fork: betterlcm — 0 and False are VALUES, not absence (round-3 verify-4 #9)
+        # fork: better-hermeslcm — 0 and False are VALUES, not absence (round-3 verify-4 #9)
         if value is None or value == "" or value == [] or value == {}:
             continue
         omitted.append(f"{prefix}{key}")
@@ -256,13 +256,13 @@ def _sanitize_content_block(content: Any) -> str:
         return _sanitize_string_media(content)
     if isinstance(content, list):
         parts: List[str] = []
-        media_count = 0  # fork: betterlcm — how many, not merely "some" (audit p05 EX03)
+        media_count = 0  # fork: better-hermeslcm — how many, not merely "some" (audit p05 EX03)
         for block in content:
             block_text = _sanitize_content_block(block)
             if not block_text:
                 continue
             if block_text.startswith(_MEDIA_ATTACHMENT_MARKER):
-                # fork: betterlcm — a media block can now carry a receipt for the substantive
+                # fork: better-hermeslcm — a media block can now carry a receipt for the substantive
                 # fields beside it (round-2 verify-4 #14); count the attachment and keep the
                 # receipt as its own part rather than losing both to an equality test.
                 media_count += 1
@@ -296,7 +296,7 @@ def _sanitize_content_block(content: Any) -> str:
             text_value = content.get("text")
             nested_receipt = ""
             if isinstance(text_value, dict):
-                # fork: betterlcm — a NESTED text object's other fields (annotations, a
+                # fork: better-hermeslcm — a NESTED text object's other fields (annotations, a
                 # citation list, a status) were dropped without a receipt: the outer
                 # inventory only sees the outer block's keys (round-4).
                 nested_source = text_value
@@ -305,7 +305,7 @@ def _sanitize_content_block(content: Any) -> str:
                 nested_receipt = _unrendered_field_receipt(
                     nested_source, (nested_key,), prefix="text."
                 )
-            # fork: betterlcm — a typed TEXT block can still carry an outcome beside its text
+            # fork: better-hermeslcm — a typed TEXT block can still carry an outcome beside its text
             # (is_error, a status, its call id). Returning only the text made a failed step
             # read exactly like a successful one (verify-4 #6). And it can carry a SECOND
             # stream: `text` plus `content` (stdout and stderr) — rendering one and dropping
@@ -335,7 +335,7 @@ def _sanitize_content_block(content: Any) -> str:
                 + _structured_outcome_suffix(content)
                 + _unrendered_field_receipt(content, ())
             )
-        # fork: betterlcm — a block may carry BOTH `text` and `content` (stdout and stderr, for
+        # fork: better-hermeslcm — a block may carry BOTH `text` and `content` (stdout and stderr, for
         # example). Taking the first and ignoring the second dropped a whole output stream
         # (verify-4 #6). Keep every distinct one, then the typed siblings that change what the
         # text MEANS: picking out `text` alone dropped a tool result's failure status and
@@ -404,7 +404,7 @@ def _select_injected_context_closer(
 
 
 def _injection_marker(removed: str, mark: bool, compact: bool = False) -> str:
-    """fork: betterlcm — one marker for a removed injected block, empty when it held nothing.
+    """fork: better-hermeslcm — one marker for a removed injected block, empty when it held nothing.
 
     Only the summariser-input paths mark. Removing an injected block on the way INTO the store
     removes something LCM (or the host) put there this turn, not conversation content, and a
@@ -419,7 +419,7 @@ def _injection_marker(removed: str, mark: bool, compact: bool = False) -> str:
 
 
 def _mark_header_removal(text: str, mark: bool, compact: bool) -> str:
-    """fork: betterlcm — the untrusted-context header is removed WITH a receipt when asked.
+    """fork: better-hermeslcm — the untrusted-context header is removed WITH a receipt when asked.
 
     The header-removal branches ignored ``mark=True``, so one removal shape in this function
     left no trace while every other one did (round-2 verify-4 #15).
@@ -433,7 +433,7 @@ def _mark_header_removal(text: str, mark: bool, compact: bool) -> str:
 def strip_injected_context_blocks(text: str, *, mark: bool = False, compact: bool = False) -> str:
     """Remove transient memory/context blocks before compaction summarization.
 
-    fork: betterlcm — ``mark=True`` leaves a marker naming how much was removed, for the paths
+    fork: better-hermeslcm — ``mark=True`` leaves a marker naming how much was removed, for the paths
     whose output the summariser reads (audit p05 EX01).
     """
     if not text:
@@ -452,7 +452,7 @@ def strip_injected_context_blocks(text: str, *, mark: bool = False, compact: boo
         open_re = re.compile(rf"<{escaped}(?:\s[^>]*)?>", re.IGNORECASE)
         close_re = re.compile(rf"</{escaped}\s*>", re.IGNORECASE)
         before_self_close = cleaned
-        # fork: betterlcm — a self-closing tag carries its content in its ATTRIBUTES
+        # fork: better-hermeslcm — a self-closing tag carries its content in its ATTRIBUTES
         # (<active_memory decision="CANCEL"/>), so removing it silently dropped that text
         # (verify-4 #7). Marked like every other removal.
         def _mark_self_close(match: "re.Match[str]") -> str:
@@ -466,7 +466,7 @@ def strip_injected_context_blocks(text: str, *, mark: bool = False, compact: boo
             if not opener:
                 break
 
-            # fork: betterlcm — the removal boundary is upstream's (safety first: a spoofed
+            # fork: better-hermeslcm — the removal boundary is upstream's (safety first: a spoofed
             # closer inside recalled text must not be able to smuggle content past it), but
             # the cut is MARKED. Upstream deleted whatever lay between two block-shaped tags,
             # so a real decision written between two memory blocks disappeared from the
@@ -477,7 +477,7 @@ def strip_injected_context_blocks(text: str, *, mark: bool = False, compact: boo
                     removed = cleaned[opener.start():]
                     cleaned = cleaned[: opener.start()] + _injection_marker(removed, mark, compact)
                 else:
-                    # fork: betterlcm — an unmatched INLINE opening tag carries its content in
+                    # fork: better-hermeslcm — an unmatched INLINE opening tag carries its content in
                     # its attributes just as a self-closing one does; dropping it unmarked lost
                     # that text silently (round-2 verify-4 #15).
                     removed = cleaned[opener.start():opener.end()]
@@ -499,7 +499,7 @@ def strip_injected_context_blocks(text: str, *, mark: bool = False, compact: boo
 
 def _sanitize_json_like(value: Any) -> Any:
     if isinstance(value, dict):
-        # fork: betterlcm — a sanitised key may never take another key's place. Upstream
+        # fork: better-hermeslcm — a sanitised key may never take another key's place. Upstream
         # rebuilt the dict from sanitised keys, so two keys that became identical collapsed and
         # the first value was dropped outright: {"a<active_memory>x</active_memory>": "FIRST",
         # "a": "SECOND"} became {"a": "SECOND"} — a whole tool argument gone with no marker
@@ -521,7 +521,7 @@ def _sanitize_json_like(value: Any) -> Any:
             taken.add(candidate)
             renamed[key] = candidate
         sanitized = {renamed[key]: _sanitize_json_like(val) for key, val in value.items()}
-        # fork: betterlcm — a KEY that was rewritten is a removal like any other, and it left
+        # fork: better-hermeslcm — a KEY that was rewritten is a removal like any other, and it left
         # no trace (round-3 verify-4 #9). The receipt rides in the object it happened in.
         changed_keys = [key for key, candidate in renamed.items()
                         if isinstance(key, str) and candidate != key]
@@ -540,7 +540,7 @@ def _sanitize_json_like(value: Any) -> Any:
     if isinstance(value, list):
         return [_sanitize_json_like(item) for item in value]
     if isinstance(value, str):
-        # fork: betterlcm — a compact marker inside tool ARGUMENTS. The argument block has its
+        # fork: better-hermeslcm — a compact marker inside tool ARGUMENTS. The argument block has its
         # own char budget, so the marker is the short form: enough to say a removal happened
         # and how big it was, without the sentence that would displace real arguments
         # (verify-4 #7).
@@ -561,7 +561,7 @@ def sanitize_pre_compaction_tool_arguments(arguments: Any) -> str:
         return json.dumps(_sanitize_json_like(arguments), ensure_ascii=False)
     if not isinstance(arguments, str):
         return sanitize_pre_compaction_content(arguments)
-    # fork: betterlcm — duplicate JSON keys are collapsed by json.loads, so re-serialising a
+    # fork: better-hermeslcm — duplicate JSON keys are collapsed by json.loads, so re-serialising a
     # parsed copy silently dropped one of two values a provider had really sent
     # ({"k":"FIRST","k":"SECOND"} became {"k":"SECOND"}; verify-4 #5). Detect that and clean
     # the raw text instead, which keeps both.
@@ -591,7 +591,7 @@ def extract_before_compaction(
     session_id: str = "",
     model: str = "",
     timeout: float | None = None,
-    source_store_ids: "List[int] | None" = None,  # fork: betterlcm (audit p05 EX07)
+    source_store_ids: "List[int] | None" = None,  # fork: better-hermeslcm (audit p05 EX07)
 ) -> bool:
     """Extract decisions from messages about to be compacted and write to a daily file.
 
@@ -599,7 +599,7 @@ def extract_before_compaction(
     Never raises — failures are logged and swallowed.
     """
     try:
-        # fork: betterlcm — the same untrusted-data boundary the summariser uses. Upstream
+        # fork: better-hermeslcm — the same untrusted-data boundary the summariser uses. Upstream
         # interpolated the historical conversation into one user message after "CONTENT:", so
         # instructions found in that history reached the model as instructions and could steer
         # what got written into the persistent notes (audit p05 EX05).
@@ -618,7 +618,7 @@ def extract_before_compaction(
         )
         result = _call_extraction_llm(prompt, model=model, timeout=timeout)
 
-        # fork: betterlcm — "the model said there is nothing to extract" and "the route
+        # fork: better-hermeslcm — "the model said there is nothing to extract" and "the route
         # returned nothing at all" are different outcomes; both reported success, so a dead
         # extraction route read as a segment that held no decisions (round-2 verify-4 #38).
         if result is None or not str(result).strip():
@@ -641,14 +641,14 @@ def extract_before_compaction(
         if session_id:
             header += f" ({session_id})"
         header += "\n"
-        # fork: betterlcm — say exactly which rows these bullets came from. A note headed only
+        # fork: better-hermeslcm — say exactly which rows these bullets came from. A note headed only
         # by a wall-clock time cannot be tied back to its segment, and several passes in one
         # session produce several such notes (audit p05 EX07).
         digest = hashlib.sha256(serialized_messages.encode("utf-8", "replace")).hexdigest()[:16]
         provenance = f"source chars={len(serialized_messages)}, sha256:{digest}"
         if source_store_ids:
             ids = sorted({int(store_id) for store_id in source_store_ids})
-            # fork: betterlcm — the COMPLETE manifest, compressed into ranges. "+N more" and a
+            # fork: better-hermeslcm — the COMPLETE manifest, compressed into ranges. "+N more" and a
             # bare min..max span are not resolvable when the ids are sparse (round-3 verify-3):
             # a reader cannot tell which rows the note came from. Contiguous runs collapse, so
             # even a long segment stays one line.

@@ -73,7 +73,7 @@ _MESSAGE_SELECT_COLUMNS = (
     "ingested_at, observed_at, observed_at_source, envelope_extra, host_message_id"
 )
 
-# fork: betterlcm — the columns are a PROJECTION of the host's message; everything else it
+# fork: better-hermeslcm — the columns are a PROJECTION of the host's message; everything else it
 # sent (``name``, ``reasoning_content``, ``is_error``, provider metadata, ids) used to be
 # dropped at the door with no marker, so a reader lost outcome and attribution before
 # summarisation even started (round-2 verify-4 #4 / verify-3 rank 1). Whatever is not
@@ -90,11 +90,11 @@ _HOST_MESSAGE_ID_KEYS = ("message_id", "id", "uuid", "event_id")
 
 
 REVISION_SUPERSEDES_KEY = "lcm_supersedes_store_id"
-# fork: betterlcm — the archive row that carries recovered bytes names the row it belongs to.
+# fork: better-hermeslcm — the archive row that carries recovered bytes names the row it belongs to.
 # Resolving it by tool_call_id was ambiguous when two calls shared an id and impossible when a
 # result had none (round-3 verify-4 #24).
 RECOVERED_FOR_KEY = "lcm_recovered_for_store_id"
-# fork: betterlcm — the fingerprint of the message as it ARRIVED, kept on rows whose stored
+# fork: better-hermeslcm — the fingerprint of the message as it ARRIVED, kept on rows whose stored
 # form was rewritten by ingest protection (externalized placeholder, quarantine, recovered
 # body). Without it the revision check could not compare an edit against such a row and treated
 # the id as settled, so an identifiable correction disappeared (round-5 verify-6 #3).
@@ -102,7 +102,7 @@ PRE_PROTECTION_FINGERPRINT_KEY = "lcm_pre_protection_fingerprint"
 
 
 def is_revision_row(row: Dict[str, Any]) -> bool:
-    """fork: betterlcm — a row archived because the host EDITED an already-stored message.
+    """fork: better-hermeslcm — a row archived because the host EDITED an already-stored message.
 
     It is real content and stays reachable, but it must not take part in the chronological
     replay matching: appending it at the end of the archive made reconciliation skip the rows
@@ -115,7 +115,7 @@ def is_revision_row(row: Dict[str, Any]) -> bool:
 def message_envelope_fingerprint(msg: Dict[str, Any]) -> str:
     """Everything a host sent, for change detection: content, calls and the rest.
 
-    fork: betterlcm — comparing content alone missed an edit that changed only tool arguments
+    fork: better-hermeslcm — comparing content alone missed an edit that changed only tool arguments
     or reasoning metadata (round-3 verify-4 #3), so a changed command was never archived.
     """
     if "store_id" in (msg or {}) or isinstance((msg or {}).get("envelope"), dict):
@@ -137,7 +137,7 @@ def message_envelope_fingerprint(msg: Dict[str, Any]) -> str:
         "role": str(msg.get("role") or ""),
         "content": _normalize_content_value(msg.get("content")) or "",
         "tool_calls": msg.get("tool_calls") or None,
-        # fork: betterlcm — the projected columns are part of the envelope's identity too:
+        # fork: better-hermeslcm — the projected columns are part of the envelope's identity too:
         # changing only the call id, the tool name or the timestamp produced an identical
         # fingerprint and the edit was never archived (round-4 verify-4 #2).
         "tool_call_id": str(msg.get("tool_call_id") or ""),
@@ -159,7 +159,7 @@ def message_envelope_fingerprint(msg: Dict[str, Any]) -> str:
 
 
 def message_envelope_digest(msg: Dict[str, Any]) -> str:
-    """fork: betterlcm — :func:`message_envelope_fingerprint` as a fixed-size digest.
+    """fork: better-hermeslcm — :func:`message_envelope_fingerprint` as a fixed-size digest.
 
     The fingerprint is the full serialised envelope, so it can never be STORED on a row: doing
     that put the very payload ingest protection had just externalized back into the database.
@@ -175,7 +175,7 @@ def host_message_id_of(msg: Dict[str, Any]) -> Optional[str]:
             text = str(value).strip()
             if len(text) <= 200:
                 return text
-            # fork: betterlcm — truncating collided two distinct long ids onto one identity
+            # fork: better-hermeslcm — truncating collided two distinct long ids onto one identity
             # (round-4 verify-4 #2). A digest keeps them apart and stays indexable.
             return text[:160] + ":" + hashlib.sha256(text.encode("utf-8")).hexdigest()[:32]
     return None
@@ -189,7 +189,7 @@ def _envelope_extra_json(msg: Dict[str, Any]) -> Optional[str]:
         and key not in _PROJECTED_MESSAGE_KEYS
         and not key.startswith("_lcm")
     }
-    # fork: betterlcm — a timestamp the observed_at column cannot represent is still something
+    # fork: better-hermeslcm — a timestamp the observed_at column cannot represent is still something
     # the host sent; dropping it lost the only record of when the turn happened
     # (round-3 verify-4 #8).
     supplied_timestamp = msg.get("timestamp")
@@ -458,7 +458,7 @@ def build_message_fts_spec() -> ExternalContentFtsSpec:
     )
 
 
-# fork: betterlcm — a safe batch size for "WHERE x IN (?, ?, …)" reads. SQLite's compile-time
+# fork: better-hermeslcm — a safe batch size for "WHERE x IN (?, ?, …)" reads. SQLite's compile-time
 # SQLITE_MAX_VARIABLE_NUMBER is 999 on older builds and 32,766 on newer ones; 900 is under both.
 _SQLITE_MAX_BOUND_VARIABLES = 900
 
@@ -591,13 +591,13 @@ class MessageStore:
             "observed_at_source",
             "ALTER TABLE messages ADD COLUMN observed_at_source TEXT",
         )
-        add_column_if_missing(  # fork: betterlcm — the un-projected host envelope
+        add_column_if_missing(  # fork: better-hermeslcm — the un-projected host envelope
             self._conn,
             columns,
             "envelope_extra",
             "ALTER TABLE messages ADD COLUMN envelope_extra TEXT",
         )
-        add_column_if_missing(  # fork: betterlcm — the host's own id for this message
+        add_column_if_missing(  # fork: better-hermeslcm — the host's own id for this message
             self._conn,
             columns,
             "host_message_id",
@@ -617,7 +617,7 @@ class MessageStore:
                token_estimate: int = 0, source: str = "",
                conversation_id: str = "") -> int:
         """Persist a message and return its store_id."""
-        # fork: betterlcm — protect through the LIST entry point. Recovered host output whose
+        # fork: better-hermeslcm — protect through the LIST entry point. Recovered host output whose
         # durable copy could not be written rides along as an extra archive row, and the single
         # -message path used to drop that row's bytes on the floor: the same input lost content
         # through append() that it kept through append_batch() (round-2 verify-4 #1).
@@ -655,14 +655,14 @@ class MessageStore:
                     ingested_at,
                     observed_at,
                     "host_message_timestamp" if observed_at is not None else None,
-                    _envelope_extra_json(row),  # fork: betterlcm
-                    host_message_id_of(row),    # fork: betterlcm
+                    _envelope_extra_json(row),  # fork: better-hermeslcm
+                    host_message_id_of(row),    # fork: better-hermeslcm
                 ),
             )
             return cur.lastrowid
 
         with self._write_lock:
-            # fork: betterlcm — the marker row, its attached archive rows and the commit are ONE
+            # fork: better-hermeslcm — the marker row, its attached archive rows and the commit are ONE
             # transaction. Splitting the insert introduced a window where a failed attachment
             # left a committable marker-only transaction, and the next unrelated append
             # published the marker without the recovered body (round-3 verify-2 #2).
@@ -692,7 +692,7 @@ class MessageStore:
             session_id=session_id,
         )
         if attachments:
-            # fork: betterlcm — the archive rows follow the row they belong to (round-3 #1)
+            # fork: better-hermeslcm — the archive rows follow the row they belong to (round-3 #1)
             expanded: List[Dict[str, Any]] = []
             expanded_estimates: List[int] = []
             estimates = list(token_estimates or [])
@@ -727,7 +727,7 @@ class MessageStore:
         if token_estimates is None:
             token_estimates = [0] * len(messages)
         elif len(token_estimates) != len(messages):
-            # fork: betterlcm — zip() stopped at the shorter list, so a caller that passed
+            # fork: better-hermeslcm — zip() stopped at the shorter list, so a caller that passed
             # fewer estimates than messages silently stored only that many rows: ingest LOSS
             # from a bookkeeping mismatch (verify-3 #30 / p04 ST2). Estimates are advisory;
             # messages are not.
@@ -743,7 +743,7 @@ class MessageStore:
         with self._write_lock, self._conn:
             previous_id = 0
             for msg, est in zip(messages, token_estimates):
-                # fork: betterlcm — an archive row carrying recovered bytes names the row it
+                # fork: better-hermeslcm — an archive row carrying recovered bytes names the row it
                 # belongs to, which is the one inserted just before it. Resolving that link by
                 # tool_call_id was ambiguous or impossible (round-3 verify-4 #24).
                 if (
@@ -779,8 +779,8 @@ class MessageStore:
                         ts,
                         observed_at,
                         "host_message_timestamp" if observed_at is not None else None,
-                        _envelope_extra_json(msg),  # fork: betterlcm
-                        host_message_id_of(msg),    # fork: betterlcm
+                        _envelope_extra_json(msg),  # fork: better-hermeslcm
+                        host_message_id_of(msg),    # fork: better-hermeslcm
                     ),
                 )
                 ids.append(cur.lastrowid)
@@ -843,7 +843,7 @@ class MessageStore:
                     "tool_call_id": tool_call_id,
                 }
             )
-            # fork: betterlcm — the rewrite, the caller's archive callback and the commit are
+            # fork: better-hermeslcm — the rewrite, the caller's archive callback and the commit are
             # ONE transaction. A callback that raised left the content rewrite pending, and the
             # next unrelated commit published it without the chunk archive that makes the old
             # offsets readable — the GC placeholder became durable while the bytes it replaced
@@ -897,7 +897,7 @@ class MessageStore:
         """
         if not store_ids:
             return {}
-        # fork: betterlcm — SQLite refuses more bound variables than SQLITE_MAX_VARIABLE_NUMBER
+        # fork: better-hermeslcm — SQLite refuses more bound variables than SQLITE_MAX_VARIABLE_NUMBER
         # (999 on older builds), and a node summarising thousands of rows really does ask for
         # thousands of ids: the whole lookup used to raise and the caller saw "no sources"
         # (verify-3 #30 / p04 ST5). Read in batches instead.
@@ -1299,7 +1299,7 @@ class MessageStore:
     def get_time_bounds(self, store_ids: List[int]) -> tuple[float | None, float | None]:
         if not store_ids:
             return None, None
-        # fork: betterlcm — batched under SQLite's bound-variable ceiling; a leaf over
+        # fork: better-hermeslcm — batched under SQLite's bound-variable ceiling; a leaf over
         # thousands of rows used to raise here and lose its time bounds (verify-3 p04 ST5).
         ids = [int(store_id) for store_id in store_ids]
         earliest: float | None = None
@@ -1547,7 +1547,7 @@ class MessageStore:
 
     def attached_recovered_body_ids_for_rows(self, session_id: str,
                                              store_ids: List[int]) -> List[int]:
-        """fork: betterlcm — archive rows explicitly attached to these rows (round-3 #24)."""
+        """fork: better-hermeslcm — archive rows explicitly attached to these rows (round-3 #24)."""
         wanted = {int(value) for value in store_ids or []}
         if not wanted:
             return []
@@ -1568,7 +1568,7 @@ class MessageStore:
 
     def attached_recovered_body_ids(self, session_id: str, tool_call_ids: List[str],
                                     *, exclude_ids: List[int] | None = None) -> List[int]:
-        """fork: betterlcm — archive rows carrying recovered bytes for these tool calls.
+        """fork: better-hermeslcm — archive rows carrying recovered bytes for these tool calls.
 
         When a host truncation marker's durable copy cannot be written, the recovered bytes are
         stored as an EXTRA row next to the marker row, tagged with the same ``tool_call_id``.
@@ -1601,7 +1601,7 @@ class MessageStore:
         store_ids: List[int],
         consumed_tool_call_ids: List[str] | None = None,
     ) -> List[int]:
-        """fork: betterlcm — resolve recovered bodies PER CONSUMED ROW, not per chunk.
+        """fork: better-hermeslcm — resolve recovered bodies PER CONSUMED ROW, not per chunk.
 
         Two earlier shapes both lost rows. Unioning the explicit attachment link with the
         session-wide call-id lookup gave one occurrence another occurrence's archive rows when a
@@ -1659,7 +1659,7 @@ class MessageStore:
 
     def tool_result_store_ids_batch(self, session_id: str,
                                     tool_call_ids: List[str]) -> Dict[str, List[int]]:
-        """fork: betterlcm — one query for many call ids (round-3 verify-2 #10)."""
+        """fork: better-hermeslcm — one query for many call ids (round-3 verify-2 #10)."""
         wanted = sorted({str(value).strip() for value in tool_call_ids if str(value or "").strip()})
         if not wanted:
             return {}
@@ -1680,7 +1680,7 @@ class MessageStore:
 
     def tool_result_store_ids(self, session_id: str, tool_call_id: str,
                               *, limit: int = 10) -> List[int]:
-        """fork: betterlcm — rows that ARE the archived result of this call (round-2 verify-4 #19)."""
+        """fork: better-hermeslcm — rows that ARE the archived result of this call (round-2 verify-4 #19)."""
         call_id = str(tool_call_id or "").strip()
         if not call_id:
             return []
@@ -1694,7 +1694,7 @@ class MessageStore:
 
     def latest_rows_by_host_message_id(self, session_id: str,
                                        host_message_ids: List[str]) -> Dict[str, Dict[str, Any]]:
-        """fork: betterlcm — the newest stored row for each host message id (verify-4 #5)."""
+        """fork: better-hermeslcm — the newest stored row for each host message id (verify-4 #5)."""
         wanted = [str(value) for value in host_message_ids if value]
         if not wanted:
             return {}
@@ -1715,7 +1715,7 @@ class MessageStore:
         return found
 
     def superseded_ids_for(self, session_id: str, store_ids: List[int]) -> Dict[int, int]:
-        """fork: betterlcm — ``{revision row id: the row it supersedes}`` for these rows.
+        """fork: better-hermeslcm — ``{revision row id: the row it supersedes}`` for these rows.
 
         A revision row is APPENDED at the end of the archive, so its id is not a chronological
         position. Treating it as one made the frontier jump forward and then back, skipping a
@@ -1749,7 +1749,7 @@ class MessageStore:
     def revision_rows_for(self, session_id: str, store_ids: List[int]) -> List[int]:
         """Every correction that supersedes these rows, following CHAINS.
 
-        fork: betterlcm — a correction of a correction was outside every published leaf,
+        fork: better-hermeslcm — a correction of a correction was outside every published leaf,
         because only the direct supersession edge was followed (round-4 verify-4 #3).
         """
         seen: set = set()
@@ -1766,7 +1766,7 @@ class MessageStore:
         return sorted(set(collected) - {int(value) for value in store_ids or []})
 
     def _direct_revision_rows_for(self, session_id: str, store_ids: List[int]) -> List[int]:
-        """fork: betterlcm — archived corrections that supersede any of these rows.
+        """fork: better-hermeslcm — archived corrections that supersede any of these rows.
 
         A correction is stored as its own row, so the leaf covering the original must cover the
         correction too; otherwise the newer text is reachable from no summary (round-3 #8).
@@ -1812,7 +1812,7 @@ class MessageStore:
         - ``conversation_id`` limits rows to one gateway conversation/session key
         - ``allow_operators`` marks a query the CALLER composed as FTS5 syntax,
           keeping its bare AND/OR/NOT/NEAR. Never set it for user or agent text
-        - ``progress`` (fork: betterlcm) is filled with ``complete``, ``scanned_rows``,
+        - ``progress`` (fork: better-hermeslcm) is filled with ``complete``, ``scanned_rows``,
           ``candidate_cap`` and ``path``. The scan is bounded by a candidate cap and used to
           return a capped result exactly like an exhaustive one, so "no matches" could mean
           "your match was candidate 501" (verify-4 #12).
@@ -1820,7 +1820,7 @@ class MessageStore:
         def _finish(found: List[Dict[str, Any]], *, complete: bool, scanned: int,
                     cap: int, path: str = "fts", more_available: bool | None = None,
                     work_capped: bool | None = None) -> List[Dict[str, Any]]:
-            # fork: betterlcm — "this page is exact", "the corpus holds more" and "the scan hit
+            # fork: better-hermeslcm — "this page is exact", "the corpus holds more" and "the scan hit
             # its work cap" are three different facts; collapsing them made a correct ordered
             # page report as a capped failure (round-2 verify-2 #11).
             if progress is not None:
@@ -2014,7 +2014,7 @@ class MessageStore:
             like_clauses.append("content LIKE ? ESCAPE '\\'")
             args.append(f"%{escape_like(term)}%")
         where.append("(" + " OR ".join(like_clauses) + ")")
-        # fork: betterlcm — see dag._search_like: a symbol-bearing term must match
+        # fork: better-hermeslcm — see dag._search_like: a symbol-bearing term must match
         # (round-3 verify-2 #7); a standalone symbol stays a routing trigger.
         required_terms = required_terms_for_symbol_query(terms)
         fetch_limit = compute_like_fallback_fetch_limit(limit, terms, phrases)
@@ -2094,7 +2094,7 @@ class MessageStore:
             )
 
         def add_rows(rows: list[sqlite3.Row]) -> None:
-            if progress is not None:  # fork: betterlcm — how much of the cap was used
+            if progress is not None:  # fork: better-hermeslcm — how much of the cap was used
                 progress["scanned_rows"] = int(progress.get("scanned_rows") or 0) + len(rows)
             for row in rows:
                 result = self._row_to_dict(row)
@@ -2108,7 +2108,7 @@ class MessageStore:
                 if required_terms and not all(
                     count_term_matches(content, term) for term in required_terms
                 ):
-                    continue  # fork: betterlcm — see required_terms (round-3 verify-2 #7)
+                    continue  # fork: better-hermeslcm — see required_terms (round-3 verify-2 #7)
                 result["search_rank"] = -float(score)
                 result["snippet"] = build_snippet(content, terms)
                 result["_fallback_score"] = float(score)
@@ -2219,7 +2219,7 @@ class MessageStore:
         for result in results:
             result.pop("_fallback_score", None)
         if progress is not None:
-            # fork: betterlcm — the LIKE scan is bounded by the same candidate cap; say when it
+            # fork: better-hermeslcm — the LIKE scan is bounded by the same candidate cap; say when it
             # stopped there rather than because the matches ran out (verify-4 #12).
             scanned = int(progress.get("scanned_rows") or 0)
             cap = compute_search_candidate_cap(limit)
@@ -2246,16 +2246,16 @@ class MessageStore:
             "host_message_id",
         ]
         d = dict(zip(cols, row[:len(cols)]))
-        # fork: betterlcm — the host fields the columns do not hold (round-2 verify-4 #4)
+        # fork: better-hermeslcm — the host fields the columns do not hold (round-2 verify-4 #4)
         if d.get("envelope_extra"):
             try:
                 d["envelope"] = json.loads(d["envelope_extra"])
             except (TypeError, ValueError, json.JSONDecodeError):
-                # fork: betterlcm — corrupt envelope JSON is not an empty envelope; the raw text
+                # fork: better-hermeslcm — corrupt envelope JSON is not an empty envelope; the raw text
                 # is kept so the fields can still be recovered by hand (round-3 verify-4 #8).
                 d["envelope"] = {}
                 d["envelope_corrupt"] = True
-                # fork: betterlcm — the raw text is returned WHOLE. Cutting it at 20,000 chars
+                # fork: better-hermeslcm — the raw text is returned WHOLE. Cutting it at 20,000 chars
                 # here destroyed the only remaining copy of the fields for the reader, with no
                 # marker and no continuation; readers page it through `envelope_offset`.
                 raw_envelope = str(d.get("envelope_extra") or "")
@@ -2283,7 +2283,7 @@ class MessageStore:
             msg["tool_call_id"] = stored["tool_call_id"]
         if stored.get("tool_name"):
             msg["name"] = stored["tool_name"]
-        # fork: betterlcm — give back what the host sent. The columns are a projection; the
+        # fork: better-hermeslcm — give back what the host sent. The columns are a projection; the
         # rest of the envelope (name, reasoning metadata, error flags, provider ids) was
         # dropped, so replay and expansion returned a different message from the one stored
         # (round-2 verify-4 #4). Projected keys always win.

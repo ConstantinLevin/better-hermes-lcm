@@ -6,7 +6,7 @@ import re
 import unicodedata
 from typing import Callable, List
 
-# fork: betterlcm — these ranges decide whether a query goes to the LIKE scan instead of the
+# fork: better-hermeslcm — these ranges decide whether a query goes to the LIKE scan instead of the
 # FTS index, and unicode61 indexes neither CJK nor symbols. A range that is missing here does
 # not degrade the search: it silently answers "no matches" for text that is in the store
 # (audit p05 SQ02 — `𠀀` against a stored `𠀀𠀁` returned nothing). Supplementary ideographs and
@@ -230,7 +230,7 @@ def requires_like_fallback(query: str, sanitized: str | None = None) -> bool:
 def required_terms_for_symbol_query(terms: List[str]) -> List[str]:
     """Terms that must ALL match once a symbol-bearing term is present.
 
-    fork: betterlcm — requiring only the symbol-bearing term left its companions optional, so
+    fork: better-hermeslcm — requiring only the symbol-bearing term left its companions optional, so
     "alpha∀ beta" still matched a row holding "alpha∀ solo" (round-4 verify-2 #12). The index
     would have applied a conjunction; the substring scan standing in for it must too. A
     standalone symbol (an emoji) stays a routing trigger and is not required.
@@ -254,7 +254,7 @@ def required_terms_for_symbol_query(terms: List[str]) -> List[str]:
 def terms_with_embedded_dropped_symbols(terms: List[str]) -> List[str]:
     """Terms whose MEANING is a symbol the index deletes, e.g. ``flag∀`` or ``alpha∀``.
 
-    fork: betterlcm — a standalone symbol (an emoji on its own) is usually a routing trigger,
+    fork: better-hermeslcm — a standalone symbol (an emoji on its own) is usually a routing trigger,
     not a required word: upstream searches "plugin-only 🚀" over rows that hold only
     "plugin-only". A symbol attached to alphanumerics is part of an identifier, and dropping it
     turned "alpha∀ beta" into a search for either word — a row holding neither symbol-bearing
@@ -273,7 +273,7 @@ def terms_with_embedded_dropped_symbols(terms: List[str]) -> List[str]:
 def contains_index_dropped_symbols(text: str) -> bool:
     """Non-ASCII symbols the FTS term form silently deletes.
 
-    fork: betterlcm — sanitisation maps them to a separator, so ``flag∀`` and ``flag∃``
+    fork: better-hermeslcm — sanitisation maps them to a separator, so ``flag∀`` and ``flag∃``
     sanitize to the same query and a search for one returned both while reporting the original
     query and a complete result (round-2 verify-4 #27). They are content, not syntax: the LIKE
     scan is the only path that can tell them apart. ASCII symbols (``+ = < $``) are excluded —
@@ -340,7 +340,7 @@ def extract_search_terms(query: str) -> List[str]:
 
 
 def describe_query_interpretation(query: str) -> dict:
-    """fork: betterlcm — what this query was actually searched for, and what was dropped.
+    """fork: better-hermeslcm — what this query was actually searched for, and what was dropped.
 
     Term extraction removes bare Boolean words and edge punctuation, and sanitisation strips
     characters the index treats as syntax. Upstream did all of that silently, so a search for
@@ -492,7 +492,7 @@ def build_snippet(text: str, terms: List[str], width: int = 80) -> str:
     content = (text or "")
     if not content:
         return ""
-    # fork: betterlcm — match on the ORIGINAL text. Case folding is not length-preserving
+    # fork: better-hermeslcm — match on the ORIGINAL text. Case folding is not length-preserving
     # (``"İ".lower()`` is two characters), so offsets taken in a lowered copy and applied to
     # the original drifted: 100 dotted capital I's before the match produced a snippet holding
     # neither the match nor any source text (audit p05 SQ05).

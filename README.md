@@ -1062,10 +1062,11 @@ inspired by. The contract, in full, is in [`FORK.md`](FORK.md); the short form:
    deeply against this fork — compaction/DAG algorithm, loss-avoidance and provenance,
    summariser prompts and index quality, retrieval tools and operability — and port everything
    it does better for this fork's purpose (no loss; 1M windows without degrading 256k). The
-   comparison reports live under `docs/claw-comparison/`; ported items are recorded there and
-   in `docs/fork-design.md`.
-3. Never merge anything that makes 256k behaviour differ from upstream's DAG structure or
-   that drops content without a marker; the fork tests under `tests/fork/` pin both.
+   audit prompts are under `docs/claw-comparison/prompts/`; what each round decided is recorded
+   as a pass entry in `docs/TASKS.md`, and ported work lives in the code.
+3. Never merge anything that drops content without a marker, coarsens the index, or makes a
+   bounded result read as a complete one. Upstream is the floor — never worse than it — not the
+   target: matching its number at 256k is only correct where the value is a preference.
 
 ## Contributing
 

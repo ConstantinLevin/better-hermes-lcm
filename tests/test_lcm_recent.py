@@ -323,7 +323,7 @@ def test_lcm_recent_limit_order_and_response_char_bound(recent_parts):
     result = json.loads(raw)
 
     assert len(raw) <= 20_000
-    # fork: betterlcm — total_sections is what the WINDOW holds (3), not what the display limit
+    # fork: better-hermeslcm — total_sections is what the WINDOW holds (3), not what the display limit
     # kept. Counting after the limit made "11 sections, limit 10" report 10 with
     # truncated=false: a window that reads as fully shown (round-2 verify-3 #9).
     assert result["total_sections"] == 3
@@ -699,7 +699,7 @@ def test_recent_fallback_releases_snapshot_before_later_dag_write(recent_parts):
     assert connection is not None
     window = parse_recent_period("date:2026-07-15", now=NOW)
 
-    # fork: betterlcm — the helper returns (sections, total_matching): the window's own count
+    # fork: better-hermeslcm — the helper returns (sections, total_matching): the window's own count
     # is taken BEFORE the display limit (round-2 verify-3 #9)
     sections, total_matching = tools_module._recent_leaf_sections(
         engine, window, "conversation", 10
@@ -758,7 +758,7 @@ def test_recent_fallback_releases_transaction_on_lineage_exception(
         raise RuntimeError("forced recent lineage failure")
 
     monkeypatch.setattr(tools_module, "load_source_lineage", fail_lineage)
-    # fork: betterlcm — a failed read is not an empty window: the helper raises so the caller
+    # fork: better-hermeslcm — a failed read is not an empty window: the helper raises so the caller
     # can report complete:false instead of certifying an exhaustive negative (audit p02 T16).
     # The transaction must still be released.
     with pytest.raises(tools_module._RecentIncomplete):

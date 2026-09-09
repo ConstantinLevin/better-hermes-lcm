@@ -28,7 +28,7 @@ the fork itself introduced.
 
 ## Second pass — audit findings closed (commits `cfcbb9f`, `1b21bc8`, `07c92be`, `6ee0eea`, `2ce8c7e`)
 
-Each row names the audit id, so the report in `docs/claw-comparison/` carries the citation and
+Each row names the audit id, so the pass entry below carries the citation and
 the reproduction. Every row has a fork test that fails without the change.
 
 | id | defect | fix |
@@ -75,7 +75,7 @@ Four Codex astra auditors re-ran against the second pass: **verify-1** checked e
 fix, **verify-2** hunted regressions the pass introduced, **verify-3** asked whether the plugin
 is finished on "every defect and every clear, definite optimization", **verify-4** audited the
 whole plugin against the single no-unmarked-loss rule. Their reports are
-`docs/claw-comparison/v1.0.0-verify-*.md`. All four said "not finished"; what they found and
+four verification rounds. All four said "not finished"; what they found and
 what was done:
 
 **Regressions the second pass introduced (verify-2) — all fixed**
@@ -303,7 +303,7 @@ at 256k and no longer do:
 | summariser input rendered a tool call as `name(arguments)` and dropped everything else the provider attached to it; a tool call that was not a dict was filtered out entirely; a nested `{"type":"text","text":{"value":…,"annotations":[…]}}` object's other fields vanished, because the block inventory only sees the OUTER block's keys. | `marked_loss.tool_call_fields_note` / `unrepresentable_tool_call_note` name the first two; `_unrendered_field_receipt` takes a `prefix` and inventories the nested object as `text.<key>`. |
 | `_summary_frontier_nodes` loaded every node with `limit=100_000` and filtered in Python, so a session past that limit computed its frontier from a TRUNCATED set: condensation could re-publish over sources a node above the cut already covered, and the prefix would omit real summaries while reporting nothing (B7). | `dag.get_frontier_nodes` — the same SQL predicate as `get_frontier_token_total`, unbounded, so the count and the token sum cannot diverge. |
 
-### Tenth pass — verify-6 (core-only audit, prompt `verify-6-core.txt`, report `docs/claw-comparison/`)
+### Tenth pass — verify-6 (core-only audit, prompt `docs/claw-comparison/prompts/verify-6-core.txt`)
 
 Ten P1 and one P2, all confirmed with probes against `015eef4`. Four were regressions this
 fork introduced in the eighth/ninth passes. All eleven are fixed:
@@ -351,6 +351,39 @@ omission records (architectural), #26 adaptive finalisation staleness, and the v
 embeddings association/coverage, trajectory recovery and indexing, rollup snapshots, query-view
 freshness, assertion polarity and scope, and the window-policy integration for optional
 subsystem capacities.
+
+### Eleventh pass — chunking, the anchor audit, and the name
+
+The owner's finding: the fork disabled leaf chunking at its low anchor and summarised the whole
+backlog into one node, which is the one-shot compaction LCM exists to replace. Good LCM *is*
+chunking, and shipping a degenerate index at 256k violates the fork's own purpose regardless of
+what upstream does there. **Upstream is the floor, never the target** — that reframing is what
+this pass is really about, and it invalidated a whole class of earlier decisions.
+
+| value | was | now | why |
+|---|---|---|---|
+| leaf chunk | `1.0*W` at 256k (the whole backlog in one call), 0.04 at 1M | **0.04 of W at both anchors** | the granularity of the index, not a preference; still slides with the window, same relative resolution (~25 leaves/window) everywhere |
+| `_fork_leaf_scheduling_active()` | a gate that switched chunking, the pass cap and the wall clock off at/below 256k | **deleted** | it existed only to reproduce upstream at the low anchor |
+| leaf pass cap | 1 at 256k | **16 → 64** | one pass per compaction cannot drain a chunked backlog |
+| drain stop | "stop the moment we are under the threshold" | **0.30 of W at both** | upstream's rule is correct only for a one-pass loop |
+| fresh tail | 32 messages, no token cap | **0.15 of W at both**, count 400 as an upper bound | what 32 messages protect depends on how long they are; 1M kept 15 % and 256k ~4 % for no reason |
+| condensation gate | none at 256k (count rule) | **0.20 of W at both** | a count rule coarsens the frontier long before there is pressure to |
+| condense group cap | 1 at 256k | **4 → 16** (`leaf_pass_cap / fanin`) | upstream's 1 matches one leaf per call; this fork produces many |
+| summariser concurrency | 1 at 256k | **6 at both** | chunks were summarised strictly one after another; bounded by pending chunks, sequential persist |
+| leaf summary budget | `min(ratio*source, 12000)` | **no ceiling** (`leaf_summary_max_tokens` = 0) | a summary that stops growing while its source grows is published as a complete index over material it had no room to describe |
+| spend guard | 24 → 120 calls | **80 → 320** | the guard counts CALLS; chunking makes the same work cost many small ones, so upstream's number stopped a drain mid-way. In TOKENS the new values are below upstream's at both anchors |
+| compaction floor | fixed 20,000 tokens | **min(configured, one chunk)** | an absolute floor in a design where the chunk slides disagreed with the chunk in both directions |
+
+Measured at 256k against the deployed plugin: **12 leaf nodes over 599 rows where there were 2
+over 757** — the expandable unit went from ~378 messages to ~50. Both anchors still report 0
+unreachable rows, 0 missing facts and 0 facts never offered to the summariser.
+
+Also in this pass: the 25 audit reports (6,515 lines) are deleted — a finding is either worked in,
+and then the CODE holds it, or still open, and then this backlog does; a directory of old findings
+is neither. The audit PROMPTS stay, because they are reusable tools. The project, repository,
+branch and the ~650 in-code `# fork:` markers are renamed to **better-hermeslcm**, and the
+`betterlcm_node_meta_v1` migration row is retired by the renamed step so one migration is not
+recorded under two names.
 
 ## WHAT IS LEFT TO DO
 
@@ -427,7 +460,7 @@ green while upstream's new behaviour goes unexercised.
 | M5 | **Our fix becomes obsolete or actively wrong.** Upstream restructures the thing we worked around; our patch is now dead weight, or worse, fights the new structure. | The touchpoints table has a "keep ours / re-apply / reconcile" column for exactly this. Removing a fork patch is a legitimate merge outcome; record it. |
 | M6 | **Upstream changes a default the curve mirrors.** Every `window_scaling.py` low endpoint claims to BE upstream's value at 256k. If upstream moves a default and the anchor does not, the fork's central claim quietly becomes false. | A test that reads upstream's dataclass defaults at the pinned base and asserts each anchor's low endpoint still equals them. Work item **B8**; does not exist yet. |
 | M7 | **A contract we depend on inverts.** Upstream changes the shape of something our code consumes but does not own — the serialised message format, the externalized-placeholder string, replay identity, the tool-schema dispatch path, a store row's projection. Our code keeps parsing the old shape and silently matches nothing. | Enumerate the cross-module contracts the fork reads rather than owns and re-verify each one by probe after the merge. The reconcile/replay-identity path is the sharpest of these. |
-| M8 | **Schema and migration divergence.** Upstream adds a column, index or migration next to the fork's own (`envelope_extra`, `host_message_id`, `lcm_node_meta`, `betterlcm_node_meta_v1`). Migration order, classifier logic and downgrade behaviour all interact. | Run a merge against a COPY of a real `lcm.db`, not only fresh test databases, and check both directions (fork build reading an upstream DB and back). |
+| M8 | **Schema and migration divergence.** Upstream adds a column, index or migration next to the fork's own (`envelope_extra`, `host_message_id`, `lcm_node_meta`, `better_hermeslcm_node_meta_v1`). Migration order, classifier logic and downgrade behaviour all interact. | Run a merge against a COPY of a real `lcm.db`, not only fresh test databases, and check both directions (fork build reading an upstream DB and back). |
 | M9 | **Test drift in both directions.** Upstream adds tests asserting behaviour we deliberately removed (should fail — good, that is the signal), or edits a test we had re-pointed, and the merge silently restores upstream's assertion. | Every re-pointed or removed upstream test is listed in `docs/fork-touchpoints.md`; after a merge, re-check that list line by line rather than trusting a green run. |
 | M10 | **Divergence debt.** Each merge that says "keep ours" without reconciling widens the gap until the next merge is unreviewable. | Merge early and often. A merge deferred until upstream has moved 500 commits is not a merge, it is a rewrite. |
 
@@ -461,7 +494,7 @@ green while upstream's new behaviour goes unexercised.
 
 **R2 — lossless-claw released or moved: evaluate and port what is better.**
 Trigger: any commit or release of lossless-claw newer than the one already analysed —
-**v1.0.0** (analysis in `docs/claw-comparison/v1.0.0.md`, sources were at
+**v1.0.0** (what that round decided is in sections C and G below; sources were at
 `lossless-claw v1.0.0`).
 
 1. Diff the new claw version against the analysed one. Every changed file, not just release
@@ -477,7 +510,7 @@ Trigger: any commit or release of lossless-claw newer than the one already analy
    architecture without importing an assumption the fork rejects? Rejecting is a valid outcome
    — record the reason.
 5. Run the four-aspect comparison (`docs/claw-comparison/prompts/prompt-{1..4}-*.txt`) against
-   the new version and write `docs/claw-comparison/vX.Y.Z.md` with ported / rejected / open,
+   the new version and record ported / rejected / open as a pass entry in this file,
    each with a reason. That file is the record that this task ran.
 6. Anything ported lands with a fork test and goes through the usual loop (suite → commit →
    redeploy → re-pin → both e2e anchors).
@@ -489,7 +522,7 @@ Trigger: any commit or release of lossless-claw newer than the one already analy
 | V1 | **Is this fork strictly superior to upstream mainline?** A dedicated audit that walks every behavioural difference and asks, for each: is the fork at least as good in every respect, or did it trade something away? Audit D (`v1.0.0-audit-d-regressions.md`) did this once against `8d1b1e6` and found three P1 fork regressions; it has **not** been re-run since, and this fork has changed heavily. Known open leads from that round: 256k structural equivalence still fails on oversized/imported histories and on the dynamic-chunk path, and whole sidecar index blocks escape retrieval budgets (B4). | "No loss" is not the only guarantee upstream offers. A fork that fixes loss and quietly loses throughput, a routing behaviour, or a host contract is not strictly better. Re-run after every R1. |
 | V2 | **Did we miss anything the CURRENT lossless-claw does better?** The four-aspect comparison and audit E were run against claw **v1.0.0** and 37 audit-E items were left undecided (C1/C2 above). Repeat against whatever version is current, and treat the undecided v1.0.0 items as part of the same question rather than a separate backlog. | The v1.0.0 sweep explicitly found that the earlier "does it change a guarantee" filter had been an invalid reason to reject candidates — so the fork is known to have rejected good ideas for a bad reason at least once. |
 
-Both are audits, not fixes: each ends with a written report under `docs/claw-comparison/` and a
+Both are audits, not fixes: each ends with a
 pass entry in this ledger, whether or not it produces work.
 
 ### G. Explicitly not being done
@@ -503,13 +536,17 @@ pass entry in this ledger, whether or not it produces work.
   closed as "not our problem" under that decision.
 - **Reproducing upstream's cuts at 256k.** The anchor carries tuning values only.
 
-## Still open — from the partitioned audits (historical raw material)
+## Still open — distilled from the audit rounds
 
-Fourteen audits ran: four aspect comparisons against lossless-claw, three cross-cutting
-(whole-plugin, plan critique, unplanned claw capabilities), a regression hunt against upstream,
-and eleven exhaustive partitions covering all 70 modules, the non-code assets and the test
-suite. Their reports are in `docs/claw-comparison/`. The findings below are NOT yet fixed; each
-report carries the citations and the reproduction.
+Fourteen audit rounds ran against this fork: four aspect comparisons with lossless-claw v1.0.0,
+three cross-cutting (whole-plugin, plan critique, unplanned claw capabilities), a regression hunt
+against upstream, eleven exhaustive partitions covering every module, the non-code assets and
+the test suite, and six verification rounds.
+
+**The reports themselves are not part of this repository.** A finding is either worked in — and
+then the CODE is where it lives, not a document describing it — or it is still open, and then it
+belongs in this backlog. A directory of 6,500 lines of old findings is neither. Everything below
+is what those rounds left unfixed; it is the backlog, not a pointer to one.
 
 - **p01 engine-core** — publication and session ownership not coupled; late work can publish
   under a different session; indexes that describe only the ends of their sources.

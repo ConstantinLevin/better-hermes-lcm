@@ -543,7 +543,7 @@ class TrajectoryStore:
         *,
         asset_root: str | Path,
         read_only: bool = False,
-        # fork: betterlcm — LOSSLESS by default. Redaction here is irreversible: two ingests
+        # fork: better-hermeslcm — LOSSLESS by default. Redaction here is irreversible: two ingests
         # that differed only in a secret produced the same protected digest and the second was
         # reported "already current", so both the values and the fact that they differed were
         # gone (round-2 verify-5 #4). A destructive default cannot sit inside an unconditional
@@ -1140,7 +1140,7 @@ class TrajectoryStore:
                     """
                 )
                 self._conn.commit()
-            except BaseException:  # fork: betterlcm — round-2 verify-5 #5
+            except BaseException:  # fork: better-hermeslcm — round-2 verify-5 #5
                 self._conn.rollback()
                 raise
         return TrajectoryInsertResult(
@@ -1214,7 +1214,7 @@ class TrajectoryStore:
                 )
                 self._conn.commit()
                 return corpus_uid
-            except BaseException:  # fork: betterlcm — round-2 verify-5 #5
+            except BaseException:  # fork: better-hermeslcm — round-2 verify-5 #5
                 self._conn.rollback()
                 raise
 
@@ -1336,7 +1336,7 @@ class TrajectoryStore:
                     if part
                 )
                 lines.append(state_text[:_MAX_SEMANTIC_STATE_CHARS])
-            # fork: betterlcm — the STORE is lossless (protect_sensitive defaults to False),
+            # fork: better-hermeslcm — the STORE is lossless (protect_sensitive defaults to False),
             # but a document sent to an external embedding provider is redacted whatever the
             # store holds: the redacted view is derived here from the preserved original
             # instead of destroying it at ingest (round-2 verify-5 #4).
@@ -1483,7 +1483,7 @@ class TrajectoryStore:
                     ],
                 )
                 self._conn.commit()
-            except BaseException:  # fork: betterlcm — round-2 verify-5 #5
+            except BaseException:  # fork: better-hermeslcm — round-2 verify-5 #5
                 self._conn.rollback()
                 raise
         return {
@@ -1792,7 +1792,7 @@ class TrajectoryStore:
                         (profile_digest,),
                     )
                 self._conn.commit()
-            except BaseException:  # fork: betterlcm — round-2 verify-5 #5
+            except BaseException:  # fork: better-hermeslcm — round-2 verify-5 #5
                 self._conn.rollback()
                 raise
 
@@ -1865,7 +1865,7 @@ class TrajectoryStore:
                         ],
                     )
                     self._conn.commit()
-                except BaseException:  # fork: betterlcm — round-2 verify-5 #5
+                except BaseException:  # fork: better-hermeslcm — round-2 verify-5 #5
                     self._conn.rollback()
                     raise
 
@@ -1969,7 +1969,7 @@ class TrajectoryStore:
                     (profile_digest,),
                 )
                 self._conn.commit()
-            except BaseException:  # fork: betterlcm — round-2 verify-5 #5
+            except BaseException:  # fork: better-hermeslcm — round-2 verify-5 #5
                 self._conn.rollback()
                 raise
         stats["status"] = "current" if not pending else "built"

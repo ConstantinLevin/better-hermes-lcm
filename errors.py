@@ -1,4 +1,4 @@
-"""Fork-defined exceptions (betterlcm)."""
+"""Fork-defined exceptions (better-hermeslcm)."""
 
 
 class ExtractionUnavailableError(RuntimeError):

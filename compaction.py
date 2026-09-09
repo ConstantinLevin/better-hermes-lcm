@@ -23,13 +23,13 @@ from .dag import SummaryNode
 from .message_content import text_content_for_pattern_matching
 from .sanitize import _contains_sensitive_redaction
 from .tokens import count_message_tokens, count_messages_tokens, count_tokens
-from .errors import SummaryUnavailableError  # fork: betterlcm
-from .message_analysis import _tool_call_id  # fork: betterlcm
-from . import marked_loss  # fork: betterlcm
+from .errors import SummaryUnavailableError  # fork: better-hermeslcm
+from .message_analysis import _tool_call_id  # fork: better-hermeslcm
+from . import marked_loss  # fork: better-hermeslcm
 
 logger = logging.getLogger(__name__)
 
-# fork: betterlcm — kept as the documented upstream defaults; the loop reads
+# fork: better-hermeslcm — kept as the documented upstream defaults; the loop reads
 # ``config.sweep_max_passes`` and the curved ``effective_leaf_loop_max_seconds``.
 _THRESHOLD_FULL_SWEEP_MAX_PASSES = 12
 _THRESHOLD_FULL_SWEEP_MAX_SECONDS = 120.0
@@ -74,7 +74,7 @@ class CompactionMixin:
     def should_compress_preflight(self, messages):
         """Pre-flight check — also ingests messages into the store."""
         self._preflight_cleanup_only_due_to_boundary_cooldown = False
-        self._preflight_cleanup_only_below_threshold = False  # fork: betterlcm
+        self._preflight_cleanup_only_below_threshold = False  # fork: better-hermeslcm
         self._maybe_reclassify_late_auxiliary_before_compaction_write()
         if self._bypasses_lcm_context_management():
             self._remember_lcm_bypass_message_prefix(self._bypass_lcm_session_id(), messages)
@@ -140,7 +140,7 @@ class CompactionMixin:
                     and self._compression_boundary_cooldown_active()
                 ):
                     self._preflight_cleanup_only_due_to_boundary_cooldown = True
-                # fork: betterlcm — a replay-diff cleanup under the threshold asks
+                # fork: better-hermeslcm — a replay-diff cleanup under the threshold asks
                 # compress() for the cleanup preamble only (no leaf pass); see
                 # _compress_is_cleanup_only.
                 if (
@@ -226,7 +226,7 @@ class CompactionMixin:
         critical_budget_pressure: bool,
         working_messages: List[Dict[str, Any]],
     ) -> bool:
-        """fork: betterlcm — True when this compress() must not spend a leaf pass."""
+        """fork: better-hermeslcm — True when this compress() must not spend a leaf pass."""
         requested = bool(getattr(self, "_preflight_cleanup_only_below_threshold", False))
         self._preflight_cleanup_only_below_threshold = False
         if not requested:
@@ -382,7 +382,7 @@ class CompactionMixin:
         estimated_active_tokens: int,
         remaining_passes: int,
     ):
-        """fork: betterlcm — plan the chunks this compress() will take and start summarising
+        """fork: better-hermeslcm — plan the chunks this compress() will take and start summarising
         them ahead; None when concurrency is 1 or nothing beyond the first chunk is planned."""
         concurrency = int(self.effective_summary_concurrency or 1)
         if concurrency <= 1 or remaining_passes <= 1:
@@ -418,7 +418,7 @@ class CompactionMixin:
         return lookahead
 
     def _leaf_worker_pool(self, concurrency: int):
-        """fork: betterlcm — ONE worker pool per engine, reused across compaction attempts.
+        """fork: better-hermeslcm — ONE worker pool per engine, reused across compaction attempts.
 
         A per-attempt pool bounded each attempt on its own: a host that abandoned a compaction
         and retried left the first attempt's blocked summariser calls running and started a
@@ -439,7 +439,7 @@ class CompactionMixin:
         return pool
 
     def _take_leaf_lookahead(self, summary_input_chunk: List[Dict[str, Any]]):
-        """fork: betterlcm — the planned result for this chunk, or None to summarise inline."""
+        """fork: better-hermeslcm — the planned result for this chunk, or None to summarise inline."""
         lookahead = getattr(self, "_leaf_lookahead", None)
         if lookahead is None:
             return None
@@ -458,7 +458,7 @@ class CompactionMixin:
             lookahead.close()
 
     def _non_sweep_drain_stop_tokens(self) -> int:
-        """fork: betterlcm — where the non-sweep loop stops draining (wire units).
+        """fork: better-hermeslcm — where the non-sweep loop stops draining (wire units).
 
         The curve's low anchor is the resolved context threshold (upstream stopped the
         moment it was under it); at 1M it is 0.30*W.
@@ -478,7 +478,7 @@ class CompactionMixin:
         force_overflow: bool,
         deferred_maintenance_active: bool,
     ) -> bool:
-        """fork: betterlcm — after a non-dynamic pass, run another only while over the stop."""
+        """fork: better-hermeslcm — after a non-dynamic pass, run another only while over the stop."""
         if force_overflow or deferred_maintenance_active:
             return False
         stop = self._non_sweep_drain_stop_tokens()
@@ -491,7 +491,7 @@ class CompactionMixin:
         candidate_raw: List[Dict[str, Any]],
         working_leaf_chunk_tokens: int,
     ) -> List[Dict[str, Any]]:
-        """fork: betterlcm — token-greedy oldest chunk, extended so it never ends between an
+        """fork: better-hermeslcm — token-greedy oldest chunk, extended so it never ends between an
         assistant tool call and the tool results that answer it (mirrors fresh_tail.py)."""
         selected = self._select_oldest_leaf_chunk(candidate_raw, working_leaf_chunk_tokens)
         if not selected or len(selected) >= len(candidate_raw):
@@ -638,7 +638,7 @@ class CompactionMixin:
             return sanitized_messages
         anchor_source_messages = list(working_messages)
         pressure_messages = messages if len(messages) == len(working_messages) else working_messages
-        # fork: betterlcm — the identity this whole compaction belongs to, captured before any
+        # fork: better-hermeslcm — the identity this whole compaction belongs to, captured before any
         # model work. Every result branch is fenced against it (round-4 verify-2 #4).
         compress_fence = self._publication_fence()
         leaf_compacted_this_turn = False
@@ -655,13 +655,13 @@ class CompactionMixin:
             and self.threshold_tokens > 0
             and estimated_active_tokens >= self.threshold_tokens
         )
-        # fork: betterlcm — one wall budget for the whole leaf loop on BOTH paths
+        # fork: better-hermeslcm — one wall budget for the whole leaf loop on BOTH paths
         # (120 s at 256k = upstream's sweep constant; 200 s at 1M). Upstream bounded only
         # the sweep; the non-sweep path ran a single pass so it needed no clock.
         leaf_loop_max_seconds = float(self.effective_leaf_loop_max_seconds or _THRESHOLD_FULL_SWEEP_MAX_SECONDS)
         sweep_max_passes = max(1, int(getattr(self._config, "sweep_max_passes", 0) or _THRESHOLD_FULL_SWEEP_MAX_PASSES))
         sweep_deadline = time.monotonic() + leaf_loop_max_seconds
-        # fork: betterlcm — the multi-pass leaf loop runs at EVERY window, so it needs its wall
+        # fork: better-hermeslcm — the multi-pass leaf loop runs at EVERY window, so it needs its wall
         # clock at every window. This used to be armed only above the low anchor, back when the
         # fork deliberately behaved like upstream there (one whole-backlog pass, no clock).
         # Chunking is now on everywhere, so an unbounded loop would be a real hazard at 256k too.
@@ -701,7 +701,7 @@ class CompactionMixin:
         )
         if deferred_maintenance_active:
             self._lifecycle.record_maintenance_attempt(self._conversation_id)
-        # fork: betterlcm — when the preflight's replay-diff branch requested this
+        # fork: better-hermeslcm — when the preflight's replay-diff branch requested this
         # compress() under the threshold and nothing else forces summarising (manual
         # /compress, overflow, deferred maintenance, critical pressure, ignored backlog to
         # consume), run the cleanup preamble (scaffold / ignored / dependent-reply drops)
@@ -715,7 +715,7 @@ class CompactionMixin:
             critical_budget_pressure=critical_budget_pressure,
             working_messages=working_messages,
         )
-        # fork: betterlcm — non-dynamic pass cap is curved (1 at 256k = upstream; 64 at 1M)
+        # fork: better-hermeslcm — non-dynamic pass cap is curved (1 at 256k = upstream; 64 at 1M)
         base_max_leaf_passes = (
             4 if self._config.dynamic_leaf_chunk_enabled else max(1, int(self.effective_leaf_pass_cap or 1))
         )
@@ -784,7 +784,7 @@ class CompactionMixin:
                 kept_pressure: list[Dict[str, Any]] = []
                 dropped_ignored_backlog = False
                 drop_dependent_reply = False
-                # fork: betterlcm — one metadata read per pass, not one per message
+                # fork: better-hermeslcm — one metadata read per pass, not one per message
                 generated_placeholder_hashes = self._load_generated_ignored_placeholder_hashes()
                 for working_msg, pressure_msg in compactable_pairs:
                     role = str(working_msg.get("role") or "")
@@ -878,7 +878,7 @@ class CompactionMixin:
                 working_leaf_chunk_tokens = self._working_leaf_chunk_tokens(
                     raw_tokens_outside_tail
                 )
-                # fork: betterlcm — tool-group aligned here too. A chunk boundary inside an
+                # fork: better-hermeslcm — tool-group aligned here too. A chunk boundary inside an
                 # assistant/tool group shows the summariser a call with no result and leaves
                 # the result to a different leaf; correctness cannot depend on which optional
                 # mode is on (audit p05 CP06).
@@ -897,12 +897,12 @@ class CompactionMixin:
                 if force_overflow:
                     to_compact = candidate_raw
                 else:
-                    # fork: betterlcm — aligned in the dynamic branch too (audit p05 CP06)
+                    # fork: better-hermeslcm — aligned in the dynamic branch too (audit p05 CP06)
                     to_compact = self._select_oldest_leaf_chunk_aligned(
                         candidate_raw, working_leaf_chunk_tokens
                     )
             else:
-                # fork: betterlcm — the floor is ONE CHUNK, not upstream's fixed 20,000 tokens.
+                # fork: better-hermeslcm — the floor is ONE CHUNK, not upstream's fixed 20,000 tokens.
                 # `leaf_chunk_tokens` in config is upstream's "do not bother compacting a
                 # backlog smaller than this"; it is an absolute token count in a design where
                 # the chunk itself slides with the window, so it disagreed with the chunk in
@@ -926,7 +926,7 @@ class CompactionMixin:
                             "raw backlog outside fresh tail is below one leaf chunk"
                         )
                         break
-                # fork: betterlcm — CHUNKING IS THE PRODUCT. DO NOT reintroduce a branch that
+                # fork: better-hermeslcm — CHUNKING IS THE PRODUCT. DO NOT reintroduce a branch that
                 # takes the whole backlog "because that is what upstream does at this window".
                 #
                 # A leaf must cover a bounded span at EVERY window: one summariser call over one
@@ -953,12 +953,12 @@ class CompactionMixin:
                     to_compact = candidate_raw
                 else:
                     to_compact = self._select_oldest_leaf_chunk_aligned(candidate_raw, chunk_tokens)
-                    # fork: betterlcm — with concurrency > 1, summarise the NEXT chunks on
+                    # fork: better-hermeslcm — with concurrency > 1, summarise the NEXT chunks on
                     # workers while this one is persisted (leaf_pipeline.LeafLookahead).
                     if (
                         getattr(self, "_leaf_lookahead", None) is None
                         and not deferred_maintenance_active
-                        and not cleanup_only  # fork: betterlcm — see the cleanup-only break below
+                        and not cleanup_only  # fork: better-hermeslcm — see the cleanup-only break below
                     ):
                         self._leaf_lookahead = self._start_leaf_lookahead(
                             candidate_raw,
@@ -975,7 +975,7 @@ class CompactionMixin:
                 break
 
             if cleanup_only:
-                # fork: betterlcm — this pass publishes nothing, so it must not START any
+                # fork: better-hermeslcm — this pass publishes nothing, so it must not START any
                 # model work either. Upstream checked the restriction only AFTER launching
                 # lookahead summarisation, pre-compaction extraction and assertion scheduling,
                 # spending time and the spend guard's budget on results it then discarded —
@@ -985,7 +985,7 @@ class CompactionMixin:
                 break
 
             selected_raw_chunk = to_compact
-            # fork: betterlcm — the identity this leaf is being built FOR, captured before any
+            # fork: better-hermeslcm — the identity this leaf is being built FOR, captured before any
             # summariser work (round-2 verify-4 #3 / RS02)
             leaf_fence = self._publication_fence()
             summary_input_chunk = [
@@ -1023,7 +1023,7 @@ class CompactionMixin:
 
                 try:
                     summary_kwargs: dict[str, Any] = {"focus_topic": focus_topic}
-                    # fork: betterlcm — the leaf loop's clock reaches the summariser in every
+                    # fork: better-hermeslcm — the leaf loop's clock reaches the summariser in every
                     # mode that has one, not only under the sweep flag. Upstream checked its
                     # deadline between passes while each pass could still spend one timeout
                     # per route per level inside escalation (audit p05 CP05).
@@ -1055,7 +1055,7 @@ class CompactionMixin:
                         # a rescue shrank the chunk: the plan no longer matches the residual
                         self._close_leaf_lookahead()
                 except Exception as exc:
-                    # fork: betterlcm — an unavailable summariser never discards what this
+                    # fork: better-hermeslcm — an unavailable summariser never discards what this
                     # call already did: passes persisted so far stay, the cleanup preamble's
                     # drops are published, and the error is recorded so HostCooldownMixin
                     # arms the cooldown. (Upstream tolerated failures only under the sweep
@@ -1093,7 +1093,7 @@ class CompactionMixin:
             ]
             source_store_ids = self._get_store_ids_for_messages(source_lineage_chunk)
             source_store_ids = sorted(dict.fromkeys(source_store_ids))
-            # fork: betterlcm — a summary with no provenance is exactly the thing this engine
+            # fork: better-hermeslcm — a summary with no provenance is exactly the thing this engine
             # exists to prevent: unexpandable, unverifiable, and indistinguishable from an
             # invented one. Refusing only a mapping of ZERO was not enough: a PARTIAL mapping
             # published a node over some of the consumed rows, advanced the frontier past all
@@ -1131,7 +1131,7 @@ class CompactionMixin:
                 break
             consumed_store_ids = self._get_store_ids_for_messages(source_lookup_chunk)
             consumed_store_ids = sorted(dict.fromkeys(consumed_store_ids))
-            # fork: betterlcm — a consumed REVISION row is not a chronological position: it was
+            # fork: better-hermeslcm — a consumed REVISION row is not a chronological position: it was
             # appended at the end of the archive, and taking its id as the frontier made the
             # frontier jump forward and then back, skipping a row that was still active
             # (round-4 verify-2 #3). Its superseded original IS the position, and both belong
@@ -1144,7 +1144,7 @@ class CompactionMixin:
                 for store_id in consumed_store_ids
             })
 
-            # fork: betterlcm — every row this leaf CONSUMES becomes a source of it. Upstream
+            # fork: better-hermeslcm — every row this leaf CONSUMES becomes a source of it. Upstream
             # published only the summarised lineage, so replies to host-injected placeholders
             # (excluded from the summariser input on purpose) were swept past the frontier and
             # then reachable from no node at all: expanding the summary that covers their span
@@ -1152,20 +1152,20 @@ class CompactionMixin:
             # out of the summary TEXT and are named in a marker instead, so the extra sources
             # can never read as content the summariser claimed to cover.
             summarised_source_ids = set(source_store_ids)  # built once, not per source id
-            # fork: betterlcm — an archive row holding the bytes of a recovered host output
+            # fork: better-hermeslcm — an archive row holding the bytes of a recovered host output
             # sits next to the marker row it belongs to and is in no active-context message, so
             # it mapped to no node and the summary covering its marker read as unexpandable
             # (round-2 verify-4 #1). It is a source of this leaf, named in its own receipt.
             revision_ids = self._store.revision_rows_for(  # fork: round-3 verify-2 #8
                 self._session_id, consumed_store_ids
             )
-            # fork: betterlcm — the explicit attachment link first (round-3 verify-4 #24); the
+            # fork: better-hermeslcm — the explicit attachment link first (round-3 verify-4 #24); the
             # call-id lookup remains for rows written before that link existed.
-            # fork: betterlcm — the EXPLICIT attachment link decides. Unioning it with the
+            # fork: better-hermeslcm — the EXPLICIT attachment link decides. Unioning it with the
             # session-wide call-id lookup gave one occurrence the archive rows of another when
             # a call id was reused (round-4 verify-4 #20); the legacy lookup is used only when
             # no explicit link exists at all (rows written before that link).
-            # fork: betterlcm — resolved PER CONSUMED ROW. Whole-chunk fallback meant one modern
+            # fork: better-hermeslcm — resolved PER CONSUMED ROW. Whole-chunk fallback meant one modern
             # attachment suppressed legacy recovery for every other row in the chunk, stranding
             # a legacy body behind the advanced frontier (round-5 verify-6 #2).
             recovered_body_ids = self._store.recovered_body_ids_for_consumed_rows(
@@ -1209,7 +1209,7 @@ class CompactionMixin:
             earliest_at, latest_at = self._store.get_time_bounds(published_source_ids)
             summary_tokens = count_tokens(summary_text)
 
-            # fork: betterlcm — validation, the node write and the frontier advance happen
+            # fork: better-hermeslcm — validation, the node write and the frontier advance happen
             # under ONE lock. Checking the fence and then publishing left a window in which a
             # rebind published the old session's work and advanced the NEW session's frontier
             # over it (round-3 verify-2 #3 / verify-4 #1). on_session_start and reset take the
@@ -1238,7 +1238,7 @@ class CompactionMixin:
                     latest_at=latest_at,
                     expand_hint=self._extract_expand_hint(summary_text),
                 )
-                # fork: betterlcm — node + sidecar in one transaction (audit p05 CP03)
+                # fork: better-hermeslcm — node + sidecar in one transaction (audit p05 CP03)
                 self._dag.add_node_with_meta(node, level=int(_level), summary=summary_text)
                 self._invalidate_rollups_for_published_node(node)
                 self._maybe_gc_compacted_tool_results(compacted_chunk, source_store_ids)
@@ -1256,7 +1256,7 @@ class CompactionMixin:
             pressure_messages = pressure_messages[:leading_anchor_count] + pressure_remaining_messages
             leaf_compacted_this_turn = True
             leaf_passes += 1
-            # fork: betterlcm — subtract what the PRESSURE view holds for the span just
+            # fork: better-hermeslcm — subtract what the PRESSURE view holds for the span just
             # consumed. ``estimated_active_tokens`` starts from the host's observed prompt
             # size, which counts the original messages; ``source_tokens`` counts the working
             # copy, which stubbing/redaction can have shortened by orders of magnitude (2,505
@@ -1285,7 +1285,7 @@ class CompactionMixin:
                 continue
 
             if not self._config.dynamic_leaf_chunk_enabled:
-                # fork: betterlcm — keep draining toward the curved stop (at 256k the pass
+                # fork: better-hermeslcm — keep draining toward the curved stop (at 256k the pass
                 # cap is 1, so this is upstream's single pass exactly).
                 if not self._non_sweep_should_continue(
                     estimated_active_tokens,
@@ -1331,14 +1331,14 @@ class CompactionMixin:
                 working_messages,
                 observed_tokens=observed_prompt_tokens,
             )
-            # fork: betterlcm — summary pressure can exist without raw backlog. Upstream
+            # fork: better-hermeslcm — summary pressure can exist without raw backlog. Upstream
             # returned from here before the condensation step, so a session whose raw prefix
             # was drained (or wholly inside the fresh tail, or below the leaf floor) kept an
             # oversized pile of uncondensed summaries forever: nothing shrank the frontier
             # because nothing new could be compacted (audit p05 CP04). Condensation gates
             # itself on the frontier budget and the fan-in, so this is a no-op unless the pile
             # really is too large.
-            condensation_published = 0  # fork: betterlcm — round-2 verify-2 #7
+            condensation_published = 0  # fork: better-hermeslcm — round-2 verify-2 #7
             if not cleanup_only:
                 try:
                     if threshold_full_sweep_active:
@@ -1359,7 +1359,7 @@ class CompactionMixin:
                         ) or 0)
                 except SummaryUnavailableError as exc:
                     self._last_leaf_summary_error = str(exc)
-                    # fork: betterlcm — a group that FAILED does not erase the groups that were
+                    # fork: better-hermeslcm — a group that FAILED does not erase the groups that were
                     # published before it: the caller kept the original context and reported
                     # compression_count 0 although a new parent existed (round-3 verify-3).
                     condensation_published = int(
@@ -1387,7 +1387,7 @@ class CompactionMixin:
                 working_messages,
                 preexisting_dependent_reply_records,
             )
-            # fork: betterlcm — condensation publishes a new parent, so the summary prefix the
+            # fork: better-hermeslcm — condensation publishes a new parent, so the summary prefix the
             # agent reads has CHANGED. Reassembling only when replayed scaffolding was dropped
             # meant a spent model call and a new depth-1 node returned status "noop" with the
             # original context and no compression accounting (round-2 verify-2 #7).
@@ -1411,7 +1411,7 @@ class CompactionMixin:
                     active_context_messages,
                     insert_missing_tool_stubs=False,
                 )
-            # fork: betterlcm — EVERY result branch is fenced, not only the leaf one. The
+            # fork: better-hermeslcm — EVERY result branch is fenced, not only the leaf one. The
             # condensation-only return sat below the final fence, so a rebind landing after
             # assembly handed the new session the old session's prefix and cursor
             # (round-4 verify-2 #4).
@@ -1429,7 +1429,7 @@ class CompactionMixin:
                     )
                     return messages
             if condensation_published:
-                # fork: betterlcm — real published work, even with no leaf pass this turn
+                # fork: better-hermeslcm — real published work, even with no leaf pass this turn
                 self._ingest_cursor = len(sanitized_messages)
                 self.compression_count += 1
                 self._last_compaction_duration_ms = (
@@ -1501,7 +1501,7 @@ class CompactionMixin:
                     deadline=leaf_deadline,  # fork: budget-regime condensation shares the clock
                 )
             except SummaryUnavailableError as exc:
-                # fork: betterlcm — leaf passes above are already COMMITTED and the raw cursor
+                # fork: better-hermeslcm — leaf passes above are already COMMITTED and the raw cursor
                 # has advanced. Letting a later condensation failure escape made compress()
                 # return the original, uncompacted prompt while the DAG had moved on; the next
                 # attempt then mapped no sources and published a leaf with empty provenance.
@@ -1536,7 +1536,7 @@ class CompactionMixin:
         logger.info(
             "LCM leaf compaction finished in %.1fms", self._last_compaction_duration_ms
         )
-        # fork: betterlcm — the assembled context belongs to the session it was built from. A
+        # fork: better-hermeslcm — the assembled context belongs to the session it was built from. A
         # rebind that lands after publication but before the caller receives the result would
         # hand the NEW session the old session's summaries and cursor (round-3 verify-2 #3 /
         # verify-4 #1). The publication itself is already fenced under the lock; here the fence

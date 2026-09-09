@@ -1011,7 +1011,7 @@ LCM_DESCRIBE = {
             "index_offset": {
                 "type": "integer",
                 "description": (
-                    "fork: betterlcm — character offset into the node's stored index block, for "
+                    "fork: better-hermeslcm — character offset into the node's stored index block, for "
                     "continuing one that did not fit an earlier response. Use "
                     "index_block_next_offset (or index_block_continue_with) from that response."
                 ),
@@ -1091,7 +1091,7 @@ LCM_EXPAND = {
             "tool_calls_offset": {
                 "type": "integer",
                 "description": (
-                    "fork: betterlcm — character offset used to continue an oversized rendering "
+                    "fork: better-hermeslcm — character offset used to continue an oversized rendering "
                     "of an assistant turn's tool CALLS in node_id mode. Use "
                     "next_tool_calls_offset (or tool_calls_continue_with) from the previous "
                     "response; store_id mode does not render tool calls."

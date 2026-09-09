@@ -447,10 +447,10 @@ sweep's fallback pair-condensation on the pressure ratio; leave the fork checkou
   cooldown is armed either way and an unchanged context is returned as the same object.
 ### Step 6 — sidecar
 - `lcm_node_meta(node_id PK, level, index_block, updated_at)`; created from `SummaryDAG._init_db`
-  under the named migration step `betterlcm_node_meta_v1`; prefix `lcm_node` registered with the
+  under the named migration step `better_hermeslcm_node_meta_v1`; prefix `lcm_node` registered with the
   classifier. Rows cascade in `delete_node_batch`. Downgrade to an upstream build: its classifier
   reports `genuinely_newer` for a DB carrying the table — drop `lcm_node_meta` and the
-  `betterlcm_node_meta_v1` row in `lcm_migration_state` first.
+  `better_hermeslcm_node_meta_v1` row in `lcm_migration_state` first.
 - The index block is stored, not re-rendered: `node.summary` already contains the whole
   "Expand for details about:" block verbatim, so the prefix would only duplicate it. The
   sidecar copy exists for tools/doctor and for the coverage check.

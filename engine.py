@@ -132,11 +132,11 @@ from .reconcile import ReconcileMixin, _PRESERVED_OBJECTIVE_CONTEXT_PREFIX
 from .compaction import CompactionMixin
 from .reset_state import ResetStateMixin
 from .bypass import BypassMixin
-from .window_scaled_mixin import WindowScaledSettingsMixin  # fork: betterlcm
-from .host_cooldown import HostCooldownMixin  # fork: betterlcm
-from .errors import SummaryUnavailableError  # fork: betterlcm
-from . import marked_loss  # fork: betterlcm
-from . import node_meta  # fork: betterlcm
+from .window_scaled_mixin import WindowScaledSettingsMixin  # fork: better-hermeslcm
+from .host_cooldown import HostCooldownMixin  # fork: better-hermeslcm
+from .errors import SummaryUnavailableError  # fork: better-hermeslcm
+from . import marked_loss  # fork: better-hermeslcm
+from . import node_meta  # fork: better-hermeslcm
 from .lifecycle_state import LifecycleStateStore
 from .message_content import (
     normalize_content_value,
@@ -147,7 +147,7 @@ from .sqlite_util import (
     _is_sqlite_locked_error,
     _temporary_sqlite_busy_timeout,
 )
-from .store import (  # fork: betterlcm
+from .store import (  # fork: better-hermeslcm
     MessageStore,
     PRE_PROTECTION_FINGERPRINT_KEY,
     host_message_id_of,
@@ -384,7 +384,7 @@ def _normalize_total_compactions(value: Any) -> int:
     return value
 
 
-# fork: betterlcm — the bullet shapes marked_loss.assembly_omission_marker() itself writes
+# fork: better-hermeslcm — the bullet shapes marked_loss.assembly_omission_marker() itself writes
 # (round-3 verify-4 #5). Anything else after the header is the sender's own text.
 # Every bullet this module writes ends in its own recovery hint. Validating only the PREFIX let
 # "- 1 summary node(s) were reviewed; MY NEW DECISION: cancel" pass as generated scaffolding
@@ -516,7 +516,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
             else "manual_or_default"
         )
         self._context_threshold_autoraised: dict[str, float] | None = None
-        self._init_window_scaled_settings()  # fork: betterlcm (upstream values until a window is known)
+        self._init_window_scaled_settings()  # fork: better-hermeslcm (upstream values until a window is known)
         self.last_prompt_tokens = 0
         self.last_completion_tokens = 0
         self.last_total_tokens = 0
@@ -585,7 +585,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         # not session-scoped, so it is not cleared on session reset.
         self._ingest_failure_count = 0
         self._consecutive_ingest_failures = 0
-        # fork: betterlcm — host message ids whose EDIT could not be archived. A correction
+        # fork: better-hermeslcm — host message ids whose EDIT could not be archived. A correction
         # that reached the plugin and was not stored makes retrieval's "nothing matched"
         # answers untrustworthy, so it is reported rather than logged (round-5 verify-6 #4).
         self._unarchived_revision_host_ids: set[str] = set()
@@ -605,11 +605,11 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         # One-shot handoff from preflight: adopt an already-durable replay
         # cleanup during boundary cooldown without running summary work.
         self._preflight_cleanup_only_due_to_boundary_cooldown = False
-        self._preflight_cleanup_only_below_threshold = False  # fork: betterlcm
-        self._last_assembly_omission_note = ""  # fork: betterlcm (verify-4 #9)
-        self._last_node_meta_read_error = ""  # fork: betterlcm (round-2 verify-4 #26)
-        self._leaf_lookahead = None  # fork: betterlcm (leaf_pipeline.LeafLookahead)
-        # fork: betterlcm — construct the compaction mutex here, not on first use. Creating it
+        self._preflight_cleanup_only_below_threshold = False  # fork: better-hermeslcm
+        self._last_assembly_omission_note = ""  # fork: better-hermeslcm (verify-4 #9)
+        self._last_node_meta_read_error = ""  # fork: better-hermeslcm (round-2 verify-4 #26)
+        self._leaf_lookahead = None  # fork: better-hermeslcm (leaf_pipeline.LeafLookahead)
+        # fork: better-hermeslcm — construct the compaction mutex here, not on first use. Creating it
         # lazily inside compress() meant two threads arriving together could each build their
         # own lock and both enter (audit p01 H01). Cheap to own from the start.
         from .leaf_pipeline import CompactionLock
@@ -989,7 +989,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                 self._runtime_context_threshold(model=model, provider=provider)
             )
             self.threshold_percent = self.context_threshold
-            self._resolve_window_scaled_settings()  # fork: betterlcm (reset to upstream values)
+            self._resolve_window_scaled_settings()  # fork: better-hermeslcm (reset to upstream values)
             return True
         self.raw_context_length = parsed_context_length
         effective_context_length, cap, reason = self._effective_context_length(
@@ -1011,7 +1011,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         self.threshold_tokens = self._effective_threshold_tokens(
             context_threshold_tokens
         )
-        self._resolve_window_scaled_settings()  # fork: betterlcm (curve for the capped window)
+        self._resolve_window_scaled_settings()  # fork: better-hermeslcm (curve for the capped window)
         return True
 
     def _session_metadata_matches_active_runtime(
@@ -1408,7 +1408,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         return False
 
     def _record_ingest_success(self) -> None:
-        # fork: betterlcm — an ingest that stored the new messages but could NOT archive a
+        # fork: better-hermeslcm — an ingest that stored the new messages but could NOT archive a
         # host edit is not a success: the corrected text is still missing from the store, and
         # clearing the streak here made retrieval answer exhaustive negatives over it
         # (round-5 verify-6 #4).
@@ -1681,7 +1681,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                 self._record_ingest_failure("per-turn ingest()", e)
 
     def _is_unmappable_host_truncation_marker(self, msg: Dict[str, Any]) -> bool:
-        """fork: betterlcm — a host truncation marker the archive holds no durable copy of.
+        """fork: better-hermeslcm — a host truncation marker the archive holds no durable copy of.
 
         The host writes those files and deletes them; when the copy could not be written there
         is no row for the marker to map to, and the leaf must still be publishable (with a
@@ -1701,7 +1701,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
             return True
 
     def _is_retry_worthy_leaf_summary_error(self, exc: Exception) -> bool:
-        # fork: betterlcm — read the whole cause chain. The route's real error ("maximum
+        # fork: better-hermeslcm — read the whole cause chain. The route's real error ("maximum
         # context length") now travels as the __cause__ of a SummaryUnavailableError, and
         # judging only the outermost message would miss it (audit p05 ES03).
         seen: set[int] = set()
@@ -1753,7 +1753,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
             if smaller and len(smaller) < len(current_chunk):
                 return smaller
 
-        # fork: betterlcm — the last resort used to be ``current_chunk[:-1]``, which strips a
+        # fork: better-hermeslcm — the last resort used to be ``current_chunk[:-1]``, which strips a
         # tool result from the assistant call that produced it. The summariser then sees a call
         # with no result, the result is left outside the new node, and assembly's orphan guard
         # removes it. Cut on a tool-group boundary instead; if the chunk is one indivisible
@@ -1791,7 +1791,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
             attempt_number += 1
             source_tokens = count_messages_tokens(attempt_chunk)
             serialized = self._serialize_messages(attempt_chunk)
-            # fork: betterlcm — what the SERIALISER removed from the summariser's input. The
+            # fork: better-hermeslcm — what the SERIALISER removed from the summariser's input. The
             # summary was published exactly as the model wrote it, so a model that did not
             # copy those markers produced a node that reads as covering material it never
             # received (round-4 verify-4 #12). They are attached deterministically below.
@@ -1801,7 +1801,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                 for message in attempt_chunk
                 if id(message) in self._current_compress_store_ids_by_message_id
             ))
-            # fork: betterlcm — the budget is a RATIO of the source, with no ceiling.
+            # fork: better-hermeslcm — the budget is a RATIO of the source, with no ceiling.
             #
             # Upstream clamped it with `min(token_budget, 12000)`. That is a summary whose size
             # stops growing while its source keeps growing: at 40k of source the ratio holds
@@ -1852,7 +1852,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                     },
                     deadline=deadline,  # fork: one end time for L1+L2+fallbacks (p05 CP05)
                 )
-                # fork: betterlcm — every receipt the serialiser wrote survives into the node
+                # fork: better-hermeslcm — every receipt the serialiser wrote survives into the node
                 # (round-4 verify-4 #12); the model is not trusted to copy them.
                 missing_input_receipts = [
                     receipt for receipt in input_receipts if receipt not in summary_text
@@ -1885,7 +1885,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                 )
                 attempt_chunk = smaller_chunk
 
-        raise SummaryUnavailableError("adaptive leaf rescue exhausted without a valid chunk")  # fork: betterlcm
+        raise SummaryUnavailableError("adaptive leaf rescue exhausted without a valid chunk")  # fork: better-hermeslcm
 
     # -- ContextEngine optional methods ------------------------------------
 
@@ -2055,7 +2055,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
             _remove_registry_entries_for_engine(self)
 
     def _frontier_with_dag_floor(self, session_id: str, persisted_frontier: int) -> int:
-        """fork: betterlcm — never call a row raw that a published summary already covers.
+        """fork: better-hermeslcm — never call a row raw that a published summary already covers.
 
         See ``SummaryDAG.max_message_source_id``: the node is written before the frontier, so
         the persisted marker can lag the DAG after a crash or a failure between the two
@@ -2078,7 +2078,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
             return published
         return frontier
 
-    # fork: betterlcm — publication fence (round-2 verify-4 #3 / RS02).
+    # fork: better-hermeslcm — publication fence (round-2 verify-4 #3 / RS02).
     #
     # A summariser call takes seconds; ``on_session_start`` and reset can rebind the engine
     # while it runs. Publication read ``self._session_id`` AFTER the call returned, so a probe
@@ -2089,7 +2089,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
     # being published under an identity it does not belong to.
     @property
     def _publication_lock(self) -> threading.RLock:
-        """fork: betterlcm — held across validate → publish → advance → assemble.
+        """fork: better-hermeslcm — held across validate → publish → advance → assemble.
 
         Checking the fence and then publishing is not enough: a rebind that lands between the
         check and the insert published the old session's work and advanced the NEW session's
@@ -2115,7 +2115,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
             )
 
     def _archived_tool_result_store_ids(self, tool_call_id: str) -> Optional[List[int]]:
-        """fork: betterlcm — store rows holding a result for this call, or None if unknown.
+        """fork: better-hermeslcm — store rows holding a result for this call, or None if unknown.
 
         Returns [] when the store answered and holds nothing for that call: the difference
         between "archived, here is where" and "never received" is exactly what the stub was
@@ -2131,7 +2131,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
             return None
 
     def _record_host_message_revisions(self, ingested_prefix: List[Dict[str, Any]]) -> int:
-        """fork: betterlcm — archive corrections to messages this session already stored.
+        """fork: better-hermeslcm — archive corrections to messages this session already stored.
 
         Only messages carrying a host-supplied id are considered, so a position that merely
         MOVED (the active context legitimately reshapes after a compaction) can never be
@@ -2155,7 +2155,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                 fingerprints[host_id] = message_envelope_fingerprint(message)
         if not candidates:
             return 0
-        # fork: betterlcm — an UNCHANGED prefix costs no database work. Reading every already
+        # fork: better-hermeslcm — an UNCHANGED prefix costs no database work. Reading every already
         # ingested row's full content, calls and envelope on every turn tripled the ingest hot
         # path on a 900-message prefix (round-3 verify-2 #10), and the prefix is unchanged on
         # almost every turn. Only ids whose envelope fingerprint moved since the last snapshot
@@ -2168,7 +2168,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
             host_id for host_id, fingerprint in fingerprints.items()
             if seen.get(host_id) != fingerprint
         }
-        # fork: betterlcm — cache only what this call actually SETTLED. Recording every
+        # fork: better-hermeslcm — cache only what this call actually SETTLED. Recording every
         # fingerprint up front meant a failed archive write (or a failed lookup) was never
         # retried: an unchanged retry saw "already checked" and the correction stayed lost
         # (round-4 verify-2 #1). Unchanged ids are settled by definition.
@@ -2185,7 +2185,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                 self._session_id, list(candidates)
             )
         except Exception as error:
-            # fork: betterlcm — a lookup failure means edits may be unstored; that is an ingest
+            # fork: better-hermeslcm — a lookup failure means edits may be unstored; that is an ingest
             # failure, not a log line (round-5 verify-6 #4). Nothing is cached, so the next
             # turn retries.
             self._record_ingest_failure("host-edit revision lookup", error)
@@ -2203,7 +2203,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
             if is_externalized_placeholder(stored_content) or extract_ingest_externalized_refs(
                 stored_content
             ):
-                # fork: betterlcm — the stored form is a REFERENCE, so comparing content would
+                # fork: better-hermeslcm — the stored form is a REFERENCE, so comparing content would
                 # lie. Marking the id settled here meant an identifiable correction to such a
                 # row was dropped and never retried (round-5 verify-6 #3). The fingerprint of
                 # the message as it arrived answers the question exactly; without one (a row
@@ -2214,7 +2214,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                 if arrival_fingerprint == message_envelope_digest(message):
                     settled[host_id] = fingerprints.get(host_id, "")
                     continue
-            # fork: betterlcm — the WHOLE envelope decides, not the content alone: an edit that
+            # fork: better-hermeslcm — the WHOLE envelope decides, not the content alone: an edit that
             # changed only tool arguments or reasoning metadata was never archived
             # (round-3 verify-4 #3).
             elif message_envelope_fingerprint(message) == message_envelope_fingerprint(row):
@@ -2232,7 +2232,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                     conversation_id=self._conversation_id or "",
                 )
             except Exception as error:
-                # fork: betterlcm — a correction that reached the plugin and was NOT stored is
+                # fork: better-hermeslcm — a correction that reached the plugin and was NOT stored is
                 # an ingest failure, not a log line. Swallowing it let the enclosing ingest
                 # report success, so `lcm_grep` answered `{"complete": true, "results": []}`
                 # for the corrected text while both failure counters stayed at zero
@@ -2255,7 +2255,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
 
     @property
     def _ingest_lock(self) -> threading.RLock:
-        """fork: betterlcm — one ingest at a time per engine.
+        """fork: better-hermeslcm — one ingest at a time per engine.
 
         The session-end flush swaps the engine's identity for the length of one ingest; a
         concurrent foreground ingest that did not take this lock stored its own turn under the
@@ -2270,7 +2270,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
 
     @contextlib.contextmanager
     def _ended_session_ingest_identity(self, session_id: str):
-        """fork: betterlcm — ingest a final history under the session that ENDED.
+        """fork: better-hermeslcm — ingest a final history under the session that ENDED.
 
         ``_ingest_messages`` takes its ownership from mutable engine state, so a session-end
         callback that arrives after the engine has already rebound stored the ended session's
@@ -2306,7 +2306,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
 
     @staticmethod
     def _message_envelope_fields(msg: Dict[str, Any]) -> dict:
-        """fork: betterlcm — the host fields beside the projected ones, from either shape."""
+        """fork: better-hermeslcm — the host fields beside the projected ones, from either shape."""
         envelope = msg.get("envelope")
         if isinstance(envelope, dict):
             return envelope
@@ -2748,7 +2748,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
             )
 
         def _has_summary_nodes(candidate_session_id: str | None) -> bool:
-            # fork: betterlcm — "has nodes" meant "has nodes a /new reset left behind"
+            # fork: better-hermeslcm — "has nodes" meant "has nodes a /new reset left behind"
             return bool(candidate_session_id and self._carry_over_candidate_nodes(candidate_session_id))
 
         def _host_source_from_conversation_state(state: Any) -> tuple[str, Any]:
@@ -3020,7 +3020,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         self._log_session_filter_diagnostics()
 
     def on_session_start(self, session_id: str, **kwargs) -> None:
-        # fork: betterlcm — a rebind waits for any publication in flight, and a publication in
+        # fork: better-hermeslcm — a rebind waits for any publication in flight, and a publication in
         # flight waits for a rebind that started first (round-3 verify-2 #3 / verify-4 #1).
         with self._publication_lock:
             return self._on_session_start_locked(session_id, **kwargs)
@@ -3927,7 +3927,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                     # host gateways call session-end hooks from lifecycle paths
                     # that must not wait through SQLite's normal busy timeout.
                     #
-                    # fork: betterlcm — under the ENDED session's identity. A late callback
+                    # fork: better-hermeslcm — under the ENDED session's identity. A late callback
                     # (start old, start new, then end old) stored the old session's history
                     # under the new one: wrong provenance for every one of those rows
                     # (round-3 verify-4 #4).
@@ -3950,7 +3950,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                     raise
 
                 try:
-                    # fork: betterlcm — the ENDED session's own conversation, not whatever the
+                    # fork: better-hermeslcm — the ENDED session's own conversation, not whatever the
                     # engine is bound to now. A late callback finalized "old" under the NEW
                     # conversation, so lifecycle recovery found a finalization record belonging
                     # to another conversation (round-4 verify-4 #5).
@@ -3991,7 +3991,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
             raise
 
     def on_session_reset(self) -> None:
-        with self._publication_lock:  # fork: betterlcm — see on_session_start
+        with self._publication_lock:  # fork: better-hermeslcm — see on_session_start
             return self._on_session_reset_locked()
 
     def _on_session_reset_locked(self) -> None:
@@ -4012,14 +4012,14 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         self._lifecycle.record_reset(self._conversation_id)
         self._reset_session_scoped_runtime_state()
 
-        # fork: betterlcm — upstream DELETED the nodes below ``new_session_retain_depth``
+        # fork: better-hermeslcm — upstream DELETED the nodes below ``new_session_retain_depth``
         # here (retain 0 = everything). Index nodes are never deleted in the fork: the
         # retain depth only decides which nodes ``carry_over_new_session_context`` moves
         # into the new session; the rest stay with the old session, reachable through
         # ``lcm_grep``/``lcm_expand`` with session_scope='all'.
 
     def _node_meta_for_assembly(self, node_ids: list[int]) -> Dict[int, Dict[str, Any]]:
-        """fork: betterlcm — sidecar rows for the rendered nodes; fail-open (empty) on error."""
+        """fork: better-hermeslcm — sidecar rows for the rendered nodes; fail-open (empty) on error."""
         store = getattr(self._dag, "node_meta", None)
         if store is None or not node_ids:
             return {}
@@ -4027,7 +4027,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
             self._last_node_meta_read_error = ""
             return store.read_many(node_ids)
         except Exception as exc:
-            # fork: betterlcm — assembly renders without level tags rather than failing, but
+            # fork: better-hermeslcm — assembly renders without level tags rather than failing, but
             # the DEGRADATION is recorded: a silently missing level tag is indistinguishable
             # from a node that never had one (round-2 verify-4 #26). lcm_status shows it.
             logger.warning("LCM node meta read failed: %s", exc)
@@ -4043,7 +4043,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         dropped_internal_turns: int = 0,
         redacted_internal_turns: int = 0,
     ) -> str:
-        """fork: betterlcm — see marked_loss.assembly_omission_marker."""
+        """fork: better-hermeslcm — see marked_loss.assembly_omission_marker."""
         if (
             not omitted_node_ids
             and not depth_cap_hits
@@ -4127,7 +4127,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
             finally:
                 store.close()
         except Exception:
-            # fork: betterlcm — inside a GC rewrite this failure MUST reach the caller: the
+            # fork: better-hermeslcm — inside a GC rewrite this failure MUST reach the caller: the
             # rewrite and the archive are one transaction, and swallowing the failure let the
             # placeholder become durable while the old chunk offsets stayed live
             # (round-3 verify-3). Everywhere else it stays best effort.
@@ -4138,7 +4138,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                 raise
 
     def _reset_retained_min_depth(self, session_id: str | None) -> int | None:
-        """fork: betterlcm — the depth filter that stands in for upstream's reset-time prune.
+        """fork: better-hermeslcm — the depth filter that stands in for upstream's reset-time prune.
 
         Upstream deleted every node below ``new_session_retain_depth`` when ``/new`` reset
         a session, so "the session has nodes" doubled as "the session has nodes to carry".
@@ -4156,7 +4156,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         return retain
 
     def _carry_over_candidate_nodes(self, session_id: str | None) -> list:
-        """fork: betterlcm — nodes upstream would still have had for ``session_id``."""
+        """fork: better-hermeslcm — nodes upstream would still have had for ``session_id``."""
         if not session_id:
             return []
         nodes = self._dag.get_session_nodes(session_id)
@@ -4190,7 +4190,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                 new_session_id,
             )
             return 0
-        # fork: betterlcm — retain depth is applied here as a carry-over filter
+        # fork: better-hermeslcm — retain depth is applied here as a carry-over filter
         # (-1 all, 0 nothing, N depth >= N) instead of as a delete on reset.
         retain = int(self._config.new_session_retain_depth)
         if retain == 0:
@@ -4405,10 +4405,10 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
             "threshold_tokens": self.threshold_tokens,
             "last_compression_status": self._last_compression_status,
             "last_compression_noop_reason": self._last_compression_noop_reason,
-            # fork: betterlcm — an omission receipt that could not fit the summary budget is
+            # fork: better-hermeslcm — an omission receipt that could not fit the summary budget is
             # recorded here rather than lost (verify-4 #9)
             "last_assembly_omission_note": getattr(self, "_last_assembly_omission_note", ""),
-            # fork: betterlcm — an unreadable sidecar degrades assembly silently otherwise
+            # fork: better-hermeslcm — an unreadable sidecar degrades assembly silently otherwise
             # (round-2 verify-4 #26)
             "last_node_meta_read_error": getattr(self, "_last_node_meta_read_error", ""),
             "threshold_full_sweep": dict(self._last_threshold_full_sweep),
@@ -4834,7 +4834,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
             )
         if content.lstrip().startswith(_PRESERVED_OBJECTIVE_CONTEXT_PREFIX):
             return True
-        # fork: betterlcm — assembly can emit the minimal receipt ALONE, when not even one
+        # fork: better-hermeslcm — assembly can emit the minimal receipt ALONE, when not even one
         # summary fits. Recognition still demanded a summary header first, so that receipt was
         # ingested and fed back to the summariser as raw conversation (round-3 verify-2 #9).
         if content.strip() == marked_loss.MINIMAL_ASSEMBLY_OMISSION_MARKER:
@@ -4845,11 +4845,11 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
             and stripped_content.endswith("]")
             and "\n" not in stripped_content
         ):
-            # fork: betterlcm — the receipt must BE the message. Matching a prefix let a user
+            # fork: better-hermeslcm — the receipt must BE the message. Matching a prefix let a user
             # message that quoted it and then added their own instructions be classified as our
             # scaffolding and dropped (round-4 verify-2 #6).
             return True
-        # fork: betterlcm — every shape assembly can emit must round-trip through this
+        # fork: better-hermeslcm — every shape assembly can emit must round-trip through this
         # recognition, or the generated prefix is ingested and stored as raw conversation
         # (round-2 verify-2 #5). A prefix whose parts all had to be given up carries only the
         # omission receipt, with no expand trailer at all.
@@ -4860,7 +4860,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         )
         if "[Expand for details:" not in content and not carries_omission_receipt:
             return False
-        # fork: betterlcm — the scaffold must BE the message, not merely contain the header.
+        # fork: better-hermeslcm — the scaffold must BE the message, not merely contain the header.
         # This classifier decides whether a message is EXCLUDED FROM STORAGE, and upstream
         # matched the header anywhere in any message, so a user pasting a summary block to ask
         # about it ("why did you summarise it this way?") was silently never stored
@@ -4882,7 +4882,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         last_line = lines[-1].strip()
         if last_line.startswith("[Expand for details:") and last_line.endswith("]"):
             return True
-        # fork: betterlcm — the receipt must END the message. Accepting it ANYWHERE meant a user
+        # fork: better-hermeslcm — the receipt must END the message. Accepting it ANYWHERE meant a user
         # message that pasted a summary header and receipt and then added "MY NEW DECISION:
         # cancel deployment" was classified as our own scaffolding and never stored
         # (round-2 verify-4 #2). Assembly always emits the receipt last.
@@ -4894,7 +4894,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         for index, line in enumerate(lines):
             if line.strip() != marked_loss.ASSEMBLY_OMISSION_MARKER_HEADER:
                 continue
-            # fork: betterlcm — the full marker is its header followed only by ITS OWN bullet
+            # fork: better-hermeslcm — the full marker is its header followed only by ITS OWN bullet
             # lines. Accepting any "- " line let a user's own "- MY NEW DECISION: cancel"
             # pass as generated scaffolding and be dropped (round-3 verify-4 #5).
             rest = [item.strip() for item in lines[index + 1:] if item.strip()]
@@ -5102,7 +5102,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
             )
             return self._redact_active_replay_messages(messages)
 
-        # fork: betterlcm — this ingest belongs to the session it STARTED under. Ownership was
+        # fork: better-hermeslcm — this ingest belongs to the session it STARTED under. Ownership was
         # read from mutable engine state again after the (potentially slow) protection work, so
         # a rebind landing in between filed the old turn under the new session and then set the
         # NEW session's cursor past a request that had never been stored — the next turn lost
@@ -5115,7 +5115,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
 
         n = len(messages)
         cursor = min(max(self._ingest_cursor, 0), n)
-        # fork: betterlcm — an already-ingested position the host EDITED is content that
+        # fork: better-hermeslcm — an already-ingested position the host EDITED is content that
         # reached the plugin and was never stored: the cursor treats that snapshot as holding
         # nothing new (round-2 verify-4 #5). When the host gives its messages stable ids the
         # edit is recognisable exactly, and the correction is archived as a new row that says
@@ -5452,7 +5452,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
             config=self._config,
             hermes_home=self._hermes_home,
         )
-        # fork: betterlcm — remember what the message looked like BEFORE protection rewrote it.
+        # fork: better-hermeslcm — remember what the message looked like BEFORE protection rewrote it.
         # The revision check compares an incoming edit against the stored row, and gave up (and
         # cached the id as settled) whenever the stored form was an externalized reference, so
         # an identifiable correction to such a row disappeared with no revision row and no
@@ -5495,7 +5495,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                     )
                 active_replay_messages[absolute_idx] = stubbed_message
 
-        # fork: betterlcm — recovered-body archive rows are STORED after the row they belong
+        # fork: better-hermeslcm — recovered-body archive rows are STORED after the row they belong
         # to, but they never enter ``protected_messages``, which is paired positionally with
         # the active messages: an inline extra row shifted every later replacement onto the
         # wrong message and a placeholder landed on the live request (round-3 verify-2 #1).
@@ -5518,7 +5518,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         # raw ingest: marking a period stale before its covering summary exists
         # would let a rebuild publish 'ready' from old sources and omit the leaf
         # (maintainer #388 P1).
-        # fork: betterlcm — a stale ingest never moves another generation's cursor. Doing so
+        # fork: better-hermeslcm — a stale ingest never moves another generation's cursor. Doing so
         # marked the NEW session's unstored request as already ingested (round-5 verify-6 #1).
         if self._publication_fence() != ingest_fence:
             logger.warning(
@@ -5567,7 +5567,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                 base = self._hermes_home or os.path.expanduser("~/.hermes")
                 output_path = os.path.join(base, "lcm-extractions")
             extraction_model = self._config.extraction_model or self._config.summary_model
-            # fork: betterlcm — hand the note its exact lineage (audit p05 EX07)
+            # fork: better-hermeslcm — hand the note its exact lineage (audit p05 EX07)
             try:
                 source_store_ids = sorted(dict.fromkeys(self._get_store_ids_for_messages(messages)))
             except Exception:  # pragma: no cover - provenance is best effort
@@ -5585,7 +5585,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                 source_store_ids=source_store_ids,
             )
             if not written:
-                # fork: betterlcm — extraction is best effort, but a failed pass is not a
+                # fork: better-hermeslcm — extraction is best effort, but a failed pass is not a
                 # successful "nothing to extract"; the operator sees which one happened.
                 logger.warning(
                     "LCM pre-compaction extraction did not complete for %d message(s); "
@@ -5782,7 +5782,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                 )
                 if externalized is not None and externalized.get("kind", "tool_result") == "tool_result":
                     placeholder = build_transcript_gc_placeholder(externalized)
-                    # fork: betterlcm — GC is an optimisation; a failure must not abort the
+                    # fork: better-hermeslcm — GC is an optimisation; a failure must not abort the
                     # compaction that already published its node. The store rolls the rewrite
                     # back as one transaction (round-2 verify-4 #6) and the row keeps its bytes.
                     try:
@@ -5796,7 +5796,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                         )
                     continue
 
-            # fork: betterlcm — the payload must contain the row's ORIGINAL bytes before the
+            # fork: better-hermeslcm — the payload must contain the row's ORIGINAL bytes before the
             # row may be replaced by a reference to it. This used to try a SANITIZED copy of
             # the row first and accept the first match, so a payload holding only the sanitized
             # text authorised destroying the original: sanitisation removes whole injected
@@ -5819,7 +5819,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                 self._store.gc_externalized_tool_result(
                     store_id, placeholder, before_commit=_archive_in_rewrite_txn
                 )
-            except Exception:  # fork: betterlcm — see above
+            except Exception:  # fork: better-hermeslcm — see above
                 logger.warning(
                     "LCM transcript GC failed for store_id %s; the row is unchanged",
                     store_id, exc_info=True,
@@ -5829,13 +5829,13 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         """Serialize messages into labeled text for the summarizer."""
         parts = []
         matched_tool_ids = _matched_tool_call_ids(messages)
-        # fork: betterlcm — 0 means NO CAP, not "cap at 64". Upstream cut every message to
+        # fork: better-hermeslcm — 0 means NO CAP, not "cap at 64". Upstream cut every message to
         # 3000 chars; this fork does not truncate at any window, and an engine that has not
         # learned its window yet must not fall back to a tiny cap either (the curve's value is
         # the whole window: ~1,048,576 chars at 256k, 4,000,000 at 1M). elide_text/elide_args
         # treat a cap of 0 as "return the text unchanged".
         serialize_cap = max(0, int(self.effective_serialize_message_max_chars or 0))
-        # fork: betterlcm — arguments get the SAME cap as the message, not a sixth of it.
+        # fork: better-hermeslcm — arguments get the SAME cap as the message, not a sixth of it.
         # Dividing by six reintroduced truncation at 256k that does not happen at 1M: a
         # 200,000-character argument lost its tail — and an earlier removal receipt inside that
         # tail — while the same call survived whole at 1M (round-5 verify-6 #5). The cap only
@@ -5884,18 +5884,18 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                     tc for tc in tool_calls
                     if not _tool_call_id(tc) or _tool_call_id(tc) in matched_tool_ids
                 ]
-                # fork: betterlcm — a call whose result is not in this chunk is still something
+                # fork: better-hermeslcm — a call whose result is not in this chunk is still something
                 # the agent did; upstream dropped it silently. Serialize it, marked.
                 serialized_tool_calls = [
                     (tc, tc in matched_tool_calls) for tc in tool_calls if isinstance(tc, dict)
                 ]
-                # fork: betterlcm — a call the renderer cannot shape as name(arguments) was
+                # fork: better-hermeslcm — a call the renderer cannot shape as name(arguments) was
                 # dropped by the isinstance filter with nothing in its place.
                 unrepresentable_calls = [tc for tc in tool_calls if not isinstance(tc, dict)]
                 envelope_fields = self._message_envelope_fields(msg)
                 if _is_synthetic_assistant_noise(content):
                     if not serialized_tool_calls and not envelope_fields and not unrepresentable_calls:
-                        # fork: betterlcm — the turn is dropped from the summariser's input by
+                        # fork: better-hermeslcm — the turn is dropped from the summariser's input by
                         # WORDING alone, so a genuine "Acknowledged." disappeared with nothing
                         # in its place (round-4 verify-4 #8). Identifying synthetic origin
                         # needs a host signal the plugin does not have; until then the removal
@@ -5923,7 +5923,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                         args = sanitize_pre_compaction_tool_arguments(args)
                         args = marked_loss.elide_args(args, args_cap)  # fork: marked
                         suffix = "" if is_matched else " " + marked_loss.unmatched_tool_call_note()
-                        # fork: betterlcm — everything else the provider attached to the call
+                        # fork: better-hermeslcm — everything else the provider attached to the call
                         # is named rather than dropped
                         suffix += marked_loss.tool_call_fields_note(tc)
                         tc_parts.append(f"  {name}({args}){suffix}")
@@ -6120,7 +6120,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         replacement = dict(message)
         replacement["content"] = self._active_tool_stub_content(
             content,
-            # fork: betterlcm — the stub hints at what it replaced
+            # fork: better-hermeslcm — the stub hints at what it replaced
             externalized["placeholder"] + marked_loss.externalized_head_note(normalized_content),
         )
         return replacement
@@ -6188,8 +6188,8 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         sanitized: List[Dict[str, Any]] = []
         dropped_tool_results = 0
         inserted_stub_results = 0
-        orphaned: List[Dict[str, Any]] = []  # fork: betterlcm — results with no call here
-        # fork: betterlcm — call ids that DO have a result somewhere in this window, even one
+        orphaned: List[Dict[str, Any]] = []  # fork: better-hermeslcm — results with no call here
+        # fork: better-hermeslcm — call ids that DO have a result somewhere in this window, even one
         # that cannot be replayed at its own position. A stub saying "none was ever received"
         # over content the orphan receipt then quotes is its own false statement
         # (round-2 verify-4 #19).
@@ -6198,7 +6198,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
             for message in messages
             if str(message.get("role") or "") == "tool"
         }
-        # fork: betterlcm — ONE archive query for every call in this window, not one per
+        # fork: better-hermeslcm — ONE archive query for every call in this window, not one per
         # missing result: twenty missing results issued twenty SELECTs on the assembly hot
         # path (round-3 verify-2 #10).
         expected_call_ids = [
@@ -6236,7 +6236,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                     if call_id
                 ]
 
-                # fork: betterlcm — collect the whole contiguous run of results FIRST and match
+                # fork: better-hermeslcm — collect the whole contiguous run of results FIRST and match
                 # by call id, instead of walking results in call order and discarding every one
                 # that does not match the id currently being looked for. Providers may return
                 # results in a different order than the calls were made (calls a,b -> results
@@ -6260,7 +6260,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                         sanitized.append(queued.pop(0))
                         continue
                     if insert_missing_tool_stubs:
-                        # fork: betterlcm — say what is true. The old stub claimed the result
+                        # fork: better-hermeslcm — say what is true. The old stub claimed the result
                         # was in the summary above, with nothing establishing that any summary
                         # covered it (verify-4 #10); saying "it is in the raw store" without
                         # looking was the same mistake for a call that never received a result
@@ -6306,7 +6306,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
             i += 1
 
         if orphaned:
-            # fork: betterlcm — a result that answers no call in this window cannot be replayed
+            # fork: better-hermeslcm — a result that answers no call in this window cannot be replayed
             # as a `tool` message (the provider contract forbids it), but it is real content:
             # name it and say where it lives instead of dropping it silently (verify-4 #10).
             #
@@ -6368,11 +6368,11 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         leaf_compacted_this_turn: bool = False,
         force_overflow: bool = False,
         critical_budget_pressure: bool = False,
-        deadline: Optional[float] = None,  # fork: betterlcm (budget regime only)
+        deadline: Optional[float] = None,  # fork: better-hermeslcm (budget regime only)
     ) -> int:
         """Check if any depth level has enough nodes for condensation.
 
-        Returns the number of condensation groups PUBLISHED (fork: betterlcm).
+        Returns the number of condensation groups PUBLISHED (fork: better-hermeslcm).
         """
         self._last_condensation_suppressed_reason = ""
 
@@ -6380,7 +6380,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         if max_depth == 0:
             return 0  # condensation disabled
 
-        # fork: betterlcm — the interpolated trigger is a CONJUNCTION, exactly as designed:
+        # fork: better-hermeslcm — the interpolated trigger is a CONJUNCTION, exactly as designed:
         # condense when ``len(uncondensed) >= fanin AND frontier > t*0.20*W``. The budget is a
         # gate in front of upstream's loop, not a replacement for it: at 256k the budget is 0,
         # the gate is vacuous and the loop below runs verbatim; as the window grows the gate
@@ -6405,10 +6405,10 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
             upper = max_depth
 
         condensed_any = False
-        self._last_condensation_published = 0  # fork: betterlcm — round-3 verify-3
+        self._last_condensation_published = 0  # fork: better-hermeslcm — round-3 verify-3
         suppression_reason = ""
         fanin = max(1, self._config.condensation_fanin)
-        # fork: betterlcm — one compress() may publish up to `leaf_pass_cap` leaves at a large
+        # fork: better-hermeslcm — one compress() may publish up to `leaf_pass_cap` leaves at a large
         # window; upstream's single pass of the depth loop was matched to its one-leaf-per-call
         # rate, so keeping it let leaves accumulate faster than they were merged. The cap counts
         # TRAVERSALS of the depth loop, exactly what upstream did once: at the low anchor it is
@@ -6444,7 +6444,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                     suppression_reason = reason or suppression_reason
                     continue
 
-                # Take the first fanin nodes and condense. fork: betterlcm — once the budget
+                # Take the first fanin nodes and condense. fork: better-hermeslcm — once the budget
                 # gate is active (t > 0) the group is the OLDEST same-depth frontier material
                 # by content age instead of upstream's insertion order; at 256k the budget is
                 # 0 and upstream's selection is used unchanged.
@@ -6461,7 +6461,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                 condensed_any = True
                 published_this_pass += 1
                 groups_published += 1
-                # fork: betterlcm — record progress AS it happens: assigning the counter after
+                # fork: better-hermeslcm — record progress AS it happens: assigning the counter after
                 # the loop meant a later group's failure hid the groups already published
                 # (round-4 verify-2 #11).
                 self._last_condensation_published = groups_published
@@ -6481,7 +6481,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         if not condensed_any and leaf_compacted_this_turn and self._config.cache_friendly_condensation_enabled:
             self._last_condensation_suppressed_reason = suppression_reason
         self._last_condensation_published = groups_published
-        # fork: betterlcm — tell the caller whether anything was actually PUBLISHED. A
+        # fork: better-hermeslcm — tell the caller whether anything was actually PUBLISHED. A
         # condensation that spent a model call and wrote a new parent used to be invisible to
         # compress(), which then returned "noop" with the original context (round-2 verify-2 #7).
         return groups_published
@@ -6489,7 +6489,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
     def _select_oldest_condensation_group(
         self, fanin: int, max_depth: int, *, depth: Optional[int] = None
     ) -> List[SummaryNode]:
-        """fork: betterlcm — the fanin oldest same-depth frontier nodes around the oldest
+        """fork: better-hermeslcm — the fanin oldest same-depth frontier nodes around the oldest
         frontier node (by ``earliest_at``, else ``created_at``), skipping depths at the cap.
 
         ``depth`` restricts the search to one depth (the caller's loop depth).
@@ -6530,9 +6530,9 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         if any(node.depth != depth for node in nodes):
             raise ValueError("condensation requires same-depth summary nodes")
         combined_text = "\n\n---\n\n".join(node.summary for node in nodes)
-        fence = self._publication_fence()  # fork: betterlcm — see _check_publication_fence
+        fence = self._publication_fence()  # fork: better-hermeslcm — see _check_publication_fence
         source_tokens = sum(node.token_count for node in nodes)
-        token_budget = max(  # fork: betterlcm — upstream's literals (1000 / 0.40) from config
+        token_budget = max(  # fork: better-hermeslcm — upstream's literals (1000 / 0.40) from config
             int(self._config.condensation_min_tokens),
             int(source_tokens * float(self._config.condensation_ratio)),
         )
@@ -6540,7 +6540,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         if deadline is not None:
             remaining_seconds = deadline - time.monotonic()
             if remaining_seconds <= 0:
-                # fork: betterlcm — a bare TimeoutError escaped both the compaction handler and
+                # fork: better-hermeslcm — a bare TimeoutError escaped both the compaction handler and
                 # the host wrapper, which tolerate SummaryUnavailableError: committed leaf work
                 # was published, the frontier had moved, and compress() still returned the
                 # original context with no cooldown (round-2 verify-2 #3).
@@ -6569,7 +6569,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
             },
             deadline=deadline,  # fork: one end time for L1+L2+fallbacks (p05 CP05)
         )
-        # fork: betterlcm — the fence is validated and the node written under ONE lock, so a
+        # fork: better-hermeslcm — the fence is validated and the node written under ONE lock, so a
         # rebind cannot land between the check and the insert (round-3 verify-2 #3).
         with self._publication_lock:
             self._check_publication_fence(fence, what="condensation")
@@ -6579,18 +6579,18 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
 
     def _publish_condensed_node(self, nodes, fence, summary_text, level, depth,
                                 source_tokens, focus_topic) -> tuple[int, int, int]:
-        """fork: betterlcm — the write half of ``_condense_summary_nodes``, under the fence."""
+        """fork: better-hermeslcm — the write half of ``_condense_summary_nodes``, under the fence."""
         earliest_at, latest_at = self._dag.get_source_time_window(
             [node.node_id for node in nodes]
         )
-        # fork: betterlcm — carry the children's loss receipts into the parent. The summariser
+        # fork: better-hermeslcm — carry the children's loss receipts into the parent. The summariser
         # writes the parent's prose and has no obligation to reproduce a "[LCM: …]" line its
         # sources carried, so the record of what was excluded used to end at the condensation
         # boundary (verify-4 #8).
         inherited = marked_loss.inherited_receipts(node.summary for node in nodes)
         missing = [line for line in inherited if line not in summary_text]
         if missing:
-            # fork: betterlcm — the PUBLISHED text is what has to converge, receipts included.
+            # fork: better-hermeslcm — the PUBLISHED text is what has to converge, receipts included.
             # Copying distinct receipts verbatim made the "condensed" parent larger than its
             # sources (round-2 verify-2 #9), and the single-receipt exemption let one large
             # receipt do the same (round-3 verify-3): 530 source tokens became a 664-token
@@ -6606,7 +6606,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
             elif count_tokens(aggregate) < source_tokens:
                 summary_text = aggregate
             else:
-                # fork: betterlcm — the PUBLISHED text has to converge, receipts included. When
+                # fork: better-hermeslcm — the PUBLISHED text has to converge, receipts included. When
                 # even the one-line aggregate does not, publishing would raise the pressure this
                 # call exists to reduce, so the condensation is refused: the children stay, with
                 # their receipts, and nothing is lost (round-4 verify-2 #10).
@@ -6629,14 +6629,14 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
             latest_at=latest_at,
             expand_hint=self._extract_expand_hint(summary_text),
         )
-        # fork: betterlcm — node + sidecar in one transaction (audit p05 CP03)
+        # fork: better-hermeslcm — node + sidecar in one transaction (audit p05 CP03)
         self._dag.add_node_with_meta(condensed_node, level=int(level), summary=summary_text)
         self._invalidate_rollups_for_published_node(condensed_node)
         return source_tokens, summary_tokens, level
 
     def _summary_frontier_nodes(self) -> List[SummaryNode]:
         """Return all provider-visible summary frontier nodes for the active session."""
-        # fork: betterlcm — the frontier is a SQL predicate, not a page of nodes. Loading every
+        # fork: better-hermeslcm — the frontier is a SQL predicate, not a page of nodes. Loading every
         # node with limit=100_000 and filtering in Python meant a session past that limit
         # computed its frontier from a truncated set, with nothing to say so.
         projected = getattr(self._dag, "get_frontier_nodes", None)
@@ -6652,7 +6652,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         return [node for node in all_nodes if node.node_id not in referenced]
 
     def _summary_frontier_tokens(self) -> int:
-        # fork: betterlcm — SQL projection (identical to summing the decoded frontier)
+        # fork: better-hermeslcm — SQL projection (identical to summing the decoded frontier)
         projected = getattr(self._dag, "get_frontier_token_total", None)
         if projected is not None:
             return int(projected(self._session_id))
@@ -6723,7 +6723,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
 
     @staticmethod
     def _append_lcm_note_to_content(content: Any) -> Any:
-        # fork: betterlcm — the first two sentences are the replay-scaffold signature
+        # fork: better-hermeslcm — the first two sentences are the replay-scaffold signature
         # (_is_replayed_context_scaffold_message) and must stay verbatim.
         note = (
             "\n\n[Note: This conversation uses Lossless Context Management (LCM). "
@@ -7019,8 +7019,8 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
             anchor_source = tail_messages
         anchor_part: Optional[str] = None
         summary_budget = None
-        omitted_tail_messages = 0  # fork: betterlcm
-        receipt_only_turns = 0  # fork: betterlcm — internal-only turns held out of the budget
+        omitted_tail_messages = 0  # fork: better-hermeslcm
+        receipt_only_turns = 0  # fork: better-hermeslcm — internal-only turns held out of the budget
         if assembly_cap is not None:
             used = count_message_tokens(leading_msg) if leading_msg is not None else 0
             kept_tail_reversed: list[Dict[str, Any]] = []
@@ -7029,7 +7029,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                 assembly_tail_messages,
                 insert_missing_tool_stubs=False,
             )
-            # fork: betterlcm — a turn that is now nothing BUT the internal-removal receipt is
+            # fork: better-hermeslcm — a turn that is now nothing BUT the internal-removal receipt is
             # taken out before the budget pass (upstream dropped it in cleanup) and named in
             # the omission marker below, so a receipt can never displace a live message.
             receipt_only_turns = sum(
@@ -7042,7 +7042,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                     if not _is_internal_replay_receipt_only(message)
                 ]
             skipped_tail_gap = False
-            # fork: betterlcm — count EVERY message this loop leaves behind. Both `break`s
+            # fork: better-hermeslcm — count EVERY message this loop leaves behind. Both `break`s
             # abandoned the whole older remainder without counting it, so a receipt said "1
             # tail message" where two had gone (round-3 verify-4 #6).
             for index, msg in enumerate(reversed(tail_for_selection)):
@@ -7089,7 +7089,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         # Node ids placed in the summary prefix — used to dedupe proactive-recall
         # injection against summaries already visible in the active context.
         active_summary_node_ids: set = set()
-        # fork: betterlcm — depths via DISTINCT (upstream loaded up to 1000 nodes to find
+        # fork: better-hermeslcm — depths via DISTINCT (upstream loaded up to 1000 nodes to find
         # them) and every uncondensed node per depth up to a marked cap (upstream: 100,
         # silently).
         depths = sorted(self._dag.get_session_depths(self._session_id), reverse=True)
@@ -7109,7 +7109,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                 for node in uncondensed:
                     active_summary_node_ids.add(node.node_id)
                     rendered_nodes.append((d, node))
-            # fork: betterlcm — one sidecar read for the level tag of every rendered node
+            # fork: better-hermeslcm — one sidecar read for the level tag of every rendered node
             meta_by_id = self._node_meta_for_assembly([node.node_id for _d, node in rendered_nodes])
             for d, node in rendered_nodes:
                 summary_part_node_ids.append(node.node_id)
@@ -7132,7 +7132,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         if summary_parts:
             selected_parts = summary_parts
             if summary_budget is not None:
-                # fork: betterlcm — incremental accounting. Rejoining and recounting the whole
+                # fork: better-hermeslcm — incremental accounting. Rejoining and recounting the whole
                 # accepted prefix for every candidate made assembly quadratic in the number of
                 # rendered summaries, on the per-turn hot path (verify-3 O2). The running total
                 # is an upper bound (the separator is counted for every part after the first),
@@ -7184,14 +7184,14 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                     )
                     if dropped_node_id is not None:
                         omitted_node_ids.append(dropped_node_id)
-        # fork: betterlcm — whatever was left out is named, so absence from the prefix
+        # fork: better-hermeslcm — whatever was left out is named, so absence from the prefix
         # never reads as absence from history. That includes the assistant turns the
         # active-context cleanup below is about to drop for holding only internal content.
         dropped_internal_turns = receipt_only_turns + sum(
             1 for message in tail_selected
             if isinstance(message, dict) and _should_drop_active_assistant_message(message)
         )
-        # fork: betterlcm — a turn can be PARTLY internal: its visible text is replayed while
+        # fork: better-hermeslcm — a turn can be PARTLY internal: its visible text is replayed while
         # a <think> block is not. Counting only whole dropped turns left that removal unnamed
         # (round-2 verify-4 #16).
         redacted_internal_turns = sum(
@@ -7208,7 +7208,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
             redacted_internal_turns=redacted_internal_turns,
         )
         if omission_marker:
-            # fork: betterlcm — the receipt is INDIVISIBLE: rather than dropping the one part
+            # fork: better-hermeslcm — the receipt is INDIVISIBLE: rather than dropping the one part
             # that says what is missing, give up rendered summaries (naming each) until it
             # fits. Dropping the marker under a small budget left the reader with a prefix
             # that silently omitted everything (verify-4 #9).
@@ -7220,7 +7220,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                     ) <= summary_budget
 
                 if not _fits(selected_parts):
-                    # fork: betterlcm — before giving up the receipt, try its one-line form.
+                    # fork: better-hermeslcm — before giving up the receipt, try its one-line form.
                     # Upstream dropped the whole marker at the first sign of pressure, which is
                     # exactly when something HAS been omitted (verify-4 #9).
                     compact_marker = marked_loss.compact_assembly_omission_marker(
@@ -7234,7 +7234,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                         selected_parts[-1] = compact_marker
                         omission_marker = compact_marker
                     else:
-                        # fork: betterlcm — rendered content outranks the DETAILED receipt (an
+                        # fork: better-hermeslcm — rendered content outranks the DETAILED receipt (an
                         # empty prefix that only says "something is missing" helps nobody), but
                         # something must still say that something is missing: dropping the
                         # receipt entirely left a prefix that omitted content in silence
@@ -7287,7 +7287,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         # then ensure provider-valid tool-call/result sequencing.
         result = self._sanitize_active_context_messages(result)
         if leading_msg is None:
-            # fork: betterlcm — a provider request cannot BEGIN with an assistant or tool
+            # fork: better-hermeslcm — a provider request cannot BEGIN with an assistant or tool
             # message, so the leading ones are dropped; dropping them in silence removed a
             # decision from the agent's own view of its history (round-3 verify-4 #7). The rows
             # are untouched and the removal is named.
@@ -7492,7 +7492,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
             include_lcm_note=False,
         )
         minimum_candidate_len = 1 if system_msg is not None else 0
-        # fork: betterlcm — "the assembly produced no CONTENT" is the fallback's trigger, not
+        # fork: better-hermeslcm — "the assembly produced no CONTENT" is the fallback's trigger, not
         # "the assembly produced no messages". Once a bounded assembly started emitting its
         # omission receipt, that receipt alone satisfied the old length test and the caller's
         # latest message was dropped (round-3 verify-4 #6). Our own scaffolding does not count
@@ -7777,7 +7777,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         if is_noop:
             return result
 
-        # fork: betterlcm — the marker is written BEFORE the frontier advances. Rotating means
+        # fork: better-hermeslcm — the marker is written BEFORE the frontier advances. Rotating means
         # "stop replaying these raw rows"; the marker node is the only thing that still says
         # they exist. Advancing first (as this did) meant a failed marker write left the rows
         # skipped at the next bootstrap with nothing pointing at them, while rotate still
@@ -7832,7 +7832,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         return result
 
     def _rotate_span_needs_marker(self, session_id: str, new_frontier: int) -> bool:
-        """fork: betterlcm — True when the span the frontier would skip holds raw rows that no
+        """fork: better-hermeslcm — True when the span the frontier would skip holds raw rows that no
         DAG node covers, i.e. when a missing marker would really lose the index."""
         start_id = int(self._last_compacted_store_id or 0) + 1
         if new_frontier < start_id:
@@ -7846,7 +7846,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
     _ROTATE_MARKER_PAGE_ROWS = 5_000
 
     def _write_rotate_marker_node(self, session_id: str, new_frontier: int) -> int | None:
-        """fork: betterlcm — d0 marker node(s) over rotated rows with no summary coverage.
+        """fork: better-hermeslcm — d0 marker node(s) over rotated rows with no summary coverage.
 
         The span is PAGED. A single capped read (one million rows) let rotation advance the
         frontier past rows the marker did not name, so the remainder was skipped at the next
@@ -7933,7 +7933,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
 
     def shutdown(self):
         self._unregister_active_engine_binding()
-        # fork: betterlcm — the shared leaf worker pool belongs to this engine (round-2
+        # fork: better-hermeslcm — the shared leaf worker pool belongs to this engine (round-2
         # verify-2 #6); let its daemon threads go without waiting on abandoned model calls.
         leaf_pool = getattr(self, "_leaf_pool", None)
         if leaf_pool is not None:

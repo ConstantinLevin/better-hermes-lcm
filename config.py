@@ -410,7 +410,7 @@ ENV_FIELD_SPECS: tuple[_EnvFieldSpec, ...] = (
     _EnvFieldSpec("rollup_aggregate_max_tokens", "LCM_ROLLUP_AGGREGATE_MAX_TOKENS", int),
     _EnvFieldSpec("rollup_builds_per_pass", "LCM_ROLLUP_BUILDS_PER_PASS", int),
     _EnvFieldSpec("rollup_maintenance_budget_ms", "LCM_ROLLUP_MAINTENANCE_BUDGET_MS", int),
-    # fork: betterlcm — window-weighted tuning
+    # fork: better-hermeslcm — window-weighted tuning
     _EnvFieldSpec("scale_low_window", "LCM_SCALE_LOW_WINDOW", int),
     _EnvFieldSpec("scale_high_window", "LCM_SCALE_HIGH_WINDOW", int),
     _EnvFieldSpec("drain_stop_fraction", "LCM_DRAIN_STOP_FRACTION", float),
@@ -600,7 +600,7 @@ class LCMConfig:
     # When enabled, already-externalized summarized tool-result transcript rows may
     # be rewritten to compact GC placeholders after successful leaf compaction.
     large_output_transcript_gc_enabled: bool = False
-    # fork: betterlcm — keep a DURABLE copy of an oversized tool result that the host wrote to
+    # fork: better-hermeslcm — keep a DURABLE copy of an oversized tool result that the host wrote to
     # its own expiring spillover directory and named in a <persisted-output> marker. The host
     # deletes those files after 24 hours, so without this the archive keeps a preview of an
     # output that no longer exists anywhere (audit p06 I2). This is archival duty, not the
@@ -807,7 +807,7 @@ class LCMConfig:
     config_source_warnings: list[str] = field(default_factory=list)
     ignored_config_yaml_lcm_keys: list[str] = field(default_factory=list)
 
-    # ── fork: betterlcm — window-weighted tuning (see window_scaling.py) ──────────────
+    # ── fork: better-hermeslcm — window-weighted tuning (see window_scaling.py) ──────────────
     # Anchors of the weighting curve: below scale_low_window every default is upstream's,
     # above scale_high_window it is the large-window design, in between it slides linearly.
     scale_low_window: int = 262_144
@@ -839,7 +839,7 @@ class LCMConfig:
     # Summary size rules (upstream literals, now configurable; defaults unchanged).
     leaf_summary_ratio: float = 0.20          # leaf budget = clamp(ratio*source, min, max)
     leaf_summary_min_tokens: int = 2000
-    # fork: betterlcm — 0 = NO ceiling (upstream's literal was 12000). A summary whose size
+    # fork: better-hermeslcm — 0 = NO ceiling (upstream's literal was 12000). A summary whose size
     # stops growing while its source keeps growing is published as a complete index over
     # material it had no room to describe; the input is bounded by the leaf chunk instead.
     # An operator may still set a ceiling here, at that cost.
