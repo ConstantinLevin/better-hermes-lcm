@@ -2357,8 +2357,11 @@ def lcm_load_session(args: Dict[str, Any], **kwargs) -> str:
         return json.dumps({"error": max_content_error})
     if max_content_chars is None or max_content_chars <= 0:
         return json.dumps({"error": "max_content_chars must be a positive integer"})
+    # fork: better-hermeslcm — `max_content_chars` is the caller's own argument and is honoured
+    # as given. It used to be clamped to a hard 20k (window-scaled); the clamp was marked and
+    # the rest was still reachable by paging, but it is still the plugin overriding how much
+    # the agent asked for. Same rule as the response caps: the argument is the contract.
     requested_max_content_chars = max_content_chars
-    max_content_chars = min(max_content_chars, _scaled_cap(_LCM_LOAD_SESSION_HARD_MAX_CONTENT_CHARS))
 
     after_store_id, cursor_error = _parse_strict_int(args.get("after_store_id", 0), "after_store_id")
     if cursor_error:
@@ -2428,8 +2431,6 @@ def lcm_load_session(args: Dict[str, Any], **kwargs) -> str:
         response["time_to"] = time_to
     if requested_limit > _LCM_LOAD_SESSION_HARD_LIMIT_CAP:
         response["limit_clamped_from"] = requested_limit
-    if requested_max_content_chars > _scaled_cap(_LCM_LOAD_SESSION_HARD_MAX_CONTENT_CHARS):
-        response["max_content_chars_clamped_from"] = requested_max_content_chars
     return json.dumps(response)
 
 
@@ -2940,13 +2941,12 @@ def lcm_recent(args: Dict[str, Any], **kwargs) -> str:
             "end": _recent_iso(window.end),
         },
         "limit": limit,
-        "char_limit": _scaled_cap(_LCM_RECENT_MAX_RESPONSE_CHARS),
         "mode": "leaf_summary_fallback" if fallback else "rollup",
         # fork: better-hermeslcm — say plainly when the window could not be scanned
         "complete": not incomplete_reason,
         **({"incomplete_reason": incomplete_reason} if incomplete_reason else {}),
         # ``provenance.rollups`` is filled by _bounded_recent_json from the
-        # sections actually returned (bounded by limit + char cap);
+        # sections actually returned (bounded by ``limit`` alone);
         # ``rollups_covered`` is the O(1) aggregate count of ready rollups the
         # window matched, so operators still see "N covered, showing M"
         # (maintainer #389 C2).
@@ -3364,23 +3364,19 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
             externalized_matches.append(item)
             scan_counts["matched_files"] += 1
 
-        # Search every file in the bounded candidate set before truncating.
         # Discovery order is not a ranking signal: relevance and hybrid use the
         # payload's native byte position, while recency uses its timestamp.
+        # fork: better-hermeslcm — every match found is delivered. This loop used to stop
+        # appending at a response char cap, and `total_results` was then computed over the
+        # shortened list, so a search silently reported fewer matches than it had found with
+        # nothing in the response saying so. `limit` is the caller's contract.
         externalized_matches.sort(key=lambda result: _combined_result_sort_key(result, sort))
-        response_chars = 0
-        for item in externalized_matches:
-            item_chars = len(json.dumps(item, ensure_ascii=False))
-            if response_chars + item_chars > _scaled_cap(_LCM_GREP_RESPONSE_CHAR_CAP):
-                break
-            response_chars += item_chars
-            results.append(item)
+        results.extend(externalized_matches)
         externalized_scan = {
             **scan_counts,
             "file_limit": _LCM_GREP_EXTERNALIZED_FILE_CAP,
             "discovery_limit": _LCM_GREP_EXTERNALIZED_DISCOVERY_CAP,
             "content_bytes_per_file": _LCM_GREP_EXTERNALIZED_CONTENT_BYTES,
-            "response_char_limit": _scaled_cap(_LCM_GREP_RESPONSE_CHAR_CAP),
             "active_session_only": True,
         }
 
@@ -5729,8 +5725,6 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
         diversity_dropped = 0
         answer_ready_content = {}
     hits_out: list[dict[str, Any]] = []
-    response_chars = 0
-    response_cap_truncated = False
     unreferenced_omitted = 0
     for entry in selected_entries:
         hit = entry["hit"]
@@ -5812,11 +5806,10 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
                 unreferenced_omitted += 1
                 continue
             item["content_offset"], item["content_returned_chars"] = span
-        item_chars = len(json.dumps(item, ensure_ascii=False))
-        if hits_out and response_chars + item_chars > _scaled_cap(_LCM_RECALL_RESPONSE_CHAR_CAP):
-            response_cap_truncated = True
-            break
-        response_chars += item_chars
+        # fork: better-hermeslcm — no response char cap. `limit` is the contract: the caller
+        # said how many hits it wants and gets them. Dropping ranked hits here returned a
+        # short list with no cursor to the rest, and the host already spills an oversized
+        # tool response to a file of its own.
         if reference_strict:
             strict_selector.deliver(entry)
         hits_out.append(item)
@@ -5869,13 +5862,12 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
             "diversity_dropped_count": diversity_dropped,
             "per_hit_char_cap": _LCM_RECALL_ANSWER_READY_CONTENT_CHARS,
             "snippet_char_cap": _LCM_RECALL_SNIPPET_CHARS,
-            "response_char_cap": _scaled_cap(_LCM_RECALL_RESPONSE_CHAR_CAP),
             "response_policy": (
                 "rank-preserving session diversity, then exact-ref hydration; "
-                "whole hits only when enforcing the response cap"
+                "every selected hit is delivered -- there is no response char cap"
             ),
             "hydration_policy": "bounded exact reads only; no additional retrieval search",
-            "response_truncated": response_cap_truncated,
+            "response_truncated": False,
         }
         if reference_strict:
             expansion["reference_strict"] = True
@@ -5914,25 +5906,13 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
                 "observation_is_not_occurrence": True,
             }
 
+        # fork: better-hermeslcm — the response is serialised as it stands. This used to echo
+        # the query back cut to 4096 chars and then pop hits (and then summary leads) one at a
+        # time until the JSON fit a char cap, rewriting `total_results` to the count AFTER the
+        # cut -- so the answer claimed there had never been more. Same cut as the one removed
+        # from `lcm_recent`, same reason it is gone: `limit` is the caller's contract and an
+        # oversized tool response is the host's business, which the host already handles.
         encoded = json.dumps(response, ensure_ascii=False)
-        if len(encoded) > _scaled_cap(_LCM_RECALL_RESPONSE_CHAR_CAP):
-            original_query = response["query"]
-            response["query"] = original_query[:4_096]
-            expansion["query_truncated"] = len(response["query"]) < len(original_query)
-            encoded = json.dumps(response, ensure_ascii=False)
-        while len(encoded) > _scaled_cap(_LCM_RECALL_RESPONSE_CHAR_CAP) and (
-            response["hits"] or expansion.get("summary_leads")
-        ):
-            if response["hits"]:
-                response["hits"].pop()
-            else:
-                expansion["summary_leads"].pop()
-            response["total_results"] = len(response["hits"])
-            expansion["response_truncated"] = True
-            expansion["expanded_hit_count"] = sum(
-                "content" in hit for hit in response["hits"]
-            )
-            encoded = json.dumps(response, ensure_ascii=False)
         if delta_requested:
             novel_refs = [
                 hit["exact_ref"]
