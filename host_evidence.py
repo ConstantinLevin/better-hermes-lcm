@@ -157,10 +157,27 @@ def _prepare_selector_retrieval(
             break
     metrics = payload.get("metrics")
     metric_map = metrics if isinstance(metrics, Mapping) else {}
+    # fork: betterlcm — a search that did NOT run exhaustively is not a search that found
+    # nothing: {complete: false, timeout: true, hits: []} was reported as an ordinary
+    # "no_progress", which reads as "there is nothing there" (round-3 verify-4 #14).
+    upstream_incomplete = (
+        payload.get("complete") is False
+        or bool(payload.get("timeout"))
+        or bool(payload.get("search_failures"))
+        or bool(payload.get("bounded_scans"))
+    )
+    if upstream_incomplete:
+        result["retrieval_complete"] = False
+        for key in ("timeout", "search_failures", "bounded_scans", "coverage", "continuation"):
+            if payload.get(key) not in (None, [], {}, False):
+                result[key] = payload[key]
     result.update(
         {
             "calls": 1,
-            "status": "novel" if novel else "no_progress",
+            "status": (
+                "novel" if novel
+                else ("incomplete" if upstream_incomplete else "no_progress")
+            ),
             "novel_exact_refs": [item["exact_ref"] for item in novel],
             "usage": {
                 key: metric_map[key]

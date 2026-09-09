@@ -346,3 +346,25 @@ def test_structured_adapters_refuse_an_unfinished_generation():
     finished = SimpleNamespace(choices=[SimpleNamespace(
         message=SimpleNamespace(content="{}"), finish_reason="stop")])
     assert unfinished_generation_reason(finished) == ""
+
+
+def test_a_timed_out_retrieval_is_not_reported_as_no_progress():
+    """round-3 verify-4 #14: {complete: false, timeout: true, hits: []} was reported as an
+    ordinary "no_progress", which reads as "there is nothing there" rather than "the search did
+    not finish"."""
+    import json
+    from hermes_lcm.host_evidence import _prepare_selector_retrieval
+
+    def timed_out(_request):
+        return json.dumps({"hits": [], "complete": False, "timeout": True})
+
+    _baseline, result = _prepare_selector_retrieval(
+        timed_out,
+        question="how long is the commute?",
+        facets=[{"name": "duration", "required": True}],
+        baseline_refs=[],
+        budgets={"max_retrieval_calls": 1},
+    )
+    assert result["status"] == "incomplete", result
+    assert result["retrieval_complete"] is False
+    assert result["timeout"] is True

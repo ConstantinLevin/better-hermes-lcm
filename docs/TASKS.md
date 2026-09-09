@@ -239,6 +239,57 @@ reverted for producing duplicate rows. Also open: #7–#12 and
 embeddings, trajectory, backfill counters), #25 (the host's own response normalisation, outside
 the plugin), and #28 (the configured exclusions, documented in FORK.md as deliberate).
 
+## Seventh pass — round 3 of the verification audits
+
+Round 3 ran against a pinned tree (`5475e94`) and reported, per auditor: verify-2 ten
+regressions (3 P1), verify-3 a 25-group closure list, verify-4 39 doctrine violations,
+verify-5 the subsystem list. It also credited as fixed: the three cancellation boundaries,
+trajectory losslessness, `lcm_recent` totals and frontier failures, the closed-DAG rollup
+refusal, the GC rewrite primitive, recall's adapter, exact-fit assembly, the condensation
+deadline, body-first pagination, ordered-search completion, ASCII snippets, FTS trigger
+repair, index-block continuation, batching, and the DAG rollback guard.
+
+Closed in this pass:
+
+| finding | what the fork does now |
+|---|---|
+| verify-2 #1 (P1) | protection returns one row per input; recovered-body archive rows are returned separately and stored after the row they belong to, so a placeholder can no longer land on the live request |
+| verify-2 #2 (P1) | the marker row, its attachments and the commit are one `BaseException`-protected transaction |
+| verify-2 #3 / verify-4 #1 (P1) | one publication lock across validation, the node write and the frontier; `on_session_start`/`on_session_reset` take it; the assembled result is fenced again before it is handed over |
+| verify-2 #4 | the shared pool purges cancelled work when an attempt closes |
+| verify-2 #5 | the refusal gate no longer demands lexical overlap: only a reply that is both almost empty and shares nothing with the source is a non-answer |
+| verify-2 #7 | a term whose meaning is a symbol the index deletes must actually match; a standalone symbol stays a routing trigger |
+| verify-2 #8 / verify-4 #3 | revisions compare the whole envelope; revision rows stay out of the chronological walk, resolve by host id, and are covered by the leaf that covers their original |
+| verify-2 #9 | a standalone minimal receipt is recognised as scaffolding |
+| verify-2 #10 | an unchanged prefix costs no database work; missing-result lookups are one batched query |
+| verify-3 | partial condensation keeps its published count; the GC chunk-archive failure reaches its transaction; the extraction manifest names every source id as ranges |
+| verify-4 #4 | a late session-end flush runs under the ended session's identity |
+| verify-4 #5 | the omission header's bullets must be the ones the marker writes |
+| verify-4 #6 | every abandoned tail message is counted; the fallback that rescues the latest message tests for content, not for message count |
+| verify-4 #7 | leading turns a request cannot start with are named in a receipt |
+| verify-4 #8 | the envelope reaches the summariser (inline outcomes, receipt for the rest) and node expansion; unrepresentable timestamps and corrupt envelope JSON are preserved |
+| verify-4 #9 | every rendering branch inventories what it did not render; 0 and False are values; a rewritten JSON key carries a receipt |
+| verify-4 #10 | marker fragments are carried whole; inheritance catches receipts after visible text |
+| verify-4 #11/#12 | payload corruption survives every expansion path; synthesis completeness is the conjunction of selection, searches, hydration, truncation and synthesis |
+| verify-4 #13 | `lcm_describe` pages a node's own summary and a truncated child carries that continuation |
+| verify-4 #14 | a timed-out or bounded retrieval is reported as incomplete, not as "no progress" |
+| verify-4 #15/#16 | unexamined candidates that state values of the requested kind refuse sufficiency; a unit clause the filter cannot read refuses finite coverage |
+| verify-4 #17 | a question keeps its own year and currency, or the contract is refused |
+| verify-4 #18/#19 | a value must be stated by one clause of the quote, the label must be in that clause, a negated numeric value is refused, and numbers are complete lexemes compared exactly |
+| verify-4 #20 | only the computation's own answer is verifiable |
+| verify-4 #21 | a binding failure before ingest counts as an ingest failure |
+| verify-4 #24/#25 | archive rows name the row they belong to; payload filenames stay inside the reader's grammar |
+| verify-4 #27 | a truncated generation is not a payload, in every structured adapter |
+| verify-5 #1/#4/#5 | cancellation-safe sidecar transactions, lossless trajectory ingestion, canonical-only verification |
+
+**Still open after this pass:** verify-4 #6's smallest case (a budget too small for even a
+12-token receipt records the omission in `lcm_status` instead of the prefix — a deliberate
+trade-off, since making room would drop the caller's own latest message), #10's structured
+omission records (architectural), #26 adaptive finalisation staleness, and the verify-5 tail:
+embeddings association/coverage, trajectory recovery and indexing, rollup snapshots, query-view
+freshness, assertion polarity and scope, and the window-policy integration for optional
+subsystem capacities.
+
 ## Still open — from the partitioned audits
 
 Fourteen audits ran: four aspect comparisons against lossless-claw, three cross-cutting
