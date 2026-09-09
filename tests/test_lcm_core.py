@@ -7264,8 +7264,16 @@ class TestExtraction:
                 serialized_messages="test",
                 output_path=str(tmp_path / "extractions"),
             )
-            # Should return True (nothing to write) not raise
-            assert result is True
+            # Must not raise. fork: betterlcm — an EMPTY route response is a failed extraction,
+            # not "this segment held nothing worth extracting" (round-2 verify-4 #38); the
+            # explicit NOTHING_TO_EXTRACT answer is the one that means absence.
+            assert result is False
+
+            ext_module._call_extraction_llm = lambda prompt, model="", timeout=None: "NOTHING_TO_EXTRACT"
+            assert extract_before_compaction(
+                serialized_messages="test",
+                output_path=str(tmp_path / "extractions"),
+            ) is True
         finally:
             ext_module._call_extraction_llm = original
 

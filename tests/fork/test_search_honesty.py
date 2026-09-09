@@ -207,3 +207,35 @@ def test_a_query_whose_symbol_the_index_drops_goes_to_the_scan_that_keeps_it(tmp
         assert hits == ["flag∀ universal"], hits
     finally:
         dag.close()
+
+
+def test_recall_keeps_the_full_text_arm_s_incompleteness(tmp_path, monkeypatch):
+    """round-2 verify-4 #23: the FTS arm converted a grep result carrying complete=false, its
+    failures and its work caps into ([], None), so recall answered as if that arm had run
+    cleanly over the whole corpus."""
+    import json
+    from hermes_lcm import tools as lcm_tools
+    cfg = LCMConfig(database_path=str(tmp_path / "recall.db"))
+    e = LCMEngine(config=cfg, hermes_home=str(tmp_path))
+    try:
+        e.on_session_start("rc", platform="cli", context_length=200_000)
+        e._store.append("rc", {"role": "user", "content": "alpha the decision"}, source="cli")
+        e._store.commit()
+
+        def bounded(*args, **kwargs):
+            return {
+                "results": [{"store_id": 1, "session_id": "rc", "role": "user",
+                             "snippet": "alpha the decision", "timestamp": 1.0}],
+                "complete": False,
+                "bounded_scans": [{"source": "messages", "reason": "stopped at the candidate work cap",
+                                   "work_capped": True}],
+            }
+
+        monkeypatch.setattr(lcm_tools, "_lcm_grep_full_text_with_deadline", bounded)
+        hits, note = lcm_tools._lcm_recall_fts_arm(
+            e, "alpha", candidate_limit=10, deadline=time.monotonic() + 5)
+        assert hits, "the hits that DID come back are kept"
+        assert note is not None and note["complete"] is False, note
+        assert note["bounded_scans"], note
+    finally:
+        e.shutdown()

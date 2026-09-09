@@ -588,7 +588,16 @@ def extract_before_compaction(
         )
         result = _call_extraction_llm(prompt, model=model, timeout=timeout)
 
-        if not result or result.strip() == "NOTHING_TO_EXTRACT":
+        # fork: betterlcm — "the model said there is nothing to extract" and "the route
+        # returned nothing at all" are different outcomes; both reported success, so a dead
+        # extraction route read as a segment that held no decisions (round-2 verify-4 #38).
+        if result is None or not str(result).strip():
+            logger.warning(
+                "Pre-compaction extraction returned an empty response; treating it as a "
+                "failed extraction, not as an absence of content"
+            )
+            return False
+        if result.strip() == "NOTHING_TO_EXTRACT":
             logger.debug("Pre-compaction extraction: nothing to extract")
             return True
 
@@ -608,8 +617,16 @@ def extract_before_compaction(
         digest = hashlib.sha256(serialized_messages.encode("utf-8", "replace")).hexdigest()[:16]
         provenance = f"source chars={len(serialized_messages)}, sha256:{digest}"
         if source_store_ids:
-            shown = ", ".join(str(store_id) for store_id in list(source_store_ids)[:40])
-            more = f" (+{len(source_store_ids) - 40} more)" if len(source_store_ids) > 40 else ""
+            ids = [int(store_id) for store_id in source_store_ids]
+            shown = ", ".join(str(store_id) for store_id in ids[:40])
+            # fork: betterlcm — "+N more" is not a resolvable manifest: the note must name the
+            # rows it came from, and a RANGE plus the count does that in one line however long
+            # the segment is (round-2 verify-4 #38).
+            more = (
+                f" (+{len(ids) - 40} more; the complete span is store_ids "
+                f"{min(ids)}..{max(ids)}, {len(ids)} row(s))"
+                if len(ids) > 40 else ""
+            )
             provenance += f", store_ids={shown}{more} — lcm_expand(store_id=…)"
         header += f"*Source: {provenance}*\n\n"
 

@@ -4729,6 +4729,18 @@ def _lcm_recall_fts_arm(
     )
     if "error" in payload:
         return [], payload
+    # fork: betterlcm — the arm's own completeness travels with its hits. A grep result that
+    # said complete:false with its failures and work caps was converted to ([], None) here, so
+    # recall answered as if the full-text arm had run cleanly (round-2 verify-4 #23).
+    incompleteness: dict[str, Any] = {}
+    if payload.get("complete") is False:
+        incompleteness = {
+            "complete": False,
+            **({"search_failures": payload["search_failures"]}
+               if payload.get("search_failures") else {}),
+            **({"bounded_scans": payload["bounded_scans"]}
+               if payload.get("bounded_scans") else {}),
+        }
     hits: list[dict[str, Any]] = []
     for row in payload.get("results", []):
         store_id = row.get("store_id")
@@ -4747,7 +4759,7 @@ def _lcm_recall_fts_arm(
         }
         hit["expand_hint"] = _lcm_recall_excerpt_expand_hint(hit)
         hits.append(hit)
-    return hits, None
+    return hits, (incompleteness or None)
 
 
 def _lcm_recall_scan_bounds(engine: "LCMEngine") -> dict[str, Any]:
@@ -5180,13 +5192,22 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
             )
         except (_WorkerCapacityError, TimeoutError) as exc:
             hits, fts_error = [], {"error": str(exc)}
-        if fts_error is not None:
+        if fts_error is not None and "error" in fts_error:
             coverage["fts"] = "none"
             degraded_reasons.append("full-text arm unavailable")
             timed_out = timed_out or bool(fts_error.get("timeout"))
         else:
             arm_hits["fts"] = hits
-            coverage["fts"] = "ok"
+            if fts_error is not None:
+                # fork: betterlcm — the arm RAN but not exhaustively; its hits are kept and its
+                # incompleteness is disclosed instead of being erased (round-2 verify-4 #23).
+                coverage["fts"] = "bounded"
+                degraded_reasons.append(
+                    "the full-text arm did not run exhaustively "
+                    f"({json.dumps(fts_error, ensure_ascii=False)[:300]})"
+                )
+            else:
+                coverage["fts"] = "ok"
 
     # -- Vector arms. Local/same-model corpora share one query embedding;
     # Voyage's context chunk corpus resolves and embeds with its own model. --
