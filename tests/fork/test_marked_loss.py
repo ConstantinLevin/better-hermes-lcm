@@ -1383,3 +1383,55 @@ def test_expansion_synthesis_names_what_it_could_not_answer_over(tmp_path, monke
         assert payload["complete"] is False
     finally:
         e.shutdown()
+
+
+def test_rotate_covers_the_whole_span_or_does_not_advance(tmp_path, monkeypatch):
+    """round-2 verify-4 #39: the marker read at most one page of the rotated span while the
+    frontier advanced to the independently computed end, so everything past the cap was skipped
+    at the next bootstrap with no node naming it."""
+    cfg = LCMConfig()
+    cfg.database_path = str(tmp_path / "rotate-page.db")
+    cfg.fresh_tail_count = 2
+    e = LCMEngine(config=cfg, hermes_home=str(tmp_path / "home"))
+    try:
+        e._session_id = e._conversation_id = "live"
+        e._session_platform = "cli"
+        e._lifecycle.bind_session("live", conversation_id="live")
+        e.context_length = 200_000
+        for index in range(9):
+            e._store.append("live", {"role": "user", "content": f"m{index} " + "x" * 40},
+                            source="test")
+        e._store._conn.commit()
+        monkeypatch.setattr(e, "_ROTATE_MARKER_PAGE_ROWS", 2)  # force several pages
+
+        result = e.rotate_active_session(apply=True)
+        assert result["ok"] is True and result["noop"] is False, result
+        frontier = e._lifecycle.get_by_conversation("live").current_frontier_store_id
+        covered = {
+            int(value)
+            for node in e._dag.get_session_nodes("live")
+            for value in node.source_ids
+        }
+        assert set(range(1, frontier + 1)) <= covered, sorted(set(range(1, frontier + 1)) - covered)
+
+        # ... and a page that fails mid-span keeps the frontier where it is
+        e2_before = frontier
+        for index in range(9, 20):
+            e._store.append("live", {"role": "user", "content": f"n{index} " + "y" * 40},
+                            source="test")
+        e._store._conn.commit()
+        calls = {"n": 0}
+        real_page = e._write_rotate_marker_page
+
+        def flaky(session_id, start_id, new_frontier):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                raise RuntimeError("page write failed")
+            return real_page(session_id, start_id, new_frontier)
+
+        monkeypatch.setattr(e, "_write_rotate_marker_page", flaky)
+        failed = e.rotate_active_session(apply=True)
+        assert failed["ok"] is False and failed["reason"] == "marker_write_failed", failed
+        assert e._lifecycle.get_by_conversation("live").current_frontier_store_id == e2_before
+    finally:
+        e.shutdown()

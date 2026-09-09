@@ -189,3 +189,21 @@ def test_ascii_snippets_never_pay_for_a_regex_scan_per_absent_term(monkeypatch):
     assert "NEEDLE" in snippet
     # and a term that is absent everywhere still falls back to the head of the source
     assert search_query.build_snippet("plain ascii text", ["zzz"]).startswith("plain ascii")
+
+
+def test_a_query_whose_symbol_the_index_drops_goes_to_the_scan_that_keeps_it(tmp_path):
+    """round-2 verify-4 #27: the FTS term form deletes non-ASCII symbols, so "flag∀" and
+    "flag∃" became the same query — a search for one returned both while reporting the original
+    query and a complete result."""
+    assert search_query.requires_like_fallback("flag∀") is True
+    assert search_query.requires_like_fallback("ordinary query") is False
+    dag = _dag(tmp_path)
+    try:
+        for text in ("flag∀ universal", "flag∃ existential"):
+            dag.add_node(SummaryNode(session_id="s", depth=0, summary=text, token_count=3,
+                                     source_token_count=9, source_ids=[1],
+                                     source_type="messages", created_at=time.time()))
+        hits = [node.summary for node in dag.search("flag∀", session_id="s")]
+        assert hits == ["flag∀ universal"], hits
+    finally:
+        dag.close()

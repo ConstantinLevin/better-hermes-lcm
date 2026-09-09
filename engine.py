@@ -7293,16 +7293,53 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
             return True  # cannot prove the span is empty: refuse rather than skip silently
         return bool(rows)
 
+    _ROTATE_MARKER_PAGE_ROWS = 5_000
+
     def _write_rotate_marker_node(self, session_id: str, new_frontier: int) -> int | None:
-        """fork: betterlcm — d0 node over rotated rows with no summary coverage (or None)."""
+        """fork: betterlcm — d0 marker node(s) over rotated rows with no summary coverage.
+
+        The span is PAGED. A single capped read (one million rows) let rotation advance the
+        frontier past rows the marker did not name, so the remainder was skipped at the next
+        bootstrap with nothing pointing at it (round-2 verify-4 #39). One node per page keeps
+        each node's source_ids bounded; a page that cannot be written stops the walk, and the
+        caller's coverage check then refuses to advance the frontier.
+        """
         start_id = int(self._last_compacted_store_id or 0) + 1
         if new_frontier < start_id:
             return None
-        try:
-            rows = self._store.get_range(session_id, start_id=start_id, end_id=new_frontier, limit=1_000_000)
-        except Exception:
-            logger.warning("LCM rotate marker: could not load rotated rows", exc_info=True)
-            return None
+        last_node_id: int | None = None
+        cursor = start_id
+        while cursor <= new_frontier:
+            try:
+                page = self._write_rotate_marker_page(session_id, cursor, new_frontier)
+            except Exception:
+                # A page that could not be read or written leaves the REST of the span
+                # unnamed. Report failure for the whole marker so the caller keeps the
+                # frontier where it is; the pages already written cover real rows and are
+                # harmless (those rows are simply covered and still replayed).
+                logger.warning("LCM rotate marker page failed; not advancing", exc_info=True)
+                return None
+            if page is None:
+                break  # the span holds no further rows
+            node_id, highest = page
+            last_node_id = node_id
+            if highest >= new_frontier:
+                break
+            cursor = highest + 1
+        return last_node_id
+
+    def _write_rotate_marker_page(
+        self, session_id: str, start_id: int, new_frontier: int
+    ) -> "tuple[int, int] | None":
+        """One page of the rotated span: (node_id, highest store_id covered), or None.
+
+        None means "no rows left in the span". A read or write FAILURE raises, so the caller
+        can tell an exhausted span from an incomplete one (round-2 verify-4 #39).
+        """
+        rows = self._store.get_range(
+            session_id, start_id=start_id, end_id=new_frontier,
+            limit=self._ROTATE_MARKER_PAGE_ROWS,
+        )
         rows = [row for row in rows if isinstance(row, dict) and row.get("store_id") is not None]
         if not rows:
             return None
@@ -7337,10 +7374,10 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                 node, level=node_meta.LEVEL_MARKER, summary=summary
             ))
             self._invalidate_rollups_for_published_node(node)  # like every other published node
-            return node_id
+            return node_id, max(store_ids)
         except Exception:
             logger.warning("LCM rotate marker node write failed", exc_info=True)
-            return None
+            raise
 
     # -- Lifecycle ---------------------------------------------------------
 

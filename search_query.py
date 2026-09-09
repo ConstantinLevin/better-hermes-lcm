@@ -222,7 +222,27 @@ def requires_like_fallback(query: str, sanitized: str | None = None) -> bool:
         return True
     if contains_cjk(raw) or contains_emoji(raw):
         return True
+    if contains_index_dropped_symbols(raw):
+        return True
     return contains_risky_fts_ascii(safe)
+
+
+def contains_index_dropped_symbols(text: str) -> bool:
+    """Non-ASCII symbols the FTS term form silently deletes.
+
+    fork: betterlcm — sanitisation maps them to a separator, so ``flag∀`` and ``flag∃``
+    sanitize to the same query and a search for one returned both while reporting the original
+    query and a complete result (round-2 verify-4 #27). They are content, not syntax: the LIKE
+    scan is the only path that can tell them apart. ASCII symbols (``+ = < $``) are excluded —
+    they are usually typed AS syntax, and routing them to a full scan would cost recall at
+    scale for no meaning gained.
+    """
+    for char in str(text or ""):
+        if ord(char) < 128:
+            continue
+        if unicodedata.category(char).startswith("S"):
+            return True
+    return False
 
 
 def _token_variants(token: str) -> List[str]:
