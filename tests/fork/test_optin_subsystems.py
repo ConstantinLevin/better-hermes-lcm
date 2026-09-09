@@ -304,3 +304,24 @@ def test_unexamined_candidates_that_could_change_the_answer_block_sufficiency(tm
         assert result["trace"]["truncated"] is True
     finally:
         e.shutdown()
+
+
+def test_a_question_s_own_year_and_currency_survive_compilation():
+    """round-3 verify-4 #17: "March 2024" anchored in 2026 compiled to March 2026, and a
+    question asking for euros compiled to a usd contract — the pipeline answered a different
+    question from the one asked, with genuine evidence."""
+    from hermes_lcm.answer_contract import compile_answer_contract, _requested_unit
+
+    decision = compile_answer_contract(
+        "How many vacations did I take in March 2024?", "2026-09-09")
+    assert decision.status == "fallback", decision
+    assert decision.reason_code == "explicit_year_not_representable"
+
+    assert _requested_unit("How much did Atlas cost in euros?") == "eur"
+    assert _requested_unit("How much did Atlas cost in dollars?") == "usd"
+    assert _requested_unit("How much did Atlas cost in £?") == "gbp"
+
+    # a relative window is still resolved as before
+    relative = compile_answer_contract(
+        "How many vacations did I take last month?", "2026-09-09")
+    assert relative.status == "planned", relative

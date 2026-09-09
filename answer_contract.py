@@ -250,8 +250,30 @@ def _canonical_unit(raw: str | None) -> str | None:
     return text.replace(" ", "_")
 
 
+# fork: betterlcm — a currency the question NAMES. Mapping every currency to "usd" answered a
+# euro question with dollar evidence (round-3 verify-4 #17); an operand's unit has to match, so
+# naming the real currency simply leaves a foreign-currency question unanswered instead of
+# answered wrongly.
+_CURRENCY_UNITS = (
+    ("eur", r"€|\beur\b|\beuros?\b"),
+    ("gbp", r"£|\bgbp\b|\bpounds? sterling\b"),
+    ("jpy", r"¥|\bjpy\b|\byen\b"),
+    ("usd", r"\$|\busd\b|\bdollars?\b"),
+)
+
+
+def _named_currency(normalized: str) -> str | None:
+    for unit, pattern in _CURRENCY_UNITS:
+        if re.search(pattern, normalized, re.IGNORECASE):
+            return unit
+    return None
+
+
 def _requested_unit(text: str) -> str | None:
     normalized = text.casefold()
+    named_currency = _named_currency(normalized)
+    if named_currency is not None:
+        return named_currency
     has_time_dimension = bool(
         re.search(r"\b(?:time|minutes?|hours?|days?|weeks?|months?|years?)\b", normalized)
     )
@@ -550,6 +572,22 @@ def compile_answer_contract(
     if relative and canonical_as_of is None:
         return ContractDecision("fallback", reason_code="question_as_of_required")
     window = _time_window(text, canonical_as_of)
+    # fork: betterlcm — an explicit year in the question must survive into the window. Resolving
+    # "March 2024" against a 2026 anchor produced March 2026 and answered a different question
+    # (round-3 verify-4 #17); a window that contradicts the year the asker wrote is refused.
+    explicit_years = {
+        int(match.group(0)) for match in re.finditer(r"\b(?:19|20)\d{2}\b", text)
+    }
+    if explicit_years and window is not None:
+        window_years = {
+            int(str(getattr(window, attribute, "") or "")[:4])
+            for attribute in ("start", "end")
+            if str(getattr(window, attribute, "") or "")[:4].isdigit()
+        }
+        if window_years and not (explicit_years & window_years):
+            return ContractDecision(
+                "fallback", reason_code="explicit_year_not_representable"
+            )
     unit_hint = _requested_unit(text)
 
     operation: ContractOperation
