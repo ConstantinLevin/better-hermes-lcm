@@ -124,12 +124,15 @@ def test_an_acknowledgement_is_not_a_summary(monkeypatch):
         "As an AI, Atlas benchmarks recovery.",
     ):
         assert escalation._is_index_shaped_summary(accepted, source) is True, accepted
-    for refused in (
-        "I cannot assist with this request because the content appears to violate policy; "
-        "please provide different material instead.",
-        "I can't help with that.",
-    ):
-        assert escalation._is_index_shaped_summary(refused, source) is False, refused
+    # round-3 verify-2 #5: rejection is the dangerous direction — a rejected summary means no
+    # compaction at all — so only a reply that is BOTH almost empty after the phrase and shares
+    # nothing specific with the source is treated as a non-answer. A faithful paraphrase that
+    # happens to open like a refusal must survive.
+    assert escalation._is_index_shaped_summary("I can't help with that.", source) is False
+    assert escalation._is_index_shaped_summary(
+        "I cannot start the service because authentication is no longer valid.",
+        "The daemon failed at startup; the credentials expired.",
+    ) is True
 
     monkeypatch.setattr(escalation, "_call_llm_for_summary",
                         lambda *a, **k: "OK")

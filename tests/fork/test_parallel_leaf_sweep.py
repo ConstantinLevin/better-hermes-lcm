@@ -409,3 +409,33 @@ def test_abandoned_workers_do_not_accumulate_across_retries(tmp_path, monkeypatc
     finally:
         release.set()
         e.shutdown()
+
+
+def test_abandoned_attempts_do_not_retain_their_queued_work(tmp_path, monkeypatch):
+    """round-3 verify-2 #4: cancelling a future does not remove its queued callable, and that
+    callable holds the lookahead, its messages and the captured host scope — four abandoned
+    attempts left six queued entries alive behind two blocked workers."""
+    e = _engine(tmp_path, "queuegrowth", summary_concurrency=2)
+    release = threading.Event()
+    try:
+        def blocked(prompt, max_tokens, model="", timeout=None):
+            release.wait(10)
+            return "s\nExpand for details about: s"
+
+        monkeypatch.setattr(escalation, "_call_llm_for_summary", blocked)
+        msgs = _messages(30)
+        for _ in range(4):
+            lookahead = e._start_leaf_lookahead(
+                msgs, 200, dependent_reply_message_ids=set(), focus_topic=None,
+                deadline=time.monotonic() + 0.2, estimated_active_tokens=900_000,
+                remaining_passes=4,
+            )
+            if lookahead is not None:
+                lookahead.close()
+        pool = getattr(e, "_leaf_pool", None)
+        assert pool is not None
+        assert len(pool._threads) <= 2
+        assert pool._queue.qsize() == 0, f"{pool._queue.qsize()} cancelled entries retained"
+    finally:
+        release.set()
+        e.shutdown()

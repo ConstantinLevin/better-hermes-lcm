@@ -35,6 +35,7 @@ from .ingest_protection import (
     protect_messages_for_ingest_with_attachments,
 )
 from .search_query import (
+    terms_with_embedded_dropped_symbols,
     build_snippet,
     compute_search_candidate_cap,
     compute_directness_rank_bonus_upper_bound,
@@ -1730,6 +1731,9 @@ class MessageStore:
             like_clauses.append("content LIKE ? ESCAPE '\\'")
             args.append(f"%{escape_like(term)}%")
         where.append("(" + " OR ".join(like_clauses) + ")")
+        # fork: betterlcm — see dag._search_like: a symbol-bearing term must match
+        # (round-3 verify-2 #7); a standalone symbol stays a routing trigger.
+        required_terms = terms_with_embedded_dropped_symbols(terms)
         fetch_limit = compute_like_fallback_fetch_limit(limit, terms, phrases)
         base_args = list(args)
         normalized_sort = normalize_search_sort(sort)
@@ -1818,6 +1822,10 @@ class MessageStore:
                 )
                 if score <= 0:
                     continue
+                if required_terms and not all(
+                    count_term_matches(content, term) for term in required_terms
+                ):
+                    continue  # fork: betterlcm — see required_terms (round-3 verify-2 #7)
                 result["search_rank"] = -float(score)
                 result["snippet"] = build_snippet(content, terms)
                 result["_fallback_score"] = float(score)

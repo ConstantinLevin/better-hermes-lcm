@@ -701,14 +701,21 @@ def _is_index_shaped_summary(result: str, source_text: str = "") -> bool:
         if not lowered.startswith(marker):
             continue
         remainder = normalized[len(marker):].strip(" ,.;:!—-")
+        # fork: betterlcm — rejection is the DANGEROUS direction here: a rejected summary means
+        # no compaction, so the pressure the compaction existed to relieve stays. Requiring
+        # lexical overlap with the source rejected faithful paraphrases ("I cannot start the
+        # service because authentication is no longer valid" for "the daemon failed at startup;
+        # the credentials expired") and would have blocked compaction outright
+        # (round-3 verify-2 #5). Only a reply that is BOTH almost empty after the phrase AND
+        # shares nothing specific with the source is treated as a non-answer; a long refusal
+        # that slips through still has to be shorter than its source to be published, and says
+        # so in the node rather than being lost.
+        if len(remainder.split()) >= 6:
+            return True
         source_tokens = _index_evidence_tokens(source_text)
-        if source_tokens:
-            # two distinct specific words from the source: a refusal about the summariser's own
-            # ability shares none of them, a terse fact about the source shares several
-            shared = _index_evidence_tokens(remainder) & source_tokens
-            return len(shared) >= 2
-        if len(remainder.split()) < 6:
-            return False
+        if source_tokens and (_index_evidence_tokens(remainder) & source_tokens):
+            return True
+        return False
     return True
 
 

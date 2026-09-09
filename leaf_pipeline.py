@@ -156,6 +156,33 @@ class DaemonThreadPoolExecutor:
             self._ensure_worker()
         return future
 
+    def purge_cancelled(self) -> int:
+        """Drop queued work whose future was already cancelled; return how many went.
+
+        fork: betterlcm — cancelling a future does not remove its queued callable, and the
+        callable holds the lookahead, its input messages and the captured host scope. Four
+        abandoned attempts with blocked callbacks left six queued entries and four retained
+        lookaheads alive (round-3 verify-2 #4). Live entries are re-queued in order.
+        """
+        with self._lock:
+            live: list = []
+            dropped = 0
+            while True:
+                try:
+                    item = self._queue.get_nowait()
+                except queue.Empty:
+                    break
+                if item is None:
+                    live.append(item)
+                    continue
+                if item[0].cancelled():
+                    dropped += 1
+                    continue
+                live.append(item)
+            for item in live:
+                self._queue.put(item)
+        return dropped
+
     def shutdown(self, wait: bool = True, *, cancel_futures: bool = False) -> None:
         with self._lock:
             if self._shutdown:
@@ -327,6 +354,16 @@ class LeafLookahead:
         # never block the compaction thread on abandoned LLM calls
         if self._owns_executor:
             self._executor.shutdown(wait=False, cancel_futures=True)
+        else:
+            # fork: betterlcm — the shared pool outlives this attempt, so its queue must not
+            # keep the cancelled work (and everything that work holds) alive across retries
+            # (round-3 verify-2 #4).
+            purge = getattr(self._executor, "purge_cancelled", None)
+            if callable(purge):
+                try:
+                    purge()
+                except Exception:  # pragma: no cover - purging is best effort
+                    logger.debug("LCM could not purge cancelled leaf work", exc_info=True)
 
 
 class CompactionLock:

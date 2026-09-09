@@ -239,3 +239,25 @@ def test_recall_keeps_the_full_text_arm_s_incompleteness(tmp_path, monkeypatch):
         assert note["bounded_scans"], note
     finally:
         e.shutdown()
+
+
+def test_a_symbol_bearing_term_must_actually_match(tmp_path):
+    """round-3 verify-2 #7: routing symbol queries to the substring scan kept the symbol, but
+    that scan combines its terms with OR — "alpha∀ beta" returned a row holding neither
+    symbol-bearing term, ranked first, and called the result complete."""
+    dag = _dag(tmp_path)
+    try:
+        for text in ("alpha∀ beta", "gamma beta beta beta"):
+            dag.add_node(SummaryNode(session_id="s", depth=0, summary=text, token_count=3,
+                                     source_token_count=9, source_ids=[1],
+                                     source_type="messages", created_at=time.time()))
+        hits = [node.summary for node in dag.search("alpha∀ beta", session_id="s")]
+        assert hits == ["alpha∀ beta"], hits
+        # a standalone symbol stays a routing trigger, not a required term
+        dag.add_node(SummaryNode(session_id="s", depth=0, summary="plugin-only fallback",
+                                 token_count=3, source_token_count=9, source_ids=[2],
+                                 source_type="messages", created_at=time.time()))
+        routed = [node.summary for node in dag.search("plugin-only \U0001F680", session_id="s")]
+        assert "plugin-only fallback" in routed, routed
+    finally:
+        dag.close()

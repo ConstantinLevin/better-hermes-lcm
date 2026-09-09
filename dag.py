@@ -33,6 +33,7 @@ from .db_bootstrap import (
 _DELETE_SESSION_SCOPE_TABLE = "temp_lcm_delete_session_scope"
 _DELETE_SESSION_SCOPE_INSERT_CHUNK = 512
 from .search_query import (
+    terms_with_embedded_dropped_symbols,
     AGE_DECAY_RATE,
     compute_search_candidate_cap,
     compute_directness_rank_bonus_upper_bound,
@@ -943,6 +944,11 @@ class SummaryDAG:
             like_clauses.append("summary LIKE ? ESCAPE '\\'")
             args.append(f"%{escape_like(term)}%")
         where.append("(" + " OR ".join(like_clauses) + ")")
+        # fork: betterlcm — a term whose meaning is a symbol the index deletes must actually
+        # MATCH. Scoring by "any term" turned "alpha∀ beta" into a search for either word, so a
+        # row holding neither symbol-bearing term came back first and complete
+        # (round-3 verify-2 #7). A standalone symbol (an emoji) stays a routing trigger.
+        required_terms = terms_with_embedded_dropped_symbols(terms)
         fetch_limit = compute_like_fallback_fetch_limit(limit, terms, phrases)
         base_args = list(args)
         collapse_risky_repeats = contains_risky_fts_ascii(query)
@@ -977,12 +983,18 @@ class SummaryDAG:
                 node = self._row_to_node(row)
                 if source and not self._node_matches_source(node.node_id, source, cache=source_match_cache):
                     continue
-                score = sum(
-                    min(count_term_matches(node.summary, term), 1) if collapse_risky_repeats else count_term_matches(node.summary, term)
+                per_term = [
+                    min(count_term_matches(node.summary, term), 1) if collapse_risky_repeats
+                    else count_term_matches(node.summary, term)
                     for term in terms
-                )
+                ]
+                score = sum(per_term)
                 if score <= 0:
                     continue
+                if required_terms and not all(
+                    count_term_matches(node.summary, term) for term in required_terms
+                ):
+                    continue  # fork: betterlcm — see required_terms above
                 node.search_rank = -float(score)
                 node.search_directness = compute_directness_score(node.summary, terms, phrases)
                 nodes.append(node)

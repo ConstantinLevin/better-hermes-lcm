@@ -227,6 +227,25 @@ def requires_like_fallback(query: str, sanitized: str | None = None) -> bool:
     return contains_risky_fts_ascii(safe)
 
 
+def terms_with_embedded_dropped_symbols(terms: List[str]) -> List[str]:
+    """Terms whose MEANING is a symbol the index deletes, e.g. ``flag∀`` or ``alpha∀``.
+
+    fork: betterlcm — a standalone symbol (an emoji on its own) is usually a routing trigger,
+    not a required word: upstream searches "plugin-only 🚀" over rows that hold only
+    "plugin-only". A symbol attached to alphanumerics is part of an identifier, and dropping it
+    turned "alpha∀ beta" into a search for either word — a row holding neither symbol-bearing
+    term came back first and complete (round-3 verify-2 #7).
+    """
+    required: List[str] = []
+    for term in terms or []:
+        text = str(term or "")
+        if not contains_index_dropped_symbols(text):
+            continue
+        if any(character.isalnum() for character in text):
+            required.append(text)
+    return required
+
+
 def contains_index_dropped_symbols(text: str) -> bool:
     """Non-ASCII symbols the FTS term form silently deletes.
 
