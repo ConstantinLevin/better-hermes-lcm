@@ -362,6 +362,11 @@ material these items were distilled from and contains entries that have since be
 both e2e anchors clean (0 unreachable rows, 0 missing facts, 0 facts never offered to the
 summariser) at 262144×400 and 1000000×3000 against the deployed plugin.
 
+Sections: **A** core path (the only category that can still lose something) · **B** correctness
+and operability · **C** ported-capability decisions · **E** routine standing tasks (upstream
+sync, lossless-claw watch) · **F** outstanding verification (strict superiority, claw gap) ·
+**G** explicitly not being done.
+
 ### A. Core path — the only category that can still lose something
 
 | id | what | why it is still open |
@@ -390,9 +395,76 @@ summariser) at 262144×400 and 1000000×3000 against the deployed plugin.
 |---|---|
 | C1 | The nine cheap claw items: test-home isolation, prompt-prefix divergence diagnostics, release-commit validation, payload-reference disambiguators, a script-aware token estimator, prompt inspection commands, copied-reference parsing, shadow-install/drift detection, release fragments. |
 | C2 | The six capability-level ones: `context_items` projection, operator TUI, persistent focus briefs, delegated retrieval workers, richer maintenance debt, a paged expansion-cost manifest. |
-| C3 | Standing duty: on every lossless-claw release, run the four-aspect comparison and record ported/rejected items in `docs/claw-comparison/vX.Y.Z.md`. |
+| C3 | (moved — see R2 under Routine tasks.) |
 
-### D. Explicitly not being done
+### E. Routine (standing) tasks — triggered, never "done"
+
+These two have no completion state. They fire on an external event and each run ends with a
+dated record, so the next maintainer can see when the fork was last brought level.
+
+**R1 — Upstream changed: bring the fork to the newest upstream state.**
+Trigger: any new commit on `stephenschoettler/hermes-lcm` past `.upstream-base`
+(currently `8d1b1e6`).
+
+This is **not** a blind `git merge`. Merge conflicts here are the least of it: upstream can
+change behaviour in a file the fork never touched, and a clean automatic merge can silently
+undo a fork guarantee. The order is analysis first, merge second:
+
+1. `git fetch upstream` and read the diff `.upstream-base..upstream/main` in full — the runtime
+   diff, the surrounding upstream code, and every changed test. Write what changed and why.
+2. For each upstream hunk, classify it against `docs/fork-touchpoints.md`:
+   *(a)* touches a file the fork only hooks → keep ours, re-apply the hook on top of theirs;
+   *(b)* upstream fixed something the fork also fixed → reconcile deliberately, keep whichever
+   is stronger, and say so; *(c)* upstream changed behaviour the fork depends on → decide
+   explicitly, never by merge default; *(d)* new upstream feature → decide whether it is
+   coherent with the no-loss doctrine before taking it, and whether it needs a curve anchor in
+   `window_scaling.py` rather than a fixed 256k-shaped constant.
+3. **Ask of every upstream change: does it (re)introduce loss?** New truncation, a new silent
+   drop, a new completeness claim over bounded work. If yes, take the feature and remove the
+   loss, exactly as the fork already did for the L3 fallback and the 3000-char cut.
+4. `bash scripts/test.sh` green; upstream tests that pin removed behaviour get re-pointed and
+   listed in `docs/fork-touchpoints.md` (never deleted silently).
+5. Both e2e anchors clean against the DEPLOYED plugin
+   (`scripts/e2e_no_loss.py 262144 400` and `... 1000000 3000`).
+6. Redeploy the clone, re-pin the revision, update `.upstream-base`, and record the merge in
+   this ledger as a new pass.
+7. Then run **V1** below: an upstream merge is exactly when strict superiority can silently
+   break.
+
+**R2 — lossless-claw released or moved: evaluate and port what is better.**
+Trigger: any commit or release of lossless-claw newer than the one already analysed —
+**v1.0.0** (analysis in `docs/claw-comparison/v1.0.0.md`, sources were at
+`/tmp/lossless-claw-v1.0.0`).
+
+1. Diff the new claw version against the analysed one. Every changed file, not just release
+   notes.
+2. Sort the changes into: **new capability**, **behaviour change**, and **bugfix**.
+3. **A claw bugfix is a lead, not just a port candidate.** Both projects solve the same problem,
+   so a bug claw fixed very often exists here in an analogous shape — different code, same
+   mistake. For each fix, find the corresponding place in this fork and prove by probe whether
+   the same defect is present, then fix it here on its own merits even if the claw patch itself
+   is not portable.
+4. For each capability/behaviour change, decide **useful AND coherent**: does it serve the
+   fork's purpose (no loss, 1M windows, an index into recoverable history), and does it fit the
+   architecture without importing an assumption the fork rejects? Rejecting is a valid outcome
+   — record the reason.
+5. Run the four-aspect comparison (`docs/claw-comparison/prompts/prompt-{1..4}-*.txt`) against
+   the new version and write `docs/claw-comparison/vX.Y.Z.md` with ported / rejected / open,
+   each with a reason. That file is the record that this task ran.
+6. Anything ported lands with a fork test and goes through the usual loop (suite → commit →
+   redeploy → re-pin → both e2e anchors).
+
+### F. Outstanding verification (never yet run to completion)
+
+| id | what | why it matters |
+|---|---|---|
+| V1 | **Is this fork strictly superior to upstream mainline?** A dedicated audit that walks every behavioural difference and asks, for each: is the fork at least as good in every respect, or did it trade something away? Audit D (`v1.0.0-audit-d-regressions.md`) did this once against `8d1b1e6` and found three P1 fork regressions; it has **not** been re-run since, and this fork has changed heavily. Known open leads from that round: 256k structural equivalence still fails on oversized/imported histories and on the dynamic-chunk path, and whole sidecar index blocks escape retrieval budgets (B4). | "No loss" is not the only guarantee upstream offers. A fork that fixes loss and quietly loses throughput, a routing behaviour, or a host contract is not strictly better. Re-run after every R1. |
+| V2 | **Did we miss anything the CURRENT lossless-claw does better?** The four-aspect comparison and audit E were run against claw **v1.0.0** and 37 audit-E items were left undecided (C1/C2 above). Repeat against whatever version is current, and treat the undecided v1.0.0 items as part of the same question rather than a separate backlog. | The v1.0.0 sweep explicitly found that the earlier "does it change a guarantee" filter had been an invalid reason to reject candidates — so the fork is known to have rejected good ideas for a bad reason at least once. |
+
+Both are audits, not fixes: each ends with a written report under `docs/claw-comparison/` and a
+pass entry in this ledger, whether or not it produces work.
+
+### G. Explicitly not being done
 
 - **The opt-in subsystems** (`reasoning`/`lcm_compute`, assertions, the evidence compilers,
   adaptive retrieval + query views, embeddings, rollups, trajectory — ~20,700 lines). Owner's

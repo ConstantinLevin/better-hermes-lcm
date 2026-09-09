@@ -54,8 +54,16 @@ core path: ingest → store → reconcile → compaction → summariser → asse
 retrieval tools → operator, backup and maintenance.
 
 ## How to upgrade from upstream (for the next maintainer)
+
+> **Analyse first, merge second.** A clean automatic merge can silently undo a fork guarantee:
+> upstream can change behaviour in a file the fork never touched, and `git` has no opinion about
+> whether a hunk reintroduces truncation. Read the whole diff, classify every hunk against
+> `docs/fork-touchpoints.md`, and ask of each one *does this (re)introduce loss?* before taking
+> it. The full procedure is standing task **R1** in [`docs/TASKS.md`](docs/TASKS.md).
+
 ```
 git fetch upstream
+git diff $(cat .upstream-base)..upstream/main   # READ THIS, all of it, before merging
 git merge upstream/main          # or rebase betterlcm onto upstream/main
 scripts/test.sh                  # must be green
 ```
@@ -70,6 +78,11 @@ d["hermes-lcm"]["revision"] = subprocess.check_output(["git","-C",str(pathlib.Pa
 p.write_text(json.dumps(d, indent=2)+"\n")
 PY
 ```
+Then, before calling the upgrade done: both e2e anchors clean against the DEPLOYED plugin
+(`python3 scripts/e2e_no_loss.py 262144 400` and `... 1000000 3000`), update `.upstream-base`,
+record the merge as a pass in `docs/TASKS.md`, and re-run audit **V1** — an upstream merge is
+exactly when "strictly better than upstream" can silently stop being true.
+
 `plugin.yaml` keeps upstream's version string (four upstream tests pin it; the fork is
 identified by this file and `git log`). The live `lcm.db` gains the
 `lcm_node_meta` table on first use; an upstream build classifies such a DB as newer (drop the
@@ -82,7 +95,8 @@ change upstream also made (reconcile). Every fork-only test lives under `tests/f
 
 ## Tracking lossless-claw (the second maintenance duty)
 The fork was inspired by [lossless-claw](https://github.com/Martian-Engineering/lossless-claw)
-(OpenClaw, TypeScript). On **every lossless-claw release**:
+(OpenClaw, TypeScript). Watch **commits, not only tags** — the last version analysed in depth is
+**v1.0.0** (`docs/claw-comparison/v1.0.0.md`). On every release *or* meaningful commit past it:
 1. Clone the release tag to a temp dir (`git clone --depth 1 --branch vX.Y.Z … /tmp/lossless-claw-vX.Y.Z`).
 2. Compare it deeply against this fork, one agent per aspect, code-level with citations on both
    sides: (1) compaction/DAG algorithm, (2) loss avoidance/provenance/recovery, (3) summariser
@@ -92,8 +106,17 @@ The fork was inspired by [lossless-claw](https://github.com/Martian-Engineering/
    without degrading 256k) or fixes something the hermes-lcm base does badly. Port them into
    the fork modules, with tests under `tests/fork/`, and record each ported item (and each
    rejected one, with the reason) in `docs/claw-comparison/vX.Y.Z.md`.
-4. The same two hard rules apply as for upstream merges: 256k DAG structure stays upstream's,
-   and nothing drops content without a marker.
+4. **Treat a claw BUGFIX as a lead, not only as a port candidate.** Both projects solve the same
+   problem, so a bug claw fixed very often exists here in an analogous shape — different code,
+   same mistake. For each fix, find the corresponding place in this fork and prove by probe
+   whether the defect is present, then fix it here on its own merits even when the claw patch
+   itself is not portable.
+5. The same two hard rules apply as for upstream merges: 256k keeps upstream's TUNING VALUES
+   (not its cuts — see rule 2 at the top), and nothing drops content without a marker.
+
+The full procedure, its trigger and the two outstanding audits (is the fork strictly superior to
+upstream mainline; did we miss anything the current claw does better) are written up as standing
+tasks R1/R2 and V1/V2 in [`docs/TASKS.md`](docs/TASKS.md) under "WHAT IS LEFT TO DO".
 
 ## Fork configuration reference
 Every fork setting has a dataclass field, an env var and (for the weighted ones) an anchor in
@@ -110,7 +133,7 @@ Every fork setting has a dataclass field, an env var and (for the weighted ones)
 | `LCM_LEAF_LOOP_MAX_SECONDS` | `0.0` | `leaf_loop_max_seconds` (curve: 120 → 200) |
 | `LCM_SUMMARY_BUDGET_FRACTION` | `0.0` | `summary_budget_fraction` (curve: 0 → 0.20 of W; condensation trigger) |
 | `LCM_SUMMARY_CONCURRENCY` | `0` | `summary_concurrency` (curve: 1 → 6) |
-| `LCM_SERIALIZE_MESSAGE_MAX_CHARS` | `0` | `serialize_message_max_chars` (curve: 3000 → 4·W) |
+| `LCM_SERIALIZE_MESSAGE_MAX_CHARS` | `0` | `serialize_message_max_chars` (curve: 4·W → 4·W — the whole window at both anchors, so it never binds; `0` means no cap at all. An explicit value is an operator cap and still cuts only through a sized `[LCM elided …]` marker. Tool-call arguments share this cap.) |
 | `LCM_EXPAND_PAGE_TOKENS` | `0` | `expand_page_tokens` (curve: 4000 → 32000) |
 | `LCM_TOOL_RESPONSE_CHAR_SCALE` | `0.0` | `tool_response_char_scale` (curve: 1 → 4) |
 | `LCM_SQLITE_CACHE_KIB` | `0` | `sqlite_cache_kib` (curve: 2048 → 65536) |
