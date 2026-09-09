@@ -196,6 +196,46 @@ each has its own probe.
 | a padded data URI followed immediately by prose swallowed the words after the padding | the payload class stops at its `=` padding |
 | tool-call continuation restarted the finished body (also verify-2 #8 / O4) | body and calls keep independent EOF cursors |
 
+## Sixth pass — round-2 verify-4 (the doctrine audit, second round)
+
+The second verify-4 round reported 39 violations. Everything default-reachable and repairable
+without a new subsystem is closed; each has a fork test that fails on the previous revision.
+
+| # | what the audit found | what the fork does now |
+|---|---|---|
+| #1 | recovered bytes were dropped by `append()` and the batch archive row belonged to no node | `append()` protects through the list path; the leaf claims the archive rows for its own tool_call_ids with a receipt |
+| #2 | (a fork regression) an omission receipt anywhere in a message beginning with a summary header made it "our scaffolding" | the receipt has to END the message, exactly as assembly emits it |
+| #3 | publication read `self._session_id` AFTER the summariser returned | a publication fence (session id + generation) is captured first and validated before the node is written |
+| #4 | the raw store dropped every host field the columns do not project | `envelope_extra` keeps them verbatim; replay and expansion give them back |
+| #6 | a GC callback that raised left the content rewrite pending for a later commit | rewrite, callback and commit are one `BaseException`-protected transaction |
+| #13 | serialisation elision cut away an earlier injected-context receipt and under-reported the loss | marker fragments are carried out of the elided span; the pre-sanitisation size is named |
+| #14 | typed-text and media blocks dropped substantive sibling fields | both streams render; further fields are named in a receipt |
+| #15 | inline unmatched tags, header removal and multiple inline data URIs were unmarked | all three marked; attachments are counted |
+| #16 | a turn that lost only its `<think>` block left no trace | the assembly receipt counts redacted turns beside dropped ones |
+| #17 | the assembly receipt was dropped when neither form fitted | a ~12-token minimal receipt is emitted whenever it fits at all |
+| #18 | receipt inheritance recognised only the `[LCM:` spelling | every marker spelling this module writes is inherited |
+| #19 | the missing-result stub promised an archived result that never existed | archived (with ids), present-but-unreplayable, or never received |
+| #20 | `lcm_expand(store_id=…)` omitted the row's tool calls | rendered and paged, arguments through the compaction sanitiser |
+| #21 | a reachability bound or a failed parent read read as "not found" | tri-state: found, absent, or unresolved with the reason |
+| #22 | `lcm_recent` counted sections after the display limit; a failed frontier read as empty | closed in the fifth pass |
+| #23 | the recall full-text arm erased the grep result's incompleteness | hits kept, coverage reported as bounded with the reason |
+| #24 | expansion synthesis hid missing selections, unprocessed nodes and truncated answers | all four are reported; `complete:false` |
+| #26 | an unreadable sidecar was indistinguishable from a node without one | description says unavailable and why; status carries the read error |
+| #27 | non-ASCII symbols were deleted from the query, so `flag∀` matched `flag∃` | such queries go to the substring scan |
+| #29 | the bypass receipt counted content only | the whole removed envelope, tool-call arguments included |
+| #33 | a truncated payload file loaded as a successful empty result | missing or short content is an explicit corruption outcome |
+| #34 | coverage scored what survived two silent caps; the orphan check ignored node sources | bounded scores warn; both source types are walked and the population is named |
+| #35 | a same-named trigger with a wrong body passed repair | definitions are compared, owned triggers are recreated, the index is rebuilt |
+| #37 | a real EIO on the backup directory fsync was swallowed | only genuinely unsupported operations are tolerated |
+| #38 | an empty extraction response meant "nothing to extract" | only the explicit answer does; the note names its complete span |
+| #39 | rotation advanced past what its capped marker read | the span is paged; a failed page keeps the frontier where it is |
+
+**Still open from this round:** #5 (corrections to already-ingested positions — needs occurrence
+identity, and the cursor-side heuristic was reverted for producing duplicates), #7–#12 and
+#30–#32, #36 (the default-off subsystems: adaptive retrieval, requirements/assertions, rollups,
+embeddings, trajectory, backfill counters), #25 (the host's own response normalisation, outside
+the plugin), and #28 (the configured exclusions, documented in FORK.md as deliberate).
+
 ## Still open — from the partitioned audits
 
 Fourteen audits ran: four aspect comparisons against lossless-claw, three cross-cutting

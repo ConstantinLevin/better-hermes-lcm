@@ -65,8 +65,33 @@ _MESSAGE_ROLE_BIAS_SQL = "CASE m.role WHEN 'user' THEN 0 WHEN 'assistant' THEN 1
 _MESSAGE_SELECT_COLUMNS = (
     "store_id, session_id, source, role, content, tool_call_id, "
     "tool_calls, tool_name, timestamp, token_estimate, pinned, conversation_id, "
-    "ingested_at, observed_at, observed_at_source"
+    "ingested_at, observed_at, observed_at_source, envelope_extra"
 )
+
+# fork: betterlcm — the columns are a PROJECTION of the host's message; everything else it
+# sent (``name``, ``reasoning_content``, ``is_error``, provider metadata, ids) used to be
+# dropped at the door with no marker, so a reader lost outcome and attribution before
+# summarisation even started (round-2 verify-4 #4 / verify-3 rank 1). Whatever is not
+# projected is kept verbatim in ``envelope_extra``.
+_PROJECTED_MESSAGE_KEYS = frozenset({
+    "role", "content", "tool_call_id", "tool_calls", "tool_name", "timestamp",
+})
+
+
+def _envelope_extra_json(msg: Dict[str, Any]) -> Optional[str]:
+    """Serialise the host fields the columns do not hold. ``None`` when there are none."""
+    extra = {
+        key: value for key, value in msg.items()
+        if isinstance(key, str)
+        and key not in _PROJECTED_MESSAGE_KEYS
+        and not key.startswith("_lcm")
+    }
+    if not extra:
+        return None
+    try:
+        return json.dumps(extra, ensure_ascii=False, default=str, sort_keys=True)
+    except Exception:  # pragma: no cover - default=str already covers the usual cases
+        return json.dumps({key: str(value) for key, value in extra.items()}, ensure_ascii=False)
 _MESSAGE_SELECT_COLUMN_COUNT = len(_MESSAGE_SELECT_COLUMNS.split(","))
 _UNKNOWN_SOURCE = "unknown"
 
@@ -381,7 +406,8 @@ class MessageStore:
                 pinned INTEGER DEFAULT 0,
                 ingested_at REAL,
                 observed_at REAL,
-                observed_at_source TEXT
+                observed_at_source TEXT,
+                envelope_extra TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_msg_session
                 ON messages(session_id, store_id);
@@ -455,6 +481,12 @@ class MessageStore:
             "observed_at_source",
             "ALTER TABLE messages ADD COLUMN observed_at_source TEXT",
         )
+        add_column_if_missing(  # fork: betterlcm — the un-projected host envelope
+            self._conn,
+            columns,
+            "envelope_extra",
+            "ALTER TABLE messages ADD COLUMN envelope_extra TEXT",
+        )
         self._conn.execute(
             "UPDATE messages SET ingested_at = timestamp WHERE ingested_at IS NULL"
         )
@@ -486,8 +518,8 @@ class MessageStore:
                 """INSERT INTO messages
                    (session_id, source, conversation_id, role, content, tool_call_id, tool_calls,
                     tool_name, timestamp, token_estimate, pinned, ingested_at,
-                    observed_at, observed_at_source)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    observed_at, observed_at_source, envelope_extra)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     session_id,
                     _normalize_source_value(source),
@@ -503,6 +535,7 @@ class MessageStore:
                     ingested_at,
                     observed_at,
                     "host_message_timestamp" if observed_at is not None else None,
+                    _envelope_extra_json(row),  # fork: betterlcm
                 ),
             )
             return cur.lastrowid
@@ -572,8 +605,8 @@ class MessageStore:
                     """INSERT INTO messages
                        (session_id, source, conversation_id, role, content, tool_call_id, tool_calls,
                         tool_name, timestamp, token_estimate, pinned, ingested_at,
-                        observed_at, observed_at_source)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        observed_at, observed_at_source, envelope_extra)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         session_id,
                         _normalize_source_value(source),
@@ -589,6 +622,7 @@ class MessageStore:
                         ts,
                         observed_at,
                         "host_message_timestamp" if observed_at is not None else None,
+                        _envelope_extra_json(msg),  # fork: betterlcm
                     ),
                 )
                 ids.append(cur.lastrowid)
@@ -1499,7 +1533,7 @@ class MessageStore:
                 rows = self._conn.execute(
                     f"""SELECT m.store_id, m.session_id, m.source, m.role, m.content, m.tool_call_id,
                               m.tool_calls, m.tool_name, m.timestamp, m.token_estimate, m.pinned, m.conversation_id,
-                              m.ingested_at, m.observed_at, m.observed_at_source,
+                              m.ingested_at, m.observed_at, m.observed_at_source, m.envelope_extra,
                               rank as search_rank,
                               snippet(messages_fts, 0, '>>>', '<<<', '...', 40) as snippet
                        FROM messages_fts fts
@@ -1840,9 +1874,16 @@ class MessageStore:
         cols = [
             "store_id", "session_id", "source", "role", "content", "tool_call_id",
             "tool_calls", "tool_name", "timestamp", "token_estimate", "pinned", "conversation_id",
-            "ingested_at", "observed_at", "observed_at_source",
+            "ingested_at", "observed_at", "observed_at_source", "envelope_extra",
         ]
         d = dict(zip(cols, row[:len(cols)]))
+        # fork: betterlcm — the host fields the columns do not hold (round-2 verify-4 #4)
+        if d.get("envelope_extra"):
+            try:
+                d["envelope"] = json.loads(d["envelope_extra"])
+            except (TypeError, ValueError, json.JSONDecodeError):
+                d["envelope"] = {}
+        d.pop("envelope_extra", None)
         d["source"] = _normalize_source_value(d.get("source"))
         d["conversation_id"] = _normalize_conversation_id_value(d.get("conversation_id"))
         # Deserialize tool_calls JSON
@@ -1864,6 +1905,15 @@ class MessageStore:
             msg["tool_call_id"] = stored["tool_call_id"]
         if stored.get("tool_name"):
             msg["name"] = stored["tool_name"]
+        # fork: betterlcm — give back what the host sent. The columns are a projection; the
+        # rest of the envelope (name, reasoning metadata, error flags, provider ids) was
+        # dropped, so replay and expansion returned a different message from the one stored
+        # (round-2 verify-4 #4). Projected keys always win.
+        envelope = stored.get("envelope")
+        if isinstance(envelope, dict):
+            for key, value in envelope.items():
+                if key not in msg and isinstance(key, str) and not key.startswith("_lcm"):
+                    msg[key] = value
         return msg
 
     # -- Connection access --------------------------------------------------

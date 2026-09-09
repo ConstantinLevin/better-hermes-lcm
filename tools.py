@@ -5955,6 +5955,11 @@ def lcm_expand(args: Dict[str, Any], **kwargs) -> str:
             "next_content_offset": sliced["next_content_offset"],
             "has_more": sliced["has_more"],
         }
+        # fork: betterlcm — the host fields the columns do not project (name, reasoning
+        # metadata, error flags, provider ids) are stored; an expansion that omitted them
+        # returned a different message from the one the host sent (round-2 verify-4 #4).
+        if isinstance(stored.get("envelope"), dict) and stored["envelope"]:
+            result["envelope"] = stored["envelope"]
         # fork: betterlcm — an assistant turn's tool CALLS are part of what it said. Node
         # expansion renders and pages them; the raw-row path returned the text with
         # has_more=false and no mention of the calls at all, so a recovery path answered

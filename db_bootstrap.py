@@ -299,7 +299,12 @@ _V5_CORE_TABLE_COLUMNS: dict[str, frozenset[str]] = {
 # have them until MessageStore opens it. Their presence is recognised, but an
 # unrelated extra core column still fails closed as a genuinely newer shape.
 _V5_CORE_OPTIONAL_COLUMNS: dict[str, frozenset[str]] = {
-    "messages": frozenset({"ingested_at", "observed_at", "observed_at_source"}),
+    # fork: betterlcm — ``envelope_extra`` holds the host fields the columns do not project
+    # (round-2 verify-4 #4). It is additive and backward-compatible: an older build simply
+    # does not read it, so its presence must not classify the database as newer.
+    "messages": frozenset({
+        "ingested_at", "observed_at", "observed_at_source", "envelope_extra",
+    }),
 }
 
 # Core FTS5 virtual tables: presence is enough — their column layout is owned by

@@ -262,3 +262,44 @@ def test_a_failed_gc_callback_leaves_the_row_and_its_chunks_alone(tmp_path):
         assert store.get(store_id)["content"] == "[placeholder]"
     finally:
         store.close()
+
+
+def test_the_store_keeps_the_whole_host_envelope(tmp_path):
+    """round-2 verify-4 #4 / verify-3 rank 1: the columns are a PROJECTION of the host's
+    message, and everything else it sent — name, reasoning metadata, error flags, provider ids
+    — was dropped at the door with no marker, so outcome and attribution were lost before
+    summarisation started."""
+    from hermes_lcm.store import MessageStore
+    store = MessageStore(str(tmp_path / "envelope.db"))
+    try:
+        store_id = store.append("s", {
+            "role": "tool",
+            "tool_call_id": "c1",
+            "content": "the result",
+            "name": "terminal",
+            "reasoning_content": "I checked the disk first",
+            "is_error": True,
+            "provider_metadata": {"vendor": "acme", "request_id": "r-42"},
+        }, source="cli")
+        store.commit()
+
+        row = store.get(store_id)
+        assert row["envelope"]["reasoning_content"] == "I checked the disk first"
+        assert row["envelope"]["is_error"] is True
+        assert row["envelope"]["provider_metadata"]["request_id"] == "r-42"
+
+        replayed = store.to_openai_msg(row)
+        assert replayed["content"] == "the result"
+        assert replayed["reasoning_content"] == "I checked the disk first"
+        assert replayed["is_error"] is True
+
+        # a batch row keeps it too, and a message with nothing extra stores nothing extra
+        ids = store.append_batch("s", [
+            {"role": "assistant", "content": "plain"},
+            {"role": "user", "content": "with id", "message_id": "m-7"},
+        ])
+        store.commit()
+        assert "envelope" not in store.get(ids[0])
+        assert store.get(ids[1])["envelope"] == {"message_id": "m-7"}
+    finally:
+        store.close()
