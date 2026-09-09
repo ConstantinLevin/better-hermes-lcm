@@ -6351,14 +6351,23 @@ def lcm_expand_query(args: Dict[str, Any], **kwargs) -> str:
         # complete:true over a capped or degraded scan (round-3 verify-4 #12).
         node_progress: Dict[str, Any] = {}
         message_progress: Dict[str, Any] = {}
+        # fork: betterlcm — ask for ONE MORE than the caller's limit: requesting exactly the
+        # limit cannot tell "these are all the matches" from "the corpus holds more", and the
+        # answer then claimed completeness over a capped selection (round-4 verify-4 #13).
         nodes = _search_reporting_progress(
             engine._dag.search, query, session_id=engine.current_session_id,
-            limit=max_results, progress=node_progress,
+            limit=max_results + 1, progress=node_progress,
         )
         raw_results = _search_reporting_progress(
             engine._store.search, query, session_id=engine.current_session_id,
-            limit=max_results, progress=message_progress,
+            limit=max_results + 1, progress=message_progress,
         )
+        if len(nodes) > max_results:
+            more_results_beyond_limit.append("summaries")
+            nodes = nodes[:max_results]
+        if len(raw_results) > max_results:
+            more_results_beyond_limit.append("messages")
+            raw_results = raw_results[:max_results]
         for scan_name, scan in (("summaries", node_progress), ("messages", message_progress)):
             if scan.get("complete") is False:
                 search_incompleteness.append({
@@ -6374,6 +6383,13 @@ def lcm_expand_query(args: Dict[str, Any], **kwargs) -> str:
 
     if not nodes and not raw_results:
         answer = "No matching summaries or raw messages found in the current session."
+        if search_incompleteness:
+            # fork: betterlcm — an empty result from a capped or failed scan is not an absence
+            # (round-4 verify-4 #13)
+            answer = (
+                "No matches were found, but the search did not run exhaustively; this is not "
+                "evidence that history holds nothing."
+            )
         if missing_node_ids or unresolved_nodes:
             answer = (
                 "None of the requested nodes could be used: "
@@ -6394,7 +6410,10 @@ def lcm_expand_query(args: Dict[str, Any], **kwargs) -> str:
                 "raw_matches": [],
                 **({"missing_node_ids": missing_node_ids} if missing_node_ids else {}),
                 **({"unresolved_node_ids": unresolved_nodes} if unresolved_nodes else {}),
-                "complete": not (missing_node_ids or unresolved_nodes),
+                **({"bounded_scans": search_incompleteness} if search_incompleteness else {}),
+                "complete": not (
+                    missing_node_ids or unresolved_nodes or search_incompleteness
+                ),
             }
         )
 
@@ -6531,6 +6550,13 @@ def lcm_expand_query(args: Dict[str, Any], **kwargs) -> str:
             "node_id": node.node_id,
             "depth": node.depth,
             "summary": node.summary[:300],
+            "summary_chars": len(node.summary or ""),
+            "summary_truncated": len(node.summary or "") > 300,
+            **({"summary_continue_with": {
+                "tool": "lcm_describe",
+                "node_id": int(node.node_id),
+                "summary_offset": 300,
+            }} if len(node.summary or "") > 300 else {}),
             "expand_hint": node.expand_hint,
             **_node_index_block_payload(engine, node),  # fork
         }
@@ -6630,6 +6656,7 @@ def lcm_expand_query(args: Dict[str, Any], **kwargs) -> str:
         missing_node_ids or unresolved_nodes or unprocessed_node_ids
         or answer_unfinished or context_truncated
         or search_incompleteness or unreadable_sources
+        or more_results_beyond_limit  # fork: a capped selection is not a complete answer
     )
     return json.dumps(payload)
 

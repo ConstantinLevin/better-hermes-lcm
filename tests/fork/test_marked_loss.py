@@ -1653,3 +1653,27 @@ def test_a_pasted_bullet_with_appended_text_is_still_the_user_s(tmp_path):
         assert e._is_replayed_context_scaffold_message(ours) is True
     finally:
         e.shutdown()
+
+
+def test_expansion_synthesis_says_when_more_matches_exist(tmp_path, monkeypatch):
+    """round-4 verify-4 #13: the searches requested exactly max_results, so three matching rows
+    with max_results=2 answered complete=true — a capped selection presented as the whole
+    answer."""
+    import json
+    from hermes_lcm import tools as lcm_tools
+    e = _engine(tmp_path, "synthcap.db", incremental_max_depth=0)
+    try:
+        e.on_session_start("sc", platform="cli", context_length=200_000)
+        for index in range(3):
+            e._store.append("sc", {"role": "user",
+                                   "content": f"alpha decision number {index}"}, source="cli")
+        e._store.commit()
+        monkeypatch.setattr(lcm_tools, "_synthesize_expansion_answer",
+                            lambda **kwargs: "an answer")
+        lcm_tools._LAST_SYNTHESIS_STATUS.unfinished = ""
+        payload = json.loads(lcm_tools.lcm_expand_query(
+            {"prompt": "what was decided?", "query": "alpha", "max_results": 2}, engine=e))
+        assert payload["complete"] is False, payload
+        assert "messages" in payload.get("more_results_available_in", []), payload
+    finally:
+        e.shutdown()
