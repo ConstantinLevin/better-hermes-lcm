@@ -68,7 +68,13 @@ class _OfficialHostEquivalent:
 
 def test_generic_memory_question_can_dispatch_bounded_pack_when_toolset_enabled(tmp_path):
     engine_class = _lcm_engine_class()
-    engine = engine_class(config=LCMConfig(database_path=str(tmp_path / "host.db")))
+    # fork: betterlcm — lcm_evidence_pack is opt-in and answers `status: disabled` until its
+    # flag is set (round-5 verify-6, default-reachability); this test is about the host
+    # dispatch path, so the subsystem is enabled.
+    engine = engine_class(config=LCMConfig(
+        database_path=str(tmp_path / "host.db"),
+        preanswer_evidence_enabled=True,
+    ))
     content = "I repaired the garden gate today."
     observed_at = datetime(2024, 3, 15, 9, tzinfo=timezone.utc).timestamp()
     try:

@@ -15,7 +15,13 @@ from hermes_lcm.tools import lcm_evidence_pack
 
 
 def _engine(tmp_path):
-    config = LCMConfig(database_path=str(tmp_path / "lcm.db"))
+    # fork: betterlcm — lcm_evidence_pack is an OPT-IN subsystem tool and now answers
+    # `status: disabled` until its flag is set, like lcm_query_state and lcm_retrieve
+    # (round-5 verify-6, default-reachability). These tests exercise the enabled behaviour.
+    config = LCMConfig(
+        database_path=str(tmp_path / "lcm.db"),
+        preanswer_evidence_enabled=True,
+    )
     store = MessageStore(config.database_path, ingest_protection_config=config)
     return SimpleNamespace(
         _config=config,

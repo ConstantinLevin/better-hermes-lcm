@@ -116,13 +116,20 @@ copy-paste setups per agent type.
 ## What the fork changes
 
 Upstream hermes-lcm sizes everything in absolute tokens tuned for ~128k–272k windows, and
-falls back to silent truncation when the summariser fails. The fork keeps upstream's behaviour
-at ~256k and below, and changes two things everywhere:
+falls back to silent truncation when the summariser fails. The fork changes two things:
+
+> **The 256k anchor carries upstream's TUNING VALUES, never upstream's loss.** Everything that
+> is a *preference* (thresholds, chunk sizes, timeouts, concurrency) resolves to upstream's own
+> number at 256k. Everything that is *loss* — truncation, silent drops, unmarked removals,
+> completeness claims over work that was cut short — is removed at **every** window. A cut that
+> fires at 256k but not at 1M is a defect in this fork, not fidelity to upstream.
 
 **1. Every tuning value is a smooth function of the model's context window.**
 `t = clamp((W − 256k) / (1M − 256k), 0, 1)`; each setting is `upstream_value + t × (large_window_value − upstream_value)`.
-At 256k the resolved values *are* upstream's (a fixture session produces the same DAG structure
-under upstream and the fork); at 1M they are the large-window design; between, they slide.
+At 256k the resolved values *are* upstream's, so a fixture session produces the same DAG
+*structure* under upstream and the fork — the anchor is about sizing, not about reproducing
+upstream's cuts (see the note above). At 1M they are the large-window design; between, they
+slide.
 Anchors live in one table, [`window_scaling.py`](window_scaling.py); explicit env/config values
 always win over the curve; `lcm_status → window_scaling` shows every resolved value and its source.
 
@@ -136,15 +143,31 @@ always win over the curve; `lcm_status → window_scaling` shows every resolved 
 | DAG depth cap | 3 | 5 |
 | summariser / expansion timeouts, leaf-loop wall clock | 60 s / 120 s / 120 s | 200 s / 200 s / 200 s |
 | spend guard / breaker | 24 calls, 2 failures | 120 calls, 4 failures |
-| pre-summariser per-message cap | 3000 chars | whole message |
+| pre-summariser per-message cap | whole window (4 chars/token ≈ 1,048,576) — **not** upstream's 3000 | whole window (4,000,000) |
 | `lcm_expand` page, tool response caps, SQLite/token caches | 4k tokens, ×1, 2 MiB / 2048 | 32k tokens, ×4, 64 MiB / 8192 |
 
 **2. No unmarked loss, at any window** (pure changes, identical everywhere):
 
-- The deterministic-truncation fallback (upstream's "L3") is gone. When every summariser route
-  fails the raw context stays in place, the engine arms a host-visible cooldown (the host prints
-  its usual `cooldown:<s>` warning) and the turn continues — a compaction can never write a
-  chopped "summary" or kill a turn.
+- **Truncation is gone, at every window.** The deterministic-truncation fallback (upstream's
+  "L3") is removed: when every summariser route fails the raw context stays in place, the engine
+  arms a host-visible cooldown (the host prints its usual `cooldown:<s>` warning) and the turn
+  continues — a compaction can never write a chopped "summary" or kill a turn. Upstream's other
+  two cuts are gone as well: the pre-summariser per-message cut (3000 chars = head 2000 + tail
+  800, and tool-call arguments 500 → 400) and the inline fallback cut when externalization is
+  disabled or its directory is unwritable. An operator who *sets* a cap explicitly still gets
+  one, and it still cuts only through a sized `[LCM elided …]` marker that carries any earlier
+  receipt its span crossed.
+- **The raw store is an archive, not a projection.** Everything the host sent is kept: fields
+  the columns do not hold live in an `envelope` (name, reasoning metadata, `is_error`,
+  `exit_code`, provider ids), a stable host message id makes an edited message archivable as a
+  revision row that supersedes — never overwrites — the original, and envelope JSON that is
+  corrupt is preserved verbatim and paged rather than cut. A host edit that cannot be archived
+  is an ingest failure, so retrieval never answers an exhaustive negative over it.
+- **Internal reasoning removed from a replay says so.** Upstream stripped `<think>` and
+  reasoning blocks out of every assistant turn it replays and left nothing behind. The turn now
+  carries its own receipt, in its own position, so it can never displace the newest message —
+  and a turn that held nothing at all is still dropped without a receipt, because inventing one
+  would be a false claim of removal.
 - Every remaining cut or drop is marked and points at its provenance: sized `[LCM elided …]`
   markers in summariser input, unmatched tool calls serialised (not dropped), externalized
   stubs carry a head note, assembly renders the whole frontier and names anything omitted,
@@ -162,12 +185,35 @@ always win over the curve; `lcm_status → window_scaling` shows every resolved 
 - `lcm_doctor {"coverage": true}` / `/lcm doctor coverage` measure how much of each node's
   sources (paths, identifiers, quoted strings, numbers, decision keywords) is still
   discoverable from its summary — the executable definition of "no loss".
+- **Bounded work is never reported as complete.** A search that hit a work cap, an expansion
+  that could not read a source row or a recorded child node, a corrupt externalized payload, a
+  field left unread by a page budget, a timed-out retrieval — each makes the answer
+  `complete: false` and says why. Expansion pages body, tool calls and envelope against one
+  budget with one cursor per field, so a continuation never re-sends what the caller already
+  has and never stops while something is unread.
+- **One publication contract.** A node and its sidecar are written in a single transaction; the
+  raw frontier only advances over a proven contiguous run of covered rows; every result branch
+  is fenced against a session rebind landing mid-compaction, and ingest files its rows under the
+  session it started in. The summary frontier is a SQL predicate, so it is not capped at a page
+  of nodes.
 - Chunk boundaries never split an assistant tool call from its results; a compaction lock keeps
   a host-abandoned worker from writing concurrently with the retry; hot paths (frontier token
   projection, per-pass metadata reads) are cheaper.
 
+**Upstream's opt-in subsystems are kept, and stay off.** About 20,700 of the plugin's ~73,500
+lines are an upstream question-answering apparatus over the same database — `lcm_compute`
+(a calculator that refuses anything not verbatim in a cited span), typed assertions
+(`lcm_query_state`), four generations of pre-answer evidence compiler (`lcm_compile_evidence`,
+`lcm_evidence_pack`), adaptive retrieval and query views (`lcm_retrieve`), summary embeddings,
+temporal rollups and a trajectory corpus. None of them sits on the path that carries a
+conversation into the context window, so none can drop or shorten a message. The fork keeps them
+untouched so upstream merges stay clean; every one of them answers `status: disabled` until its
+flag is set, except `lcm_compute`, which the model may call at any time.
+
 Costs at 256k: the system note is ~54 tokens longer and index-style summaries tend to be longer
-than upstream's terse ones (still under the same 12k cap). Everything else at 256k is upstream.
+than upstream's terse ones (still under the same 12k cap). Every *tuning* value at 256k is
+upstream's; the loss removal above applies there too, so the 256k DAG deliberately differs from
+upstream's wherever upstream truncated.
 
 ## LCM vs built-in compression
 

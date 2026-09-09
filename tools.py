@@ -1081,11 +1081,34 @@ def lcm_compute(args: Dict[str, Any], **kwargs) -> str:
     return encoded
 
 
+def _preanswer_evidence_enabled(engine: "LCMEngine") -> bool:
+    """fork: betterlcm — the activation boundary for the pre-answer evidence subsystem.
+
+    `lcm_query_state` and `lcm_retrieve` already answer `status: disabled` until their flag is
+    set. `lcm_compile_evidence` and `lcm_evidence_pack` were advertised AND dispatched
+    unconditionally, and passed `enabled=True` to the compiler themselves, so an opt-in
+    subsystem ran in the default configuration (round-5 verify-6, default-reachability).
+    """
+    return bool(getattr(getattr(engine, "_config", None), "preanswer_evidence_enabled", False))
+
+
+def _preanswer_evidence_disabled_payload() -> str:
+    return json.dumps({
+        "status": "disabled",
+        "error": (
+            "pre-answer evidence is not enabled for this profile "
+            "(set preanswer_evidence_enabled)"
+        ),
+    })
+
+
 def lcm_evidence_pack(args: Dict[str, Any], **kwargs) -> str:
     """Build a bounded exact-evidence packet and optional canonical trace."""
     engine = _require_engine(kwargs)
     if engine is None:
         return json.dumps({"error": "LCM engine not initialized"})
+    if not _preanswer_evidence_enabled(engine):
+        return _preanswer_evidence_disabled_payload()
     # Lazy import preserves the plugin's order-independent module bootstrap.
     from .evidence_pack import build_evidence_pack
     return build_evidence_pack(
@@ -1100,6 +1123,8 @@ def lcm_compile_evidence(args: Dict[str, Any], **kwargs) -> str:
     engine = _require_engine(kwargs)
     if engine is None:
         return json.dumps({"error": "LCM engine not initialized"})
+    if not _preanswer_evidence_enabled(engine):
+        return _preanswer_evidence_disabled_payload()
     # Lazy import preserves the plugin's order-independent module bootstrap.
     from .evidence_compiler import compile_evidence, compile_preanswer_evidence
 

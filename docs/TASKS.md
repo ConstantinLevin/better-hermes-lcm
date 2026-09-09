@@ -322,12 +322,15 @@ fork introduced in the eighth/ninth passes. All eleven are fixed:
 | 10 | each bypass compaction rewrote every surviving receipt with counts from the LATEST reduction alone, erasing the earlier record — two receipts both claimed 6 messages / 3,046 chars where 10 / 5,100 had gone | the receipt is cumulative: earlier receipts' recorded counts are carried forward, this call's reduction is added once, and one receipt is emitted instead of several copies of the same total |
 | 11 (P2) | `dag.reassign_session_nodes` lacked the rollback discipline of node publication, so a failed carry-over commit left the ownership change pending and an unrelated later publication committed it | same `except BaseException: rollback; raise` protection as `add_node_with_meta` |
 
-**Reported, not changed:** `lcm_compile_evidence` and `lcm_evidence_pack` are advertised and
-dispatched in the default configuration (like `lcm_compute`), passing `enabled=True` themselves.
-Gating them at the handler is a two-line change but fails 27 upstream tests that call them with
-the flags off, and it changes opt-in-subsystem behaviour the owner has decided to leave alone.
-Upstream's own contract for `lcm_query_state`/`lcm_retrieve` is "always advertised, handler
-answers `status: disabled`"; bringing these two into line is a decision for the owner.
+**Default-reachability, fixed on the owner's instruction:** `lcm_compile_evidence` and
+`lcm_evidence_pack` were advertised AND dispatched in the default configuration, passing
+`enabled=True` to the compiler themselves, so an opt-in subsystem ran with every flag off. They
+now answer `status: disabled` until `preanswer_evidence_enabled` is set — the contract
+`lcm_query_state` and `lcm_retrieve` already followed. Four upstream test modules that exercise
+the enabled behaviour set the flag in their engine fixture (`test_evidence_pack.py`,
+`test_evidence_compiler.py`, `test_evidence_contract.py`,
+`test_evidence_pack_host_activation.py`); they are listed in `docs/fork-touchpoints.md`.
+`lcm_compute` stays callable — it is a pure function over refs the caller supplies.
 
 Rejected in this pass: a completion-cue/negation gate on `_source_supports_assertion_value`
 (verify-4 #23). Every whitelist of completion verbs rejects real ones ("I submitted the
@@ -349,7 +352,58 @@ embeddings association/coverage, trajectory recovery and indexing, rollup snapsh
 freshness, assertion polarity and scope, and the window-policy integration for optional
 subsystem capacities.
 
-## Still open — from the partitioned audits
+## WHAT IS LEFT TO DO
+
+This is the authoritative remaining-work list as of the tenth pass (`52bf344` + the evidence
+gate). Everything above this line is history; the partitioned-audit list below it is the raw
+material these items were distilled from and contains entries that have since been fixed.
+
+**Ship state:** no known loss on the core path. Suite 3326 passed / 1 skipped / 12 xfailed;
+both e2e anchors clean (0 unreachable rows, 0 missing facts, 0 facts never offered to the
+summariser) at 262144×400 and 1000000×3000 against the deployed plugin.
+
+### A. Core path — the only category that can still lose something
+
+| id | what | why it is still open |
+|---|---|---|
+| A1 | **Summariser prompt design** (Phase 0 below). The prompt is five layers of patchwork with contradictions ("or drop", a 60–70 % focus skew). A summary that omits a topic is loss the markers cannot describe, because the summariser was never told the topic mattered. | Needs a written design (`docs/prompt-design.md`) agreed first, then one fork module `summary_prompts.py`, then measurement — not a quick edit. |
+| A2 | **Index-navigation evaluation gate** (Phase 0.3 / Phase 5). There is no number for "can a reader pick the right node to expand from the rendered prefix". `lcm_doctor coverage` measures term survival, not navigability. | Requires a fixture set and a real model run at both anchors, before/after A1. |
+| A3 | **Backup must cover externalized payloads**, not just SQLite. A restored database can reference payload files the backup never copied — the reference resolves to nothing and the expansion says the bytes are unrecoverable. | Task #14. Physical backup publication and `fsync` durability were also *not* exercised by the verify-6 audit (read-only workspace), so power-loss recovery is unverified. |
+| A4 | **A pasted copy of our own assembled prefix is classified as scaffolding and dropped.** No content is lost (it is a copy of summaries the DAG holds) but the fact that the user said it is. Rejected fix recorded in the ninth pass. | Needs a trusted generated-message identity from the host, or a digest ledger whose failure mode is worse. Blocked on a host contract. |
+| A5 | **verify-4 #6's smallest case**: an assembly budget too small for even the 12-token receipt records the omission in `lcm_status` instead of the prefix. | Deliberate trade-off — making room would drop the caller's own latest message. Revisit only if a host reports it. |
+| A6 | **verify-4 #10 structured omission records**: receipts are prose lines, not machine-readable records. | Architectural; would change every marker's shape. |
+
+### B. Correctness and operability (no known loss, but unproven or rough)
+
+| id | what |
+|---|---|
+| B1 | `p03`: a transaction can still lose rollback protection under concurrent use (the `reassign_session_nodes` case is fixed; the general pattern is not audited). |
+| B2 | `p06`: Hermes' current spillover directory is not recognised; the always-on ingest guard can canonicalise surrounding JSON. |
+| B3 | `p11`: the suite tests rows far more thoroughly than usable provenance — it does not establish that a stored summary is complete or functions as an index. (A1/A2 subsume most of this.) |
+| B4 | `audit D` medium: 256k structural equivalence still fails on oversized/imported histories and on the dynamic-chunk path; whole sidecar index blocks escape retrieval budgets. |
+| B5 | CI on the `betterlcm` branch; the host-integration lane must fail, not skip, when the host import fails (T2.5). |
+| B6 | Docs/skill/defaults generated from `ENV_FIELD_SPECS` + anchors so they cannot drift from the curve (T2.4). |
+
+### C. Ported-capability decisions (audit E, still unmade)
+
+| id | what |
+|---|---|
+| C1 | The nine cheap claw items: test-home isolation, prompt-prefix divergence diagnostics, release-commit validation, payload-reference disambiguators, a script-aware token estimator, prompt inspection commands, copied-reference parsing, shadow-install/drift detection, release fragments. |
+| C2 | The six capability-level ones: `context_items` projection, operator TUI, persistent focus briefs, delegated retrieval workers, richer maintenance debt, a paged expansion-cost manifest. |
+| C3 | Standing duty: on every lossless-claw release, run the four-aspect comparison and record ported/rejected items in `docs/claw-comparison/vX.Y.Z.md`. |
+
+### D. Explicitly not being done
+
+- **The opt-in subsystems** (`reasoning`/`lcm_compute`, assertions, the evidence compilers,
+  adaptive retrieval + query views, embeddings, rollups, trajectory — ~20,700 lines). Owner's
+  decision: they stay in the fork, stay default-off, and are neither audited nor modified.
+  Deleting them would only make the upstream merge painful for no behavioural gain. The whole
+  verify-5 subsystem tail (embeddings association/coverage, trajectory recovery and indexing,
+  rollup snapshots, query-view freshness, assertion polarity and scope, verify-4 #23, #26) is
+  closed as "not our problem" under that decision.
+- **Reproducing upstream's cuts at 256k.** The anchor carries tuning values only.
+
+## Still open — from the partitioned audits (historical raw material)
 
 Fourteen audits ran: four aspect comparisons against lossless-claw, three cross-cutting
 (whole-plugin, plan critique, unplanned claw capabilities), a regression hunt against upstream,
