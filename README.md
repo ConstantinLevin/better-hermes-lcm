@@ -48,6 +48,7 @@ OpenClaw. For an interactive visualization of the LCM idea, see
 - [What it does](#what-it-does)
 - [What upstream does badly](#what-upstream-does-badly)
 - [What the fork changes](#what-the-fork-changes)
+- [Current limitations](#current-limitations)
 - [LCM vs built-in compression](#lcm-vs-built-in-compression)
 - [Quick start](#quick-start)
 - [Commands and tools](#commands-and-tools)
@@ -292,6 +293,45 @@ Costs at 256k: the system note is ~54 tokens longer and index-style summaries te
 than upstream's terse ones (still under the same 12k cap). Every *tuning* value at 256k is
 upstream's; the loss removal above applies there too, so the 256k DAG deliberately differs from
 upstream's wherever upstream truncated.
+
+## Current limitations
+
+**How long a session can actually get.** The DAG has a depth cap (3 at 256k, 5 at 1M), and once
+a node reaches it nothing can condense it further — top-depth nodes accumulate in the frontier,
+and the frontier is rendered into every prompt. So the ceiling is *how much conversation the
+top-depth nodes can stand for before they no longer fit alongside the protected tail*.
+
+With the defaults (chunk 4 % of the window, leaf ratio 0.20, condensation fanin 4, condensation
+ratio 0.40, tail 15 % of the window):
+
+| window | one top-depth node | it stands for | how many fit | total conversation |
+|---|---|---|---|---|
+| 256k, depth 3 | 8,589 tokens | 671,104 tokens | 6 | **~4.0M tokens** |
+| 1M, depth 5 | 83,886 tokens | 40,960,000 tokens | 7 | **~287M tokens** |
+
+Without LCM the session ends when the conversation reaches the window: **262,144** and
+**1,000,000** tokens. So the arithmetic says roughly **15×** at 256k and **287×** at 1M.
+
+**The number you should actually plan around is lower**, because of a limitation this fork has
+not fixed: the condensation budget is `0.40 × source` with no ceiling, so it grows with depth,
+and it is a request for *output* tokens. At 1M that is 32,768 tokens at depth 3, 52,429 at depth
+4 and 83,886 at depth 5. Most summarisers cannot emit that much in one response. This fork
+refuses a truncated generation rather than storing a chopped node, so the effect is not a
+corrupt index — condensation simply stops succeeding and the DAG stalls at whatever depth the
+model can still write. **Stalling at depth 3 gives ~48.6M tokens at 1M** (19 nodes × 2.56M),
+still ~49× the window. At 256k the deepest request is 8,589 tokens, comfortably within any
+model, so 256k reaches its cap.
+
+**What happens at the ceiling is degradation, not an ending.** When the frontier outgrows the
+prefix, assembly renders what fits and names what it left out; the omitted nodes stay in the DAG
+and stay reachable through `lcm_grep`, `lcm_describe` and `lcm_expand`. Nothing is lost — the
+*rendered* index becomes partial and the agent has to search for the rest instead of seeing it.
+Without LCM the session simply ends.
+
+Two caveats on the table: it is arithmetic from the default settings, not a measurement, and it
+assumes every leaf is a full chunk and every condensation group is full. Real sessions produce
+partial chunks and partial groups, so treat these as an upper bound on the same order of
+magnitude.
 
 ## LCM vs built-in compression
 
