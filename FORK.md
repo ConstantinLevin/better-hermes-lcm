@@ -11,8 +11,11 @@ in `docs/fork-design.md`. Two rules govern every change:
 1. **Weighted tuning** — every size that is a *preference* is a linear function of
    `context_length` between two anchors: upstream's value at 256k and the 1M design at 1M.
    Anchors live in one table: `window_scaling.py::WINDOW_SCALED_DEFAULTS`.
-2. **Pure optimizations** — loss removal, throughput, index quality — apply at every window
-   and must leave the 256k DAG identical to upstream's.
+2. **Pure optimizations** — loss removal, throughput, index quality — apply at EVERY window.
+   The 256k anchor carries upstream's TUNING VALUES, never upstream's loss: a cut that fires at
+   256k but not at 1M is a defect, not fidelity to upstream. The 256k DAG therefore differs
+   from upstream's wherever upstream truncated (the 3,000-char summariser cut and its argument
+   cut are gone at both anchors); everything that is a preference still matches upstream there.
 
 ### The four configured exceptions to the no-loss rule
 
@@ -29,6 +32,26 @@ policies that deliberately do not, so they are named here rather than discovered
 
 If an operator needs those sessions or spans archived, the fork's answer today is: do not use
 the exception. Preserving originals behind protection is a design decision, not a bug fix.
+
+### The upstream opt-in subsystems: kept, off, and out of scope
+
+About 20,700 of the plugin's ~73,500 lines are upstream subsystems that have nothing to do with
+storing, compacting or assembling the conversation. They are a question-answering apparatus over
+the same `lcm.db`: `reasoning.py` (`lcm_compute` — a calculator that refuses to compute over
+anything it cannot find verbatim in a cited span), the assertion family (`lcm_query_state` —
+typed facts pinned to a source row and span hash, with supersede/fulfil lifecycle), four
+generations of pre-answer evidence compiler (`lcm_compile_evidence`, `lcm_evidence_pack`),
+adaptive retrieval and its query views (`lcm_retrieve`), `vector_store.py` (embeddings + KNN),
+the temporal rollups, and `trajectory_store.py` (agent trajectories as a second corpus).
+
+**They stay in the fork, they stay default-off, and they are not audited or modified.** Deleting
+them would only make the eventual upstream merge painful for no behavioural gain. None of them
+sits on the path that carries a conversation into the context window, so none can drop or
+shorten a message; they read from the store and answer questions. `lcm_compute`,
+`lcm_compile_evidence` and `lcm_evidence_pack` are reachable without a flag (the model must call
+them); the rest answer `status: disabled` until their flag is set. Fork effort belongs on the
+core path: ingest → store → reconcile → compaction → summariser → assembly → bypass → the
+retrieval tools → operator, backup and maintenance.
 
 ## How to upgrade from upstream (for the next maintainer)
 ```
