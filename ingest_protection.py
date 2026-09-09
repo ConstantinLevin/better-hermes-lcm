@@ -141,6 +141,8 @@ _UNRECOVERABLE_TRUNCATION_RE = re.compile(
     re.IGNORECASE,
 )
 _HERMES_RESULTS_DIRNAME = "hermes-results"
+# fork: betterlcm — private carrier for a recovered body that could not be externalized.
+_RECOVERED_BODY_KEY = "_lcm_recovered_body"
 # fork: betterlcm — the host's CURRENT home for oversized tool results. Hermes writes them to
 # ``$HERMES_HOME/cache/spillover``, names that path in the marker, and deletes files there
 # after 24 hours. Recovery accepted only the older ``<tmp>/hermes-results`` directory, so on
@@ -1448,10 +1450,15 @@ def protect_message_for_ingest(
         and recovered_externalized is None
         and normalized_recovered_content
     ):
+        # The marker STAYS as this row's content: replay identity is computed from it, and a
+        # row holding the recovered body instead could not be matched to the incoming marker,
+        # which broke source mapping and stopped compaction publishing at all (verify-2
+        # round 2 #2). The bytes are kept as an ADDITIONAL row instead — see
+        # ``protect_messages_for_ingest``.
         recovered_inline_content = normalized_recovered_content
         logger.warning(
             "LCM could not write a durable copy of a recovered host output (%d chars); "
-            "storing the recovered bytes inline instead of the expiring marker",
+            "storing the recovered bytes as an extra archive row",
             len(normalized_recovered_content),
         )
 
@@ -1461,13 +1468,15 @@ def protect_message_for_ingest(
     preserve_truncation_marker_inline = (
         role == "tool"
         and recovered_externalized is None
-        and recovered_inline_content is None
         and isinstance(normalized_content, str)
         and (
             _is_hermes_persisted_output_marker(normalized_content)
             or _is_unrecoverable_tool_truncation_marker(normalized_content)
         )
     )
+
+    if recovered_inline_content is not None:
+        msg[_RECOVERED_BODY_KEY] = recovered_inline_content
 
     # Preserve the pre-existing opt-in large-output behavior on message content.
     # The always-on storage-boundary sanitizer below is a narrower safety net for
@@ -1476,8 +1485,6 @@ def protect_message_for_ingest(
     if normalized_content:
         if recovered_externalized:
             msg["content"] = recovered_externalized["placeholder"]
-        elif recovered_inline_content is not None:
-            msg["content"] = recovered_inline_content  # fork: keep the bytes (verify-4 #18)
         elif (
             is_externalized_ingest_placeholder(normalized_content)
             or is_externalized_placeholder(normalized_content)
@@ -1641,21 +1648,41 @@ def quarantine_suspicious_assistant_messages(
     ]
 
 
+RECOVERED_BODY_PREFIX = "[LCM recovered host output"
+
+
 def protect_messages_for_ingest(
     messages: List[Dict[str, Any]],
     config,
     hermes_home: str = "",
     session_id: str = "",
 ) -> List[Dict[str, Any]]:
-    return [
-        protect_message_for_ingest(
+    protected: List[Dict[str, Any]] = []
+    for message in messages:
+        result = protect_message_for_ingest(
             message,
             config=config,
             hermes_home=hermes_home,
             session_id=session_id,
         )
-        for message in messages
-    ]
+        # fork: betterlcm — when the durable copy could not be written, the recovered bytes
+        # ride along as an EXTRA archive row. The marker row keeps its replay identity (so
+        # reconciliation and leaf publication still work) and the complete output is still in
+        # the store when the host deletes its expiring file (verify-4 #18, corrected after the
+        # round-2 regression report).
+        body = result.pop(_RECOVERED_BODY_KEY, None)
+        protected.append(result)
+        if body:
+            protected.append({
+                "role": "tool",
+                "tool_call_id": str(result.get("tool_call_id") or ""),
+                "content": (
+                    f"{RECOVERED_BODY_PREFIX} for tool_call_id="
+                    f"{result.get('tool_call_id') or '?'}; the host file it came from expires]\n"
+                    + body
+                ),
+            })
+    return protected
 
 
 def _append_unique_refs(target: list[str], refs: list[str]) -> None:

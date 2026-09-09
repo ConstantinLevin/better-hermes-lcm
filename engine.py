@@ -60,6 +60,7 @@ from .ingest_protection import (
     _has_lossy_sensitive_redaction,
     _contains_media_payload,
     _is_hermes_persisted_output_marker,
+    _is_unrecoverable_tool_truncation_marker,
     _persisted_output_inline_preview_sha256,
     _persisted_output_preview_prefix_digest,
     _persisted_output_saved_path,
@@ -1646,6 +1647,26 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                 )
             except Exception as e:
                 self._record_ingest_failure("per-turn ingest()", e)
+
+    def _is_unmappable_host_truncation_marker(self, msg: Dict[str, Any]) -> bool:
+        """fork: betterlcm — a host truncation marker the archive holds no durable copy of.
+
+        The host writes those files and deletes them; when the copy could not be written there
+        is no row for the marker to map to, and the leaf must still be publishable (with a
+        marker saying so) rather than refusing forever (round-2 verify-2 #2).
+        """
+        content = normalize_content_value(msg.get("content")) or ""
+        if not content:
+            return False
+        if not (
+            _is_hermes_persisted_output_marker(content)
+            or _is_unrecoverable_tool_truncation_marker(content)
+        ):
+            return False
+        try:
+            return not self._has_any_durable_persisted_output_payload_for_marker(msg)
+        except Exception:  # pragma: no cover - a lookup failure is not proof of a copy
+            return True
 
     def _is_retry_worthy_leaf_summary_error(self, exc: Exception) -> bool:
         # fork: betterlcm — read the whole cause chain. The route's real error ("maximum
@@ -5733,10 +5754,18 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
             # fork: betterlcm — a result that answers no call in this window cannot be replayed
             # as a `tool` message (the provider contract forbids it), but it is real content:
             # name it and say where it lives instead of dropping it silently (verify-4 #10).
-            sanitized.append({
+            #
+            # It goes BEFORE the newest user turn, never after it: appended at the end, this
+            # generated receipt became "the newest message" for assembly and for the bypass
+            # trim, and the live request was dropped to keep it (round-2 verify-2 #1).
+            receipt = {
                 "role": "user",
                 "content": marked_loss.orphan_tool_results_marker(orphaned),
-            })
+            }
+            insert_at = len(sanitized)
+            while insert_at > 0 and sanitized[insert_at - 1].get("role") == "user":
+                insert_at -= 1
+            sanitized.insert(insert_at, receipt)
         if dropped_tool_results:
             logger.info(
                 "LCM tool-pair guardrail: dropped %d late/orphan/duplicate tool result(s)",

@@ -199,6 +199,21 @@ def injected_context_marker(removed_chars: int) -> str:
     return f"[LCM: {removed_chars} chars of injected context removed before summarising]"
 
 
+def unmappable_rows_marker(count: int) -> str:
+    """Name consumed messages that have no durable store row of their own.
+
+    fork: betterlcm — a host truncation marker whose file could not be copied has no row the
+    archive can point at (the host owns the file and deletes it). The leaf still summarises the
+    span, so the summary says plainly that those messages cannot be expanded, rather than
+    implying the whole span is recoverable (round-2 verify-2 #2).
+    """
+    return (
+        f"[LCM: {count} message(s) in this span are host truncation markers with no durable "
+        "copy — they are summarised above but cannot be expanded; the host's own file has "
+        "expired or was never copied]"
+    )
+
+
 def excluded_reply_marker(store_ids: List[int]) -> str:
     """Name rows a leaf consumed but deliberately kept out of the summariser input.
 

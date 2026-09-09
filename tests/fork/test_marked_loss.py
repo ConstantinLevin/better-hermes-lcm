@@ -926,6 +926,14 @@ def test_an_orphan_tool_result_is_named_not_dropped(tmp_path):
         assert "ACTION FAILED" in rendered
         assert "lcm_grep" in rendered
 
+        # the receipt must never become "the newest message": appended at the end it displaced
+        # the live request under an assembly or bypass cap (round-2 verify-2 #1)
+        with_request = e._sanitize_tool_pairs([
+            {"role": "tool", "tool_call_id": "gone", "content": "ACTION FAILED"},
+            {"role": "user", "content": "LATEST REQUEST: cancel the rollout"},
+        ])
+        assert "LATEST REQUEST" in str(with_request[-1].get("content") or "")
+
         unanswered = e._sanitize_tool_pairs([
             {"role": "assistant", "tool_calls": [
                 {"id": "c1", "type": "function", "function": {"name": "t", "arguments": "{}"}}]},

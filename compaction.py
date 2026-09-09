@@ -1056,6 +1056,18 @@ class CompactionMixin:
                 message for message in source_lookup_chunk
                 if id(message) not in mapped_by_message_id
             ]
+            # A host truncation marker with no durable copy legitimately has no row of its own:
+            # the host owns that file and the plugin could not copy it. Refusing forever would
+            # stop compaction for the whole session, so those are published WITH a marker
+            # saying they cannot be expanded; anything else unmapped is a real provenance
+            # failure and still refuses (round-2 verify-2 #2).
+            unmappable_markers = [
+                message for message in unmapped
+                if str(message.get("role") or "") == "tool"
+                and self._is_unmappable_host_truncation_marker(message)
+            ]
+            if len(unmappable_markers) == len(unmapped):
+                unmapped = []
             if source_lookup_chunk and unmapped:
                 noop_reason = (
                     "selected leaf chunk lost its raw store lineage"
@@ -1088,6 +1100,10 @@ class CompactionMixin:
             if excluded_source_ids:
                 summary_text = summary_text.rstrip() + "\n" + marked_loss.excluded_reply_marker(
                     excluded_source_ids
+                )
+            if unmappable_markers:
+                summary_text = summary_text.rstrip() + "\n" + marked_loss.unmappable_rows_marker(
+                    len(unmappable_markers)
                 )
             earliest_at, latest_at = self._store.get_time_bounds(published_source_ids)
             summary_tokens = count_tokens(summary_text)

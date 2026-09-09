@@ -116,16 +116,29 @@ def test_recovered_bytes_are_kept_even_when_the_durable_copy_cannot_be_written(t
     engine = LCMEngine(config=cfg, hermes_home=str(home))
     try:
         engine.on_session_start("pf", platform="cli", context_length=200_000)
-        engine._ingest_messages([
+        active_messages = [
             {"role": "user", "content": "read it"},
             {"role": "assistant", "content": "reading", "tool_calls": [
                 {"id": "call11", "type": "function",
                  "function": {"name": "read_file", "arguments": "{}"}}]},
             {"role": "tool", "tool_call_id": "call11", "content": _marker(target, content)},
-        ])
+        ]
+        engine._ingest_messages(active_messages)
+        # the marker itself has no durable copy, so it maps to no row BY DESIGN — and the
+        # compaction guard knows that shape and publishes with a marker instead of refusing
+        marker_message = active_messages[-1]
+        assert engine._is_unmappable_host_truncation_marker(marker_message) is True
+
         target.unlink()
-        stored = "\n".join(str(row.get("content") or "")
-                           for row in engine._store.get_session_messages("pf"))
+        rows = engine._store.get_session_messages("pf")
+        stored = "\n".join(str(row.get("content") or "") for row in rows)
         assert "FULL RECOVERED BODY" in stored, "the recovered bytes were thrown away"
+        # the marker row keeps its own content, so replay identity still matches the host's
+        # message and source mapping (hence leaf publication) still works
+        assert any("<persisted-output>" in str(row.get("content") or "") for row in rows)
+        assert any(str(row.get("content") or "").startswith("[LCM recovered host output")
+                   for row in rows)
+
+
     finally:
         engine.shutdown()
