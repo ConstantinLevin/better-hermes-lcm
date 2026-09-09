@@ -1355,3 +1355,31 @@ def test_an_exhausted_reachability_search_is_not_reported_as_a_missing_node(tmp_
         assert "not found" in missing["error"]
     finally:
         e.shutdown()
+
+
+def test_expansion_synthesis_names_what_it_could_not_answer_over(tmp_path, monkeypatch):
+    """round-2 verify-4 #24: an explicitly requested node that does not exist produced the
+    ordinary "No matching summaries" answer, and a synthesis the route cut off at its
+    generation limit was returned as an ordinary complete answer."""
+    import json
+    from hermes_lcm import tools as lcm_tools
+    e = _engine(tmp_path, "synth.db", incremental_max_depth=0)
+    try:
+        e.on_session_start("sy", platform="cli", context_length=200_000)
+        missing = json.loads(lcm_tools.lcm_expand_query(
+            {"prompt": "what happened?", "node_ids": [4242]}, engine=e))
+        assert missing["missing_node_ids"] == [4242], missing
+        assert missing["complete"] is False
+        assert "failed selection" in missing["answer"]
+
+        base = time.time()
+        node_ids = [_add(e, "sy", 0, f"summary {index}", base + index) for index in range(3)]
+        monkeypatch.setattr(lcm_tools, "_synthesize_expansion_answer",
+                            lambda **kwargs: "a partial answer")
+        lcm_tools._LAST_SYNTHESIS_STATUS.unfinished = ""
+        payload = json.loads(lcm_tools.lcm_expand_query(
+            {"prompt": "what happened?", "node_ids": node_ids, "max_results": 1}, engine=e))
+        assert payload["requested_nodes_not_processed"] == node_ids[1:], payload
+        assert payload["complete"] is False
+    finally:
+        e.shutdown()

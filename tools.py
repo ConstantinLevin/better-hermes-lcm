@@ -2027,6 +2027,12 @@ def _context_content_token_count(blocks: list[dict[str, Any]]) -> int:
     return total
 
 
+# fork: betterlcm — where the synthesis route's termination status is left for the caller.
+# A thread-local rather than a parameter: test doubles and host wrappers replace
+# _synthesize_expansion_answer wholesale, and they must keep working unchanged.
+_LAST_SYNTHESIS_STATUS = threading.local()
+
+
 def _synthesize_expansion_answer(
     *,
     prompt: str,
@@ -2065,10 +2071,21 @@ def _synthesize_expansion_answer(
     }
     apply_lcm_model_route(call_kwargs, model)
     response = call_llm(**call_kwargs)
-    content = response.choices[0].message.content
+    choice = response.choices[0]
+    content = choice.message.content
     if not isinstance(content, str):
         content = str(content) if content else ""
-    from .escalation import _strip_reasoning_blocks
+    from .escalation import _TRUNCATED_FINISH_REASONS, _strip_reasoning_blocks
+    # fork: betterlcm — a synthesised answer that stopped at the generation limit was returned
+    # as an ordinary complete answer (round-2 verify-4 #24). The caller labels it.
+    finish_reason = str(getattr(choice, "finish_reason", "") or "").strip().lower()
+    response_status = str(getattr(response, "status", "") or "").strip().lower()
+    unfinished = ""
+    if finish_reason in _TRUNCATED_FINISH_REASONS:
+        unfinished = f"the route stopped at its generation limit (finish_reason={finish_reason})"
+    elif response_status == "incomplete" or getattr(response, "incomplete_details", None):
+        unfinished = "the provider reported an incomplete response"
+    _LAST_SYNTHESIS_STATUS.unfinished = unfinished
     return _strip_reasoning_blocks(content).strip()
 
 
@@ -6091,15 +6108,29 @@ def lcm_expand_query(args: Dict[str, Any], **kwargs) -> str:
 
     nodes = []
     raw_results: list[dict[str, Any]] = []
+    # fork: betterlcm — an explicitly requested node that does not resolve must be NAMED. It
+    # used to disappear into the ordinary "No matching summaries" answer, so a caller asking
+    # about node 7 was told nothing matched rather than that node 7 was not there
+    # (round-2 verify-4 #24).
+    missing_node_ids: list[int] = []
+    unresolved_nodes: list[dict[str, Any]] = []
     if raw_node_ids:
         for node_id in raw_node_ids:
             try:
                 parsed_node_id = int(node_id)
             except (TypeError, ValueError):
                 return json.dumps({"error": "node_ids must contain only integers"})
-            node = _get_session_node(engine, parsed_node_id)
+            reach_status: Dict[str, Any] = {}
+            node = _get_session_node(engine, parsed_node_id, status=reach_status)
             if node is not None:
                 nodes.append(node)
+            elif reach_status.get("unresolved_reason"):
+                unresolved_nodes.append({
+                    "node_id": parsed_node_id,
+                    "reason": str(reach_status["unresolved_reason"]),
+                })
+            else:
+                missing_node_ids.append(parsed_node_id)
     elif query:
         nodes = engine._dag.search(query, session_id=engine.current_session_id, limit=max_results)
         raw_results = engine._store.search(query, session_id=engine.current_session_id, limit=max_results)
@@ -6107,19 +6138,35 @@ def lcm_expand_query(args: Dict[str, Any], **kwargs) -> str:
         return json.dumps({"error": "Provide either query or node_ids"})
 
     if not nodes and not raw_results:
+        answer = "No matching summaries or raw messages found in the current session."
+        if missing_node_ids or unresolved_nodes:
+            answer = (
+                "None of the requested nodes could be used: "
+                + ", ".join(
+                    [f"node {node_id} does not exist" for node_id in missing_node_ids]
+                    + [f"node {item['node_id']} is unresolved ({item['reason']})"
+                       for item in unresolved_nodes]
+                )
+                + ". This is not an answer about history; it is a failed selection."
+            )
         return json.dumps(
             {
                 "prompt": prompt,
                 "query": query,
-                "answer": "No matching summaries or raw messages found in the current session.",
+                "answer": answer,
                 "node_ids": [],
                 "matches": [],
                 "raw_matches": [],
+                **({"missing_node_ids": missing_node_ids} if missing_node_ids else {}),
+                **({"unresolved_node_ids": unresolved_nodes} if unresolved_nodes else {}),
+                "complete": not (missing_node_ids or unresolved_nodes),
             }
         )
 
     context_blocks = []
     context_budget_used = 0
+    # fork: betterlcm — nodes the caller explicitly asked for that this call will not process
+    unprocessed_node_ids = [int(node.node_id) for node in nodes[max_results:]]
     for node in nodes[:max_results]:
         remaining_context_tokens = max(0, context_max_tokens - context_budget_used)
         node_blocks = _collect_context_blocks_for_node(
@@ -6278,6 +6325,7 @@ def lcm_expand_query(args: Dict[str, Any], **kwargs) -> str:
     model = engine._config.expansion_model or engine._config.summary_model or ""
     timeout = engine.effective_expansion_timeout_ms / 1000  # fork: curved
     try:
+        _LAST_SYNTHESIS_STATUS.unfinished = ""  # fork: betterlcm — see below
         answer = _synthesize_expansion_answer(
             prompt=prompt,
             context_blocks=context_blocks,
@@ -6292,26 +6340,45 @@ def lcm_expand_query(args: Dict[str, Any], **kwargs) -> str:
             include_timeout=True,
         )
 
+    answer_unfinished = str(getattr(_LAST_SYNTHESIS_STATUS, "unfinished", "") or "")
     answer = str(answer).strip() if answer is not None else ""
     if not answer:
         logger.warning("LCM expand_query synthesis returned an empty answer")
         return _degraded_payload("lcm_expand_query synthesis returned an empty answer")
 
-    return json.dumps(
-        {
-            "prompt": prompt,
-            "query": query,
-            "answer": answer,
-            "model": model,
-            "max_tokens": max_tokens,
-            "context_max_tokens": context_max_tokens,
-            "context_truncated": context_truncated,
-            "context_pagination": context_pagination,
-            "node_ids": node_ids,
-            "matches": matches,
-            "raw_matches": raw_matches,
-        }
+    payload = {
+        "prompt": prompt,
+        "query": query,
+        "answer": answer,
+        "model": model,
+        "max_tokens": max_tokens,
+        "context_max_tokens": context_max_tokens,
+        "context_truncated": context_truncated,
+        "context_pagination": context_pagination,
+        "node_ids": node_ids,
+        "matches": matches,
+        "raw_matches": raw_matches,
+    }
+    # fork: betterlcm — everything the caller asked for that this answer does NOT cover
+    # (round-2 verify-4 #24): nodes that do not exist, nodes the bound could not resolve,
+    # nodes beyond max_results, and an answer the route stopped mid-sentence.
+    if missing_node_ids:
+        payload["missing_node_ids"] = missing_node_ids
+    if unresolved_nodes:
+        payload["unresolved_node_ids"] = unresolved_nodes
+    if unprocessed_node_ids:
+        payload["requested_nodes_not_processed"] = unprocessed_node_ids
+        payload["requested_nodes_not_processed_reason"] = (
+            f"max_results={max_results}; raise it or ask about them separately"
+        )
+    if answer_unfinished:
+        payload["answer_truncated"] = True
+        payload["answer_truncated_reason"] = answer_unfinished
+    payload["complete"] = not (
+        missing_node_ids or unresolved_nodes or unprocessed_node_ids
+        or answer_unfinished or context_truncated
     )
+    return json.dumps(payload)
 
 
 def _summary_quality_stats(engine: "LCMEngine", session_id: str) -> dict[str, Any]:
