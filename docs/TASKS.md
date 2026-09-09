@@ -241,3 +241,94 @@ Each still needs a decision before it is worth a full entry; none is a loss defe
   plan-conformance check.
 - No task is closed with a full-suite run that was started before its last edit.
 - Nothing is recorded here that is already in the code or in `git log`.
+
+## W1 — every setting must be a WEIGHT that is right at every window, not two ends and a line
+
+This is the biggest open design item and it is written out in full because the session that
+found it ran out of context. Read all of it before touching `window_scaling.py`.
+
+### What exists today
+
+`window_scaling.py` holds a table of `Anchor(name, field, low, high)` rows. Each row is **two
+numbers** — the setting's value at a 262,144-token window and its value at a 1,000,000-token
+window — and the resolver draws a straight line between them:
+
+    t = clamp((W - 262_144) / (1_000_000 - 262_144), 0, 1)
+    value = low + t * (high - low)
+
+"Anchor" is that pair of endpoints. The word and the shape are both an invention of the
+implementation, not a requirement of the design.
+
+### What it is supposed to be
+
+**One weight per setting: a function of the window that produces the right value at EVERY
+window size.** Not a value fitted at 256k, another fitted at 1M, and whatever a straight line
+gives in between. Three consequences the current shape does not honour:
+
+1. **A weight need not be linear.** Nothing says the correct value moves in a straight line
+   with the window. Linearity is an assumption baked into the resolver, never a decision about
+   any individual setting.
+2. **A weight is often DERIVED from another setting**, and then it is that derivation — not a
+   pair of endpoints — that must hold everywhere.
+3. **256k and 1M are two points you can check, not the two points the design is fitted to.**
+   A 400k or 700k model is a first-class case, not an interpolation artefact.
+
+### The evidence that the current shape is wrong
+
+Resolved values across the range, measured:
+
+| setting | 256k | 400k | 512k | 700k | 1M |
+|---|---|---|---|---|---|
+| `context_threshold` | 0.35 | 0.43 | 0.50 | 0.62 | 0.80 |
+| `incremental_max_depth` | 3 | 3 | 4 | 4 | 5 |
+| `summary_timeout_ms` | 60,000 | 86,157 | 107,407 | 143,078 | 200,000 |
+| `leaf_pass_cap` | 16 | 25 | 32 | 44 | 64 |
+| `summary_spend_max_calls` | 80 | 125 | 161 | 222 | 320 |
+
+Three distinct failures in that table:
+
+- **Nobody chose the middle.** `context_threshold` is 0.62 at 700k purely because that is where
+  the line passes. If 0.62 is wrong for a 700k model, nothing in the design would ever say so.
+- **Linear is the wrong KIND of function.** `incremental_max_depth` interpolates a discrete tree
+  depth: 3, 3, 4, 4, 5. Depth should be *derived* — a window holds about 25 leaves (the chunk is
+  0.04·W), and the depth needed to index N leaves is about log(N)/log(fanin). Likewise
+  `summary_timeout_ms` runs on its own line from 60 s when the work in one call is the chunk,
+  which is proportional to W: the timeout should follow the chunk, not a separate line.
+- **A derivation that only holds by luck.** `summary_spend_max_calls` is *meant* to be
+  `4 * (leaf_pass_cap + condense_group_cap)`. Measured, it is 80/80, 125/124, 161/160, 222/220,
+  320/320 — consistent, but only because both settings happen to be straight lines and therefore
+  stay parallel. Change one endpoint and the relation breaks at every window except the two ends,
+  which is exactly where the tests look.
+
+### Why this stayed invisible, which matters more than the defect
+
+The tests could not have caught it. `test_the_low_anchor_takes_upstreams_tuning_and_rejects_its_losses`
+and `test_at_1m_equals_design` check the two ends. `test_every_anchor_is_exactly_linear_between_its_endpoints`
+checks that intermediate values sit on the line — that is, it verifies the interpolation is
+linear; it can never say whether any intermediate value is a value a human would choose. It is a
+test written from the assumption, so it can only ever confirm the assumption.
+
+This is the same failure as the leaf chunk: a choice was encoded in a test, the test then made
+the choice look like a requirement, and four audit rounds went past it. **When touching this
+area, delete the tests that pin the current shape rather than making them pass.**
+
+### What the work is
+
+1. Decide the shape: each setting expressed as a function of W (constant, fraction of W, derived
+   from another setting, or an explicit non-linear curve), with the reason recorded next to it.
+2. Re-derive the fifteen settings that currently differ at the two ends and are therefore fitted
+   rather than chosen: `context_threshold`, `leaf_pass_cap`, `incremental_max_depth`,
+   `summary_timeout_ms`, `expansion_timeout_ms`, `leaf_loop_max_seconds`,
+   `summary_spend_max_calls`, `condense_group_cap`, the circuit-breaker threshold,
+   `l2_budget_ratio`, `stub_threshold_tokens`, `expansion_context_tokens`, `expand_page_tokens`,
+   `tool_response_char_scale`, and the two cache sizes.
+   (The ones already expressed as a single weight, and therefore fine: leaf chunk 0.04·W, fresh
+   tail 0.15·W, condensation gate 0.20·W, drain stop 0.30, plus three flat values — concurrency
+   6, tail count 400, and the per-message char cap at 4 chars per token of window.)
+3. Rename accordingly. `Anchor(name, low, high)` is the wrong shape and "anchor" is the wrong
+   word once a setting is a weight; `window_scaling.py` should express the function per setting.
+4. Verify at several windows including ones nobody designed for — 128k, 400k, 700k, 2M — not at
+   the two ends.
+
+**A10 (the condensation budget) is one of these**, so settle this first: `0.40 × children`
+compounds per level, and what it should be depends on what shape settings take.
