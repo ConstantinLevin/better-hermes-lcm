@@ -222,3 +222,30 @@ def test_a_truncated_index_block_can_actually_be_continued(tmp_path):
         assert "topic 199" in seen, "the continuation never returned the end of the index"
     finally:
         e.shutdown()
+
+
+def test_an_unreadable_sidecar_is_reported_not_silently_dropped(tmp_path, monkeypatch):
+    """round-2 verify-4 #26: a node WITH a stored index block whose sidecar could not be read
+    was described exactly like a node without one — the reader lost the index and any sign
+    that it existed."""
+    import sqlite3
+    import time
+    from hermes_lcm.dag import SummaryNode
+    e = _engine(tmp_path, incremental_max_depth=0)
+    try:
+        e.on_session_start("sf", platform="cli", context_length=200_000)
+        node_id = e._dag.add_node_with_meta(SummaryNode(
+            session_id="sf", depth=0, summary="a summary\nExpand for details about: alpha\nbeta",
+            token_count=10, source_token_count=50, source_ids=[1],
+            source_type="messages", created_at=time.time()), level=2)
+
+        def boom(*a, **k):
+            raise sqlite3.OperationalError("database is locked")
+
+        monkeypatch.setattr(e._dag.node_meta, "read", boom)
+        payload = json.loads(lcm_tools.lcm_describe({"node_id": node_id}, engine=e))
+        assert payload.get("index_block_unavailable") is True, payload
+        assert "database is locked" in payload.get("index_block_error", "")
+        assert payload.get("complete") is False
+    finally:
+        e.shutdown()

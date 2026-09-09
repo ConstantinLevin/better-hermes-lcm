@@ -1316,3 +1316,42 @@ def test_a_budget_too_small_for_the_receipt_still_says_something_is_missing(tmp_
             assert says_something, (cap, rendered)
     finally:
         e.shutdown()
+
+
+def test_an_exhausted_reachability_search_is_not_reported_as_a_missing_node(tmp_path):
+    """round-2 verify-4 #21: a retained node connected through more parent hops than the
+    reachability bound was answered with "not found in current session" — an exhausted search
+    presented to the agent as a demonstrated absence."""
+    import json
+    from hermes_lcm import tools as lcm_tools
+    e = _engine(tmp_path, "reach.db", incremental_max_depth=0)
+    try:
+        e.on_session_start("cur", platform="cli", context_length=200_000)
+        # a chain of 20 nodes in an older session, with only the top one in the current session
+        previous = None
+        chain = []
+        for index in range(20):
+            node_id = e._dag.add_node(SummaryNode(
+                session_id="old", depth=index, summary=f"level {index}", token_count=5,
+                source_token_count=10,
+                source_ids=[previous] if previous is not None else [1],
+                source_type="nodes" if previous is not None else "messages",
+                created_at=time.time() + index))
+            chain.append(node_id)
+            previous = node_id
+        e._dag.add_node(SummaryNode(
+            session_id="cur", depth=21, summary="the current-session root", token_count=5,
+            source_token_count=10, source_ids=[chain[-1]], source_type="nodes",
+            created_at=time.time() + 50))
+
+        payload = json.loads(lcm_tools.lcm_expand({"node_id": chain[0]}, engine=e))
+        assert payload.get("unresolved") is True, payload
+        assert payload.get("complete") is False
+        assert "bound" in payload["unresolved_reason"]
+
+        # a node that really does not exist still answers plainly
+        missing = json.loads(lcm_tools.lcm_expand({"node_id": 999_999}, engine=e))
+        assert missing.get("unresolved") is not True
+        assert "not found" in missing["error"]
+    finally:
+        e.shutdown()

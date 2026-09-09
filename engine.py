@@ -582,6 +582,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         self._preflight_cleanup_only_due_to_boundary_cooldown = False
         self._preflight_cleanup_only_below_threshold = False  # fork: betterlcm
         self._last_assembly_omission_note = ""  # fork: betterlcm (verify-4 #9)
+        self._last_node_meta_read_error = ""  # fork: betterlcm (round-2 verify-4 #26)
         self._leaf_lookahead = None  # fork: betterlcm (leaf_pipeline.LeafLookahead)
         # fork: betterlcm — construct the compaction mutex here, not on first use. Creating it
         # lazily inside compress() meant two threads arriving together could each build their
@@ -3726,9 +3727,14 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         if store is None or not node_ids:
             return {}
         try:
+            self._last_node_meta_read_error = ""
             return store.read_many(node_ids)
-        except Exception:
-            logger.debug("LCM node meta read failed", exc_info=True)
+        except Exception as exc:
+            # fork: betterlcm — assembly renders without level tags rather than failing, but
+            # the DEGRADATION is recorded: a silently missing level tag is indistinguishable
+            # from a node that never had one (round-2 verify-4 #26). lcm_status shows it.
+            logger.warning("LCM node meta read failed: %s", exc)
+            self._last_node_meta_read_error = str(exc)[:200]
             return {}
 
     @staticmethod
@@ -4095,6 +4101,9 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
             # fork: betterlcm — an omission receipt that could not fit the summary budget is
             # recorded here rather than lost (verify-4 #9)
             "last_assembly_omission_note": getattr(self, "_last_assembly_omission_note", ""),
+            # fork: betterlcm — an unreadable sidecar degrades assembly silently otherwise
+            # (round-2 verify-4 #26)
+            "last_node_meta_read_error": getattr(self, "_last_node_meta_read_error", ""),
             "threshold_full_sweep": dict(self._last_threshold_full_sweep),
             "ingest_failure_count": self._ingest_failure_count,
             "consecutive_ingest_failures": self._consecutive_ingest_failures,

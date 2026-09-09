@@ -160,8 +160,16 @@ def _node_index_block_payload(engine: Any, node: Any, *, max_chars: int = 4_000)
         return {}
     try:
         meta = store.read(int(node.node_id))
-    except Exception:
-        return {}
+    except Exception as exc:
+        # fork: betterlcm — "this node has no sidecar" and "its sidecar could not be read" are
+        # different answers. Returning {} for both made a description of a node WITH a stored
+        # index look like a node without one (round-2 verify-4 #26).
+        logger.warning("LCM could not read node metadata for %s: %s", node.node_id, exc)
+        return {
+            "index_block_unavailable": True,
+            "index_block_error": str(exc)[:200],
+            "complete": False,
+        }
     block = str((meta or {}).get("index_block") or "")
     first_line = str(getattr(node, "expand_hint", "") or "")
     if not block or block == first_line:
@@ -196,8 +204,13 @@ def _node_index_slice_payload(engine: Any, node: Any, *, offset: int = 0,
         return {}
     try:
         meta = store.read(int(node.node_id))
-    except Exception:
-        return {}
+    except Exception as exc:  # fork: betterlcm — see _node_index_block_payload
+        logger.warning("LCM could not read node metadata for %s: %s", node.node_id, exc)
+        return {
+            "index_block_unavailable": True,
+            "index_block_error": str(exc)[:200],
+            "complete": False,
+        }
     block = str((meta or {}).get("index_block") or "")
     if not block:
         return {}
@@ -232,7 +245,32 @@ def _node_index_slice_payload(engine: Any, node: Any, *, offset: int = 0,
     return payload
 
 
-def _get_session_node(engine: "LCMEngine", node_id: int):
+def _unresolved_node_error(engine: "LCMEngine", node_id, status) -> str:
+    """fork: betterlcm — "not found" vs "could not be resolved" (round-2 verify-4 #21).
+
+    A retained node behind more hops than the reachability bound, or behind a failed parent
+    read, was reported exactly like a node that does not exist: an exhausted search presented
+    as a demonstrated absence.
+    """
+    reason = str((status or {}).get("unresolved_reason") or "")
+    if not reason:
+        return json.dumps({
+            "error": f"Node {node_id} not found in current session",
+            "complete": True,
+        })
+    return json.dumps({
+        "error": (
+            f"Node {node_id} could not be resolved from the current session: {reason}. "
+            "This is a bound or a failure, not a demonstrated absence."
+        ),
+        "unresolved": True,
+        "unresolved_reason": reason,
+        "complete": False,
+        "hint": "lcm_grep(session_scope='all'), or lcm_expand from a node you already reached",
+    })
+
+
+def _get_session_node(engine: "LCMEngine", node_id: int, *, status=None):
     """A node the caller may expand.
 
     fork: betterlcm — authorization is REACHABILITY from the current session, not session
@@ -247,19 +285,30 @@ def _get_session_node(engine: "LCMEngine", node_id: int):
         return None
     if node.session_id == engine.current_session_id:
         return node
-    return node if _is_reachable_from_current_session(engine, node) else None
+    return node if _is_reachable_from_current_session(engine, node, status=status) else None
 
 
 def _is_reachable_from_current_session(engine: "LCMEngine", node: Any, *,
-                                       max_hops: int = 16, max_nodes: int = 512) -> bool:
-    """True when some ancestor of ``node`` belongs to the caller's current session."""
+                                       max_hops: int = 16, max_nodes: int = 512,
+                                       status=None) -> bool:
+    """True when some ancestor of ``node`` belongs to the caller's current session.
+
+    fork: betterlcm — ``status`` receives ``unresolved_reason`` when the answer is "the search
+    ran out" rather than "there is no such ancestor" (round-2 verify-4 #21).
+    """
     current = engine.current_session_id
     if not current:
         return False
     seen: set[int] = {int(node.node_id)}
     frontier = [int(node.node_id)]
     for _hop in range(max_hops):
-        if not frontier or len(seen) > max_nodes:
+        if not frontier:
+            return False
+        if len(seen) > max_nodes:
+            if status is not None:
+                status["unresolved_reason"] = (
+                    f"the reachability search reached its {max_nodes}-node bound"
+                )
             return False
         parents: list[int] = []
         for child_id in frontier:
@@ -270,11 +319,13 @@ def _is_reachable_from_current_session(engine: "LCMEngine", node: Any, *,
                 parent_ids = engine._dag.get_parent_node_ids(child_id, session_id=current)
                 if not parent_ids:
                     parent_ids = engine._dag.get_parent_node_ids(child_id)
-            except Exception:
+            except Exception as exc:
                 logger.warning(
-                    "LCM reachability probe failed for node %s; treating it as unreachable",
+                    "LCM reachability probe failed for node %s; treating it as unresolved",
                     child_id, exc_info=True,
                 )
+                if status is not None:
+                    status["unresolved_reason"] = f"a parent read failed: {exc}"
                 return False
             for parent_id in parent_ids:
                 if parent_id in seen:
@@ -287,6 +338,8 @@ def _is_reachable_from_current_session(engine: "LCMEngine", node: Any, *,
                     return True
                 parents.append(parent_id)
         frontier = parents
+    if frontier and status is not None:
+        status["unresolved_reason"] = f"the reachability search reached its {max_hops}-hop bound"
     return False
 
 
@@ -5704,9 +5757,10 @@ def lcm_describe(args: Dict[str, Any], **kwargs) -> str:
     session_id = engine.current_session_id
 
     if node_id is not None:
-        node = _get_session_node(engine, node_id)
+        reach_status = {}
+        node = _get_session_node(engine, node_id, status=reach_status)
         if node is None:
-            return json.dumps({"error": f"Node {node_id} not found in current session"})
+            return _unresolved_node_error(engine, node_id, reach_status)
         info = engine._dag.describe_subtree(node_id)
         # fork: betterlcm — a truncated index block names THIS call as its continuation, so
         # this call has to be able to return the rest of it. It returned subtree metadata and
@@ -5949,9 +6003,10 @@ def lcm_expand(args: Dict[str, Any], **kwargs) -> str:
 
     node_id = raw_node_id_arg
 
-    node = _get_session_node(engine, node_id)
+    reach_status = {}
+    node = _get_session_node(engine, node_id, status=reach_status)
     if node is None:
-        return json.dumps({"error": f"Node {node_id} not found in current session"})
+        return _unresolved_node_error(engine, node_id, reach_status)
 
     if node.source_type == "messages":
         messages, pagination = _expand_message_sources(
