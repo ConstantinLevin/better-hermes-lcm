@@ -167,7 +167,17 @@ WINDOW_SCALED_DEFAULTS: tuple[Anchor, ...] = (
     # which is only correct for a fork that produces one leaf per call, and this one no longer
     # does at any window.
     Anchor("condense_group_cap", "condense_group_cap", 4, 16, cast=int, unset=0),
-    Anchor("summary_spend_max_calls", "summary_spend_max_calls", 24, 120, cast=int),
+    # Summariser spend guard: a sliding-window limiter counting CALLS. Upstream's 24 is
+    # calibrated for one whole-backlog call per compaction, so once the fork chunks, the same
+    # amount of work costs many small calls and the guard trips on its own design — a full drain
+    # could not finish, compaction stopped, and the backlog stayed raw. The unit is wrong for a
+    # chunked engine, so the anchors are set from what one drain actually needs:
+    # `4 * (leaf_pass_cap + condense_group_cap)`, i.e. four full drains inside one window.
+    #
+    # Measured in TOKENS — which is what "spend" means — this is more conservative than upstream
+    # at both anchors: 80 x 10.5k = 840k per window at 256k against upstream's 24 x ~85k = 2.0M,
+    # and 320 x 40k = 12.8M at 1M against upstream's 24 x ~700k = 16.8M.
+    Anchor("summary_spend_max_calls", "summary_spend_max_calls", 80, 320, cast=int),
     Anchor("summary_circuit_breaker_failure_threshold",
            "summary_circuit_breaker_failure_threshold", 2, 4, cast=int),
     Anchor("l2_budget_ratio", "l2_budget_ratio", 0.50, 0.80, cast=float),

@@ -43,13 +43,18 @@ def test_explicit_fresh_tail_count_is_not_curved(tmp_path):
 
 def test_guard_and_breaker_are_retuned_on_resolve(tmp_path):
     e = _engine(tmp_path)
+    # fork: betterlcm — the guard counts CALLS, and a chunked engine spends many small calls
+    # where upstream spent one big one, so upstream's 24 stopped a drain mid-way. Anchored to
+    # what one drain needs; in tokens it is below upstream's spend at both ends.
+    # before a window is known there is no chunk fraction to resolve, so compaction is still
+    # one call per pass and upstream's own call budget is the right one
     assert e._summary_spend_guard.max_calls == 24
     assert e._summary_circuit_breaker.failure_threshold == 2
     e._set_context_length(W1M, source="test")
-    assert e._summary_spend_guard.max_calls == 120
+    assert e._summary_spend_guard.max_calls == 320
     assert e._summary_circuit_breaker.failure_threshold == 4
     e._set_context_length(W256, source="test")
-    assert e._summary_spend_guard.max_calls == 24
+    assert e._summary_spend_guard.max_calls == 80
     assert e._summary_circuit_breaker.failure_threshold == 2
 
 

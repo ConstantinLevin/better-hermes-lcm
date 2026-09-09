@@ -22,7 +22,7 @@ LOW_ANCHOR_TUNING = {  # preferences: upstream's own values, because they are fi
     "leaf_loop_max_seconds": 120.0, "summary_timeout_ms": 60_000,
     "expansion_timeout_ms": 120_000,
     "sweep_target_tokens": 20_000, "incremental_max_depth": 3,
-    "summary_spend_max_calls": 24, "summary_circuit_breaker_failure_threshold": 2,
+    "summary_circuit_breaker_failure_threshold": 2,
     "l2_budget_ratio": 0.50, "stub_threshold_tokens": 25_000,
     "expansion_context_tokens": 32_000, "expand_page_tokens": 4_000,
     "tool_response_char_scale": 1.0, "sqlite_cache_kib": 2_048, "token_cache_size": 2_048,
@@ -44,6 +44,10 @@ LOW_ANCHOR_NOT_UPSTREAM = {  # quality/loss: deliberately NOT upstream's number
     "condense_group_cap": 4,
     # upstream: serial, because upstream has one chunk. This fork chunks at every window.
     "summary_concurrency": 6,
+    # upstream: 24 calls per window, calibrated for ONE whole-backlog call per compaction. A
+    # chunked engine spends many small calls for the same work, so upstream's number stopped a
+    # drain mid-way. Set from what one drain needs; in TOKENS it is below upstream's.
+    "summary_spend_max_calls": 80,
     # upstream: 3000 chars per message (head 2000 + tail 800), unmarked. That is truncation.
     "serialize_message_max_chars": 4 * W256,
 }
@@ -54,7 +58,7 @@ DESIGN_1M = {
     "fresh_tail_count": 400, "fresh_tail_max_tokens": 150_000, "condense_budget_tokens": 200_000,
     "sweep_target_tokens": 200_000, "incremental_max_depth": 5, "summary_concurrency": 6,
     "condense_group_cap": 16,
-    "summary_spend_max_calls": 120, "summary_circuit_breaker_failure_threshold": 4,
+    "summary_spend_max_calls": 320, "summary_circuit_breaker_failure_threshold": 4,
     "l2_budget_ratio": 0.80, "serialize_message_max_chars": 4_000_000,
     "stub_threshold_tokens": 100_000, "expansion_context_tokens": 125_000,
     "expand_page_tokens": 32_000, "tool_response_char_scale": 4.0,
@@ -128,7 +132,7 @@ def test_between_anchors_is_strictly_between(W):
     assert 0.0 < t < 1.0
     assert 0.35 < r["context_threshold"].value < 0.80
     assert 3 <= r["incremental_max_depth"].value <= 5
-    assert 24 < r["summary_spend_max_calls"].value < 120
+    assert 80 < r["summary_spend_max_calls"].value < 320
     # FLAT anchors are the quality/loss ones: the same fraction at both ends, so they slide with
     # the window but never with `t`. "Strictly between" does not apply to them, by design.
     assert r["leaf_chunk_tokens"].value == round(W * 0.04)
