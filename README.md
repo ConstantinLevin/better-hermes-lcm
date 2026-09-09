@@ -210,7 +210,7 @@ at 1M** — that is the whole problem. The fork matches it at 256k for everythin
 | **condensation trigger** | **every 4th leaf, whatever those leaves are worth** | **once the summary pile exceeds 20 % of the window (~52,000 tokens), oldest first** | **once the pile exceeds 20 % of the window (200,000 tokens), oldest first** |
 | DAG depth cap | 3 | 3 | 5 |
 | summariser / expansion timeouts, leaf-loop wall clock | 60 s / 120 s / 120 s | same as upstream | 200 s / 200 s / 200 s |
-| spend guard / breaker | 24 calls, 2 failures | same as upstream | 120 calls, 4 failures |
+| **summariser spend guard** / breaker | **24 calls per 10 min, 2 failures** | **80 calls, 2 failures** | **320 calls, 4 failures** — the guard counts CALLS, and chunking makes the same work cost many small ones; measured in TOKENS these are below upstream's spend at both ends |
 | `lcm_expand` page, tool response caps, SQLite/token caches | 4k tokens, ×1, 2 MiB / 2048 | same as upstream | 32k tokens, ×4, 64 MiB / 8192 |
 | **pre-summariser per-message cap** | **3000 chars (head 2000 + tail 800), unmarked** | **none — the cap is the whole window** | **none** |
 | **tool-call argument cap** | **500 chars → 400, unmarked** | **none — shares the message cap** | **none** |
