@@ -39,7 +39,83 @@ sync, lossless-claw watch) · **F** outstanding verification (strict superiority
 |---|---|---|
 | A8 | **Every rendered summary carries a "this is a summary" disclaimer**, on by default: it says the text is a summary, that it is not to be trusted for a load-bearing or path-dependent decision, and that the reader should expand (`lcm_expand`) until the specific thing is verified against the original. **Before implementing this, decide whether it belongs in the plugin at all**: a repeated per-summary disclaimer costs prompt tokens on every turn and models learn to skim boilerplate. The alternatives are a SKILL (recall/verification guidance the agent loads once) or an addition to the host's `SOUL.md` (a standing instruction about how to treat summarised history). Pick the placement first, with the reasoning written down; the config option is the fallback, not the assumption. If it does land in the plugin it is one line of policy text and a default-on flag, and it must be counted in the assembly budget like any other prefix content. | A summary is the one thing in the context that is *not* what was said. The fork guarantees the original is recoverable; it does not currently tell the reader to go and recover it before betting on the summary. |
 | A9 | **Tighten the summariser prompt so it can never claim more than its source states.** The prompt already demands coverage and forbids dropping topics; it does not explicitly forbid inference, extrapolation, resolution of ambiguity, or filling gaps with plausible detail. A summary that says "the migration succeeded" where the source said "the migration was started" is a fabricated fact with full provenance attached, which is worse than an omission because it looks verified. Wanted: an explicit no-inference instruction, hedged language preserved as hedged ("appears", "was going to"), unresolved things named as unresolved, and — because prompt claims are cheap — a fixture set that scores it. Depends on A1 (the prompt rewrite) and A2 (the measurement gate); do not tweak the current five-layer prompt in place. | This is the one failure mode no marker can catch: provenance is intact, the node is expandable, and the text is still wrong. |
-| A10 | **The condensation budget has no ceiling and grows with depth.** It is `max(1000, 0.40 × source)`, so at 1M it asks for 32,768 output tokens at depth 3, 52,429 at depth 4 and 83,886 at depth 5 — more than most summarisers can emit in one response. The fork refuses a truncated generation, so the failure is safe (no chopped node) but the DAG stalls at whatever depth the model can still write, which costs roughly 287M → 49M tokens of session capacity at 1M (see "Current limitations" in the README). Options: cap the request at the route's real output limit and condense in more, smaller groups; reduce the fanin as depth grows; or split a condensation into several parents at the same depth. Not a loss defect — a capacity one. | The published capacity of the fork depends on it, and the README currently has to state two numbers because of it. |
+| A10 | **The condensation budget rule is the wrong shape. Not just the number — the rule.** The full write-up is the "A10 in full" section immediately below; do not start this without reading it. | A summary of summaries that needs 83,886 tokens to describe itself is not a summary, and the fork's published session capacity depends on the answer. |
+
+### A10 in full — the condensation budget rule
+
+*Written out because it needs deciding, not implementing, and whoever picks it up will not have
+been in the conversation that found it.*
+
+**What condensation is.** A leaf is a summary written directly over raw messages. When several
+leaves accumulate, LCM merges a group of them into one parent summary at the next depth, then
+merges parents into grandparents, and so on. That is condensation, and it is what keeps the
+number of summaries rendered into the prompt from growing without bound. The group size is
+`condensation_fanin`, default **4** (`config.py:499`).
+
+**The rule as it stands.** When a group is merged, the parent is told how long it may be:
+
+```
+engine.py:6535
+token_budget = max(condensation_min_tokens,          # 1000   (config.py:887)
+                   source_tokens * condensation_ratio)  # 0.40 (config.py:886)
+```
+
+`source_tokens` is the summed length of the children. So a parent is allowed 40 % of its
+children's combined length. With fanin 4 that means **every level up multiplies a node's size by
+1.6** while multiplying its coverage by 4.
+
+**What that produces.** At a 1M window, with the leaf chunk at 4 % of the window and the leaf
+ratio 0.20:
+
+| depth | node size (tokens) | conversation it stands for |
+|---|---|---|
+| leaf | 8,000 | 40,000 |
+| 1 | 12,800 | 160,000 |
+| 2 | 20,480 | 640,000 |
+| 3 | 32,768 | 2,560,000 |
+| 4 | 52,429 | 10,240,000 |
+| 5 (the depth cap at 1M) | 83,886 | 40,960,000 |
+
+At 256k, where the depth cap is 3, the deepest node is 8,589 tokens standing for 671,104 —
+comfortable, which is why this bites at 1M and not at 256k.
+
+**Why the number is only a symptom.** `token_budget` is a request for *output* tokens. Most
+summarisers cannot emit 52,429 tokens in one response, let alone 83,886. This fork refuses a
+truncated generation rather than storing a chopped node (`escalation.py`), so the failure is
+safe — nothing corrupt is published — but condensation simply stops succeeding and the DAG
+stalls at whatever depth the model can still write. That costs roughly **287M → 49M tokens of
+session capacity at 1M** (see "Current limitations" in the README, which currently has to state
+two numbers because of this).
+
+**But the real objection is the rule itself.** A summary of summaries that needs 83,886 tokens
+to describe itself is not a summary. Asking for "40 % of whatever the children came to" says the
+parent's size should be driven by how much material happens to sit under it, when the thing that
+should actually be bounded is how much a reader has to take in to decide where to expand. A node
+is an index entry; index entries do not grow without limit.
+
+**Options, none chosen:**
+
+1. **Cap the request at the route's real output limit** and, when a group would exceed it,
+   condense it as several parents at the same depth instead of one. The tree gets *wider* rather
+   than the node getting bigger. This is the direction the conversation favoured: when there is
+   too much to describe, add siblings, do not inflate the node.
+2. **Make the parent budget a flat weight** (a fraction of the window, like the leaf chunk) so a
+   node's size never depends on its depth. Simple, but a parent then says proportionally less
+   about its children the deeper it sits, which may be exactly right — or may hollow out the
+   upper index.
+3. **Reduce the fanin as depth grows**, so deep groups are smaller. Keeps node sizes down without
+   changing the budget rule, but makes the DAG taller for the same history, and the depth cap is
+   what limits capacity in the first place.
+
+**Before deciding, get evidence rather than argue:** `coverage_doctor` already measures how much
+of a node's sources survives into its summary. Run it across the options at both windows and
+compare — the question "does a smaller parent still let a reader find the right child?" is
+measurable, and this is exactly the kind of choice that should not be settled by assertion.
+
+**Constraints that apply whatever is chosen:** a parent must still carry its children's loss
+receipts (`marked_loss.inherited_receipts`); acceptance still requires the parent be shorter than
+its sources; a condensation that cannot be done honestly must fail rather than publish a node
+that overstates its coverage.
 
 ### B. Correctness and operability (no known loss, but unproven or rough)
 
