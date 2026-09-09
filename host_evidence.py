@@ -280,7 +280,13 @@ def call_auxiliary_selector(
     content = response.choices[0].message.content
     if not isinstance(content, str):
         content = str(content) if content else ""
-    content = _REASONING_BLOCK_RE.sub("", content).strip()
+    # fork: betterlcm — see round-4 verify-4 #22: a payload that already parses is not touched
+    raw_content = content.strip()
+    try:
+        json.loads(raw_content)
+        content = raw_content
+    except Exception:
+        content = _REASONING_BLOCK_RE.sub("", content).strip()
     if content.startswith("```") and content.endswith("```"):
         content = re.sub(r"^```(?:json)?\s*|\s*```$", "", content, flags=re.IGNORECASE)
     proposal = json.loads(content)

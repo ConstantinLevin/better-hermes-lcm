@@ -7020,10 +7020,13 @@ class TestExtraction:
         ])
 
         assert "[Externalized tool output" not in serialized
-        assert "...[truncated]..." in serialized
+        # fork: betterlcm — upstream truncated the inline fallback to 3000 chars. This fork does
+        # not truncate at any window: with externalization off the whole body stays inline.
+        assert "...[truncated]..." not in serialized
+        assert content in serialized
         assert not (hermes_home / "lcm-large-outputs").exists()
 
-    def test_serialize_messages_falls_back_to_truncation_when_externalization_path_is_unwritable(self, tmp_path):
+    def test_serialize_messages_keeps_body_inline_when_externalization_path_is_unwritable(self, tmp_path):
         from hermes_lcm.config import LCMConfig
         from hermes_lcm.engine import LCMEngine
 
@@ -7048,7 +7051,10 @@ class TestExtraction:
         ])
 
         assert "[Externalized tool output" not in serialized
-        assert "...[truncated]..." in serialized
+        # fork: betterlcm — a failed externalization must not become a silent cut; the body
+        # stays inline and whole (see docs/fork-design.md, no-loss doctrine).
+        assert "...[truncated]..." not in serialized
+        assert content in serialized
 
     def test_serialize_messages_externalized_payloads_do_not_collide_for_same_second_same_tool_id(self, tmp_path, monkeypatch):
         from hermes_lcm.config import LCMConfig

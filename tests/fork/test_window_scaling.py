@@ -19,7 +19,11 @@ UPSTREAM = {  # what every anchor must resolve to at 256k with default config
     "fresh_tail_count": 32, "fresh_tail_max_tokens": W256, "condense_budget_tokens": 0,
     "sweep_target_tokens": 20_000, "incremental_max_depth": 3, "summary_concurrency": 1,
     "summary_spend_max_calls": 24, "summary_circuit_breaker_failure_threshold": 2,
-    "l2_budget_ratio": 0.50, "serialize_message_max_chars": 3000, "stub_threshold_tokens": 25_000,
+    # serialize_message_max_chars: upstream's literal is 3000 (head 2000 + tail 800, unmarked).
+    # That is TRUNCATION, and this fork removes truncation at EVERY window — the curve carries
+    # tuning values, not loss. Both endpoints are 4 chars/token of their own anchor window, a cap
+    # that cannot bind in practice. See docs/fork-design.md (no-loss doctrine).
+    "l2_budget_ratio": 0.50, "serialize_message_max_chars": 4 * W256, "stub_threshold_tokens": 25_000,
     "expansion_context_tokens": 32_000, "expand_page_tokens": 4_000,
     "tool_response_char_scale": 1.0, "sqlite_cache_kib": 2_048, "token_cache_size": 2_048,
 }

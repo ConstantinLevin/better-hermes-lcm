@@ -115,7 +115,7 @@ index quality. At 256k with default config the DAG must be identical to upstream
 | spend guard `max_calls` | 24 | 120 | tripping is a cooldown, never truncation |
 | breaker `failure_threshold` | 2 | 4 | |
 | `l2_budget_ratio` | 0.50 | 0.80 | |
-| serialized message cap (chars) | 3000 (2000+800); args 500->400 | whole message | marked elision whenever a cut still happens |
+| serialized message cap (chars) | whole window (4 chars/token = 1,048,576) | whole window (4,000,000) | NOT a truncation knob: upstream's 3000 (2000+800) / args 500->400 cut is removed at EVERY window. `0` = no cap. An explicit operator cap still cuts only through a sized, provenanced `[LCM elided …]` marker. |
 | stub threshold / expansion context (fraction of W) | 0.10 / 0.125 | same | constant fractions (=25k / 32k at 256k) |
 | `lcm_expand` page `max_tokens` | 4000 | 32000 | |
 | tool response char caps | 20k inspect/recent, 64k grep/recall | x4 | one weighted cap |
@@ -128,7 +128,7 @@ bypassed sessions (`bypass.py:159,205,402`); curving it would widen the host's b
 
 Worked values at 512k (t=0.34): threshold 0.50, drain stop 0.43, chunk 0.67*W (still whole
 backlog), passes 22, tail 157 msgs / 61k, condense when `count>=4 and frontier>21k`,
-depth 4, concurrency 3, guard 57, breaker 3, L2 0.60, serialize cap ~ (3000 + 0.34*(rest)).
+depth 4, concurrency 3, guard 57, breaker 3, L2 0.60, serialize cap 2,048,000 chars (never binds).
 
 ## Pure optimizations (every window)
 

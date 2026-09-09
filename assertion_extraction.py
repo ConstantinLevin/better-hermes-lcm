@@ -177,7 +177,15 @@ def _call_structured_assertion_llm(
     content = response.choices[0].message.content
     if not isinstance(content, str):
         content = str(content) if content else ""
-    content = _strip_reasoning_blocks(content).strip()
+    # fork: betterlcm — a JSON payload is parsed UNTOUCHED. Stripping reasoning blocks first
+    # rewrote a literal "A <think>evidence</think>B" inside the payload into "A B", changing
+    # the evidence before it was validated (round-4 verify-4 #22).
+    raw_content = content.strip()
+    try:
+        json.loads(raw_content)
+        content = raw_content
+    except Exception:
+        content = _strip_reasoning_blocks(content).strip()
     if not content:
         raise ValueError("structured assertion extractor returned no payload")
     usage = getattr(response, "usage", None)

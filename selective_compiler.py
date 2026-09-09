@@ -306,7 +306,11 @@ def call_selective_auxiliary_selector(
         raise ValueError(f"selector returned an unfinished generation ({unfinished})")
     content = response.choices[0].message.content
     text = str(content or "").strip()
-    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE).strip()
+    # fork: betterlcm — see round-4 verify-4 #22
+    try:
+        json.loads(text)
+    except Exception:
+        text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE).strip()
     if text.startswith("```") and text.endswith("```"):
         text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.IGNORECASE)
     proposal = json.loads(text)

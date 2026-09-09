@@ -102,10 +102,15 @@ WINDOW_SCALED_DEFAULTS: tuple[Anchor, ...] = (
     Anchor("summary_circuit_breaker_failure_threshold",
            "summary_circuit_breaker_failure_threshold", 2, 4, cast=int),
     Anchor("l2_budget_ratio", "l2_budget_ratio", 0.50, 0.80, cast=float),
-    # Pre-summariser per-message cap in chars: upstream 3000 (head 2000 + tail 800); at 1M
-    # effectively the whole message (4 chars/token * W).
-    Anchor("serialize_message_max_chars", "serialize_message_max_chars", 3000, 4.0,
-           high_is_fraction=True, cast=int, unset=0),
+    # Pre-summariser per-message cap in chars. Upstream cut every message to 3000 chars
+    # (head 2000 + tail 800), unmarked and unrecoverable. That is TRUNCATION, which this fork
+    # removes at EVERY window — the curve carries tuning values, not loss. Both endpoints are
+    # therefore the whole window (4 chars/token * W): ~1,048,576 chars at 256k, 4,000,000 at
+    # 1M. A message can never be larger than the window it arrived in, so the elision below
+    # never fires in practice; marked_loss.elide_text stays as the guard for a pathological
+    # input, and it marks what it cuts.
+    Anchor("serialize_message_max_chars", "serialize_message_max_chars", 4.0, 4.0,
+           low_is_fraction=True, high_is_fraction=True, cast=int, unset=0),
     Anchor("stub_threshold_tokens", "large_output_active_replay_stub_threshold_tokens",
            25_000, 100_000, cast=int),
     Anchor("expansion_context_tokens", "expansion_context_tokens", 32_000, 125_000, cast=int),

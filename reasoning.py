@@ -41,7 +41,10 @@ _MAX_DECIMAL_ABS = Decimal("1e308")
 # fork: betterlcm — a COMPLETE numeric lexeme. Without the boundaries, "1e3 USD" offered 1 and
 # 3 as explicit numbers and grounding accepted an operand worth 3 from a quote that says 1000
 # (round-3 verify-4 #19). A fragment of a number is not a number the quote states.
-_NUMBER_RE = re.compile(r"(?<!\w)(?<!\d\.)-?\d[\d,]*(?:\.\d+)?(?!\w)(?!\.\d)")
+_NUMBER_RE = re.compile(
+    # ... and not the exponent of a scientific literal: "1e-10" offered 10 (round-4 verify-4 #19)
+    r"(?<!\w)(?<!\d\.)(?<!\w-)-?\d[\d,]*(?:\.\d+)?(?!\w)(?!\.\d)"
+)
 _COMPUTATION_TRIGGER_RE = re.compile(
     r"\b(how many|how much|count|total|sum|difference|more than|less than|ago|"
     r"how long|since|between|before|after|last|latest|previous|earliest|first|"
@@ -1060,7 +1063,13 @@ def _format_number(value: int | float | Decimal) -> str:
     decimal_value = value if isinstance(value, Decimal) else Decimal(str(value))
     if decimal_value == decimal_value.to_integral_value():
         return str(int(decimal_value))
-    return format(round(decimal_value, 6), "f").rstrip("0").rstrip(".")
+    rendered = format(round(decimal_value, 6), "f").rstrip("0").rstrip(".")
+    # fork: betterlcm — display rounding must not turn a real quantity into a different one:
+    # 0.0000000001 rendered as "0", so the reader saw $0 for a nonzero cost
+    # (round-4 verify-4 #19). A value that rounds away keeps its exact form.
+    if Decimal(rendered or "0") != decimal_value:
+        return format(decimal_value, "f").rstrip("0").rstrip(".") or rendered
+    return rendered
 
 
 def _format_quantity(value: int | float | Decimal, unit: str | None) -> str:

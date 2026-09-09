@@ -282,7 +282,23 @@ Closed in this pass:
 | verify-4 #27 | a truncated generation is not a payload, in every structured adapter |
 | verify-5 #1/#4/#5 | cancellation-safe sidecar transactions, lossless trajectory ingestion, canonical-only verification |
 
-**Still open after this pass:** verify-4 #6's smallest case (a budget too small for even a
+### Eighth pass — no truncation at ANY window (user directive)
+
+The 256k anchor carries upstream's TUNING values only. It never carried upstream's LOSS: the
+no-truncation fixes and the optimizations apply at every window. Two places still cut content
+at 256k and no longer do:
+
+| what cut | now |
+|---|---|
+| `serialize_message_max_chars` | both curve endpoints are 4 chars/token of their own anchor window (1,048,576 at 256k, 4,000,000 at 1M), so the summariser sees whole messages at every window. `0` (no window known yet) means NO CAP — `engine.py` used to clamp that to 64 chars. An explicit operator cap is still honoured and still cuts only through a sized `[LCM elided …]` marker. |
+| externalization fallback | when externalization is disabled or its path is unwritable, upstream truncated the inline tool body to 3000 chars. The body now stays inline and whole. Two upstream tests (`test_lcm_core.py`) were rewritten to assert that. |
+
+Rejected in this pass: a completion-cue/negation gate on `_source_supports_assertion_value`
+(verify-4 #23). Every whitelist of completion verbs rejects real ones ("I submitted the
+report"), and a wrong rejection drops an assertion silently — that is loss too. Left open.
+
+**Still open after this pass:** verify-4 #23 (positive "completed" accepted from a negated
+source), verify-4 #6's smallest case (a budget too small for even a
 12-token receipt records the omission in `lcm_status` instead of the prefix — a deliberate
 trade-off, since making room would drop the caller's own latest message), #10's structured
 omission records (architectural), #26 adaptive finalisation staleness, and the verify-5 tail:

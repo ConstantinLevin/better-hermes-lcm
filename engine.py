@@ -5744,10 +5744,13 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         """Serialize messages into labeled text for the summarizer."""
         parts = []
         matched_tool_ids = _matched_tool_call_ids(messages)
-        # fork: betterlcm — per-message cap is window-weighted (3000 chars at 256k, the whole
-        # message at 1M) and every cut is marked with its size (marked_loss.elide_text).
-        serialize_cap = max(64, int(self.effective_serialize_message_max_chars or 0))
-        args_cap = max(16, serialize_cap // 6)
+        # fork: betterlcm — 0 means NO CAP, not "cap at 64". Upstream cut every message to
+        # 3000 chars; this fork does not truncate at any window, and an engine that has not
+        # learned its window yet must not fall back to a tiny cap either (the curve's value is
+        # the whole window: ~1,048,576 chars at 256k, 4,000,000 at 1M). elide_text/elide_args
+        # treat a cap of 0 as "return the text unchanged".
+        serialize_cap = max(0, int(self.effective_serialize_message_max_chars or 0))
+        args_cap = (serialize_cap // 6) if serialize_cap else 0
         for msg in messages:
             role = msg.get("role", "unknown")
             content = redact_sensitive_value(

@@ -47,24 +47,28 @@ def _engine(tmp_path, name="lcm.db", **kw):
 
 # ── serialize ──────────────────────────────────────────────────────────────────────────────
 
-def test_serialize_at_256k_matches_upstream_literals(tmp_path):
+def test_serialize_at_256k_does_not_truncate(tmp_path):
+    """Upstream cut every message to 3000 chars at 256k. This fork does not cut at any window."""
     e = _engine(tmp_path)
     try:
         e._set_context_length(262_144, source="test")
         content = "u" * 5000
         serialized = e._serialize_messages([{"role": "user", "content": content}])
-        # upstream: head 2000 + "...[truncated]..." + tail 800
-        assert serialized.startswith("[USER]: " + "u" * 2000 + "\n...[truncated]...")
-        assert serialized.endswith("u" * 800)
-        assert "u" * 2001 not in serialized
+        assert content in serialized
+        assert "...[truncated]..." not in serialized
+        assert "[LCM elided" not in serialized
+        # the cap is the whole window in chars, so it cannot bind on a real message
+        assert int(e.effective_serialize_message_max_chars) == 4 * 262_144
     finally:
         e.shutdown()
 
 
 def test_serialize_marks_elision_with_sizes(tmp_path):
+    """An operator who sets an explicit cap still gets a marked, recoverable cut, never a silent one."""
     e = _engine(tmp_path)
     try:
         e._set_context_length(262_144, source="test")
+        e._config.serialize_message_max_chars = 3000
         serialized = e._serialize_messages([{"role": "user", "content": "x" * 5000}])
         assert "[LCM elided 2200 of 5000 chars before summarising" in serialized
         assert "lcm_expand" in serialized
@@ -126,6 +130,8 @@ def test_serialize_keeps_unmatched_tool_calls_marked(tmp_path):
 def test_serialize_marks_argument_elision(tmp_path):
     e = _engine(tmp_path)
     try:
+        # an explicit operator cap; the curve's own value is the whole window and never binds
+        e._config.serialize_message_max_chars = 3000
         args = "{\"command\": \"" + "a" * 2000 + "\"}"
         serialized = e._serialize_messages([
             {"role": "assistant", "content": "run", "tool_calls": [
