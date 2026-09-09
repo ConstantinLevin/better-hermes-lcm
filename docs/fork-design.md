@@ -131,6 +131,44 @@ Worked values at 512k (t=0.34): threshold 0.50, drain stop 0.30 (153,600), chunk
 102,400, groups per call 8, depth 4, concurrency 6, guard 57, breaker 3, L2 0.60, serialize cap
 2,048,000 chars (never binds).
 
+## Every anchor, classified: preference or quality?
+
+The question that must be asked of each value, and the answer recorded, so nobody re-adopts an
+upstream number by reflex. **Upstream is the floor — never worse than it — not the target.**
+
+A value is a **preference** when it trades cost, latency or headroom and upstream's choice is as
+good as any other. It is **quality/loss** when it decides how much is lost, how coarse the index
+is, or whether bounded work can finish. Preferences may be anchored to upstream at 256k;
+quality values are decided on merit and are usually the *same fraction* at both ends.
+
+| anchor | class | why |
+|---|---|---|
+| `context_threshold` 0.35 → 0.80 | preference | a genuine cost/verbatim tradeoff: a fuller prompt costs more per request, an emptier one summarises sooner. Upstream's 0.35 is conservative, not wrong |
+| `leaf_chunk_tokens` **0.04 flat** | **quality** | the granularity of the index and the size of the unit `lcm_expand` returns |
+| `leaf_pass_cap` 16 → 64 | **quality** (was blocking) | 1 meant a chunked backlog could never drain; now a safety limit, never what stops the loop |
+| `drain_stop_fraction` **0.30 flat** | **quality** (was blocking) | "stop once under the threshold" is upstream's rule for a one-pass loop |
+| `fresh_tail_max_tokens` **0.15 flat**, `fresh_tail_count` 400 flat | **quality** | how much stays verbatim; 32 messages protects an amount that depends on how long the messages are |
+| `condense_budget_tokens` **0.20 flat** | **quality** | a count rule coarsens the frontier before there is pressure to |
+| `condense_group_cap` 4 → 16 | **quality** | `leaf_pass_cap / fanin`: condensation must absorb what one compaction publishes |
+| `summary_concurrency` **6 flat** | **quality** (throughput) | upstream is serial because upstream has one chunk; bounded by pending chunks, sequential persist |
+| `summary_spend_max_calls` 80 → 320 | **quality** (was blocking) | the guard counts CALLS and chunking makes the same work cost many small ones; in TOKENS the new values are below upstream's |
+| `serialize_message_max_chars` 4·W flat | **loss** | upstream's 3000-char cut is truncation |
+| `leaf_loop_max_seconds`, `summary_timeout_ms`, `expansion_timeout_ms` | preference | per-call and per-loop budgets; the chunk scales with W, so the work per call does too |
+| `incremental_max_depth` 3 → 5 | preference | how tall the index may get before it stops deepening |
+| `summary_circuit_breaker_failure_threshold` 2 → 4 | preference | failure tolerance |
+| `l2_budget_ratio` 0.50 → 0.80 | preference | L2 is the *fallback* route and asks for something terser on purpose; a higher ratio makes the retry less different from the attempt that failed |
+| `stub_threshold_tokens`, `expansion_context_tokens`, `expand_page_tokens`, `tool_response_char_scale` | preference | paging and stubbing budgets; every cut on these paths is marked and carries a continuation |
+| `sweep_target_tokens` | preference | only reachable with the sweep flag, which is off by default |
+| `sqlite_cache_kib`, `token_cache_size` | preference | pure performance, no behavioural effect |
+
+Non-anchored `config.py` defaults were checked the same way. The one finding was
+`leaf_chunk_tokens` (upstream's 20,000), which is a *floor* — "do not compact a backlog smaller
+than this" — and therefore an absolute token count in a design where the chunk slides. It is now
+lowered to one chunk, while an operator who sets a smaller floor keeps that control. The
+remaining size-ish defaults are either opt-in-subsystem settings (embeddings, rollups,
+assertions), marked-and-continued caps (`assembly_max_nodes_per_depth`, `recall_scan_rows`), or
+floors that only bind on tiny inputs (`leaf_summary_min_tokens`, `condensation_min_tokens`).
+
 ## Pure optimizations (every window)
 
 ### A. No silent loss — and no turn-killing
