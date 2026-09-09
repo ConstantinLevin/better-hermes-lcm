@@ -6,6 +6,10 @@ Read this before touching anything. Then [`FORK.md`](FORK.md) (the maintenance c
 
 **Do not write anything down that is not code, the README, this file, or the backlog.** No design docs, no pass logs, no notes-to-self. A finding is implemented, in the backlog, or nonsense.
 
+**Answer from the code, never from a document — this one and the backlog included.** Every claim about behaviour carries a `file:line` you opened this turn. "I have not read that yet" is a complete answer.
+
+**A finding stands until it is refuted, not until someone sounds annoyed.**
+
 ## Why the fork exists — three goals, in priority order
 
 **a) Opinionated hatred of loss and truncation.** This is the top-priority rule and it overrides convenience, elegance and upstream fidelity. Concretely:
@@ -83,20 +87,27 @@ A green suite is a **regression guard**, not evidence. Evidence is end-to-end be
 bash scripts/test.sh                          # full suite; umask 077 matters (SQLite refuses group-writable dirs)
 bash scripts/test.sh tests/fork/test_x.py     # one file
 
-# the executable form of the no-loss doctrine, run against the DEPLOYED plugin:
+# the executable form of the no-loss doctrine — runs THIS checkout, no installation needed:
 python3 scripts/e2e_no_loss.py 262144 400
 python3 scripts/e2e_no_loss.py 1000000 3000
 ```
 
 Both anchors must report **0 unreachable rows, 0 missing facts, 0 facts never offered to the summariser**. A change that cannot produce those numbers is not finished.
 
+But they stub the summariser (`fake_summary`, `scripts/e2e_no_loss.py:118`), so they say nothing about summary quality or route limits. The stub emits ~600 tokens where a real leaf emits 8,000, so the frontier never crosses the condensation gate and **both anchors end at `depths [0]`** — condensation never runs. Depth ≥ 1 is verifiable by reading, not by these runs. Padding the stub would only test the stub.
+
 ## The working loop
 
 1. Fix a batch → full suite green → commit.
-2. Redeploy: `~/.hermes/plugins/hermes-lcm` is a clone of this repo (remote `fork`); `git fetch fork better-hermeslcm && git reset --hard FETCH_HEAD`.
-3. Re-pin the deployed revision in `~/.hermes/plugins/.install-metadata.json` (it is pinned so `hermes plugins update` refuses to replace it).
-4. Re-run **both** e2e anchors against the deployed plugin.
-5. Record the pass in `docs/TASKS.md`.
+2. Re-run **both** e2e anchors. They run this checkout; nothing has to be installed.
+
+> **The installed version is the latest RELEASE, never a working commit.** `~/.hermes` is the
+> owner's running system, not a test bed. Do not push development commits into it: no
+> `git reset --hard` in `~/.hermes/plugins/hermes-lcm`, no edit of `.install-metadata.json`,
+> no change to `~/.hermes/config.yaml`. An installation happens when there is a release to
+> install, and it installs that release. If something genuinely has to be verified against an
+> installation, point `LCM_E2E_PLUGIN_DIR` at it — that checks what is running, it does not
+> change it.
 
 Audits (Codex astra, prompts in `docs/claw-comparison/prompts/`) want a **stable tree** — do not commit while a round is running.
 

@@ -1,4 +1,4 @@
-"""End-to-end no-loss exercise against the DEPLOYED better-hermeslcm plugin.
+"""End-to-end no-loss exercise for better-hermeslcm.
 
 Not a unit test: it drives the engine the way the host does — feeding compress()'s own return
 value back as the next turn's context — over a long, tool-heavy conversation, then checks the
@@ -8,9 +8,11 @@ property the fork exists for:
     published summary node (directly, or through condensation), and every distinctive fact is
     mentioned by whatever covers it.
 
-It runs against whatever is INSTALLED at ~/.hermes/plugins/hermes-lcm, on the host's own
-interpreter — which is how it caught a crash in the parallel leaf pipeline (a CPython 3.14
-private-API change) that 3,200 unit tests could not see.
+It runs THIS CHECKOUT against the host's own interpreter and the host's own agent modules —
+which is how it caught a crash in the parallel leaf pipeline (a CPython 3.14 private-API
+change) that 3,200 unit tests could not see. It does not need, and must not require, the
+plugin to be installed: set LCM_E2E_PLUGIN_DIR to point it somewhere else (for instance at an
+actual installation, when checking what an operator is really running).
 
 Usage: scripts/e2e_no_loss.py <window_tokens> <turns>
        scripts/e2e_no_loss.py 262144 400      # low anchor, two compactions
@@ -22,8 +24,10 @@ import re
 import sys
 import json
 
-PLUGIN = "/home/agent/.hermes/plugins/hermes-lcm"
-sys.path.insert(0, "/home/agent/.hermes/hermes-agent")
+PLUGIN = os.environ.get("LCM_E2E_PLUGIN_DIR") or os.path.dirname(
+    os.path.dirname(os.path.abspath(__file__))
+)
+sys.path.insert(0, os.path.expanduser(os.environ.get("HERMES_HOME", "~/.hermes")) + "/hermes-agent")
 spec = importlib.util.spec_from_file_location(
     "hermes_lcm", f"{PLUGIN}/__init__.py", submodule_search_locations=[PLUGIN]
 )
