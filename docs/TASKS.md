@@ -590,57 +590,38 @@ is what those rounds left unfixed; it is the backlog, not a pointer to one.
 Tracked as tasks #1-#12 in this session's task list; the ~375 ranked findings across the nine
 partition reports are not yet individually triaged.
 
-## Phase 0 — the summariser prompt, designed this time
-| id | task | acceptance | status |
-|---|---|---|---|
-| P0.1 | Write `docs/prompt-design.md`: what a reader needs from a summary to choose what to expand; failure modes seen (dropped topics, focus skew, cut-off endings, process-detail loss at depth); one coherent instruction per depth (leaf / merge of children / deep merge); how length, chronology, focus and custom instructions interact; what stays in the untrusted-data wrapper | you have read and agreed the design | proposed |
-| P0.2 | Replace the five-layer patchwork in `escalation.py` with the designed prompt (single fork module `summary_prompts.py`; upstream tests that pin old substrings re-pointed and listed in touchpoints) | prompt text == design; no contradiction remains (no "or drop", no 60–70 % skew) | proposed |
-| P0.3 | Measurement: drill-down evaluation (real model, rendered prefix → does it pick the right node), plus coverage doctor with a "no evidence" state | numbers on a fixture set at 256k and 1M before/after P0.2 | proposed |
+## The original phase plan — reconciled, not carried forward
 
-## Phase 1 — the index must never lie (correctness)
-| id | task | acceptance | status |
-|---|---|---|---|
-| T1.1 | A1: carried-over nodes expand through their children across the session boundary (root authorised, descendants followed by edge; archive scope; cross-session payload hydration) | connected d2→d1→d0 DAG, retain 2/-1, repeated `/new`, restart: every level expands; unrelated sessions still refused | proposed |
-| T1.2 | B1: provider generation limit — large window-weighted `max_tokens`; `finish_reason` `length`/`incomplete` ⇒ re-ask with more room, never stored; exhausted ⇒ `SummaryUnavailableError` | injected `finish_reason="length"` never yields a node; healthy responses unchanged | proposed |
-| T1.3 | B2 + A2: atomic publication — node + sidecar + frontier in one transaction; rotate writes marker and frontier together or nothing | fault injection after every write step leaves a consistent DB | proposed |
-| T1.4 | B9: search failure ≠ empty result — partial/error outcome reported to the agent | store error ⇒ structured failure, hits preserved | proposed |
-| T1.5 | A4 + B18: structural provenance audit separate from semantic coverage; zero evidence never passes; orphan check covers node-sourced nodes, unbounded | node with missing child ⇒ fail | proposed |
+The fork was planned as Phases 0-5 with ~25 numbered tasks, every one marked "proposed". Most
+were implemented over the passes above and the statuses were never updated, so the block had
+become a second backlog disagreeing with the first. Keeping two lists is the disorder this file
+exists to prevent, so the plan is reconciled here and deleted.
 
-## Phase 2 — small contract fixes
-| id | task | acceptance | status |
-|---|---|---|---|
-| T2.1 | B10 LIKE fallback orders before limiting | newest match returned for `sort=recency` | proposed |
-| T2.2 | B11 `describe(node_id)` returns own summary + index block, paged | known node readable without expansion | proposed |
-| T2.3 | B3 sanitiser: keep inline literal tags, strip trailing standalone reasoning | claw's fixtures pass | proposed |
-| T2.4 | A5 + B22 docs/skill/defaults synchronised from `ENV_FIELD_SPECS` + anchors; operator guide's 1M advice replaced | checker passes; no "0.35 at 1M" text | proposed |
-| T2.5 | A6 CI on `better-hermeslcm`; host-integration lane fails (not skips) on host import failure | workflow runs on the fork branch | proposed |
-| T2.6 | B21 transcript GC: exact-original equality before any rewrite | sanitised-only match ⇒ no rewrite | proposed |
+**Implemented** (confirmed in the code, not in a status column): T1.1 carried-over nodes expand
+through their children (`tools._authorized_child_node`); T1.2 the provider generation limit
+(`escalation` refuses a truncated generation); T1.3 atomic publication (`dag.add_node_with_meta`
+plus the publication fence); T1.4 search failure is not an empty result (`search_failures`);
+T1.5 the structural provenance audit and an unbounded orphan/frontier query
+(`dag.get_frontier_nodes`); T2.1 the LIKE fallback orders before limiting; T2.2 `lcm_describe`
+returns its own summary, paged (`summary_offset`); T3.2 condensation is reachable without a leaf
+pass; T3.3 one deadline through every route; T3.4 the frontier query in SQL; T3.6 the escaped
+historical-data boundary (`prompt_boundary`).
 
-## Phase 3 — engine/summariser quality
-| id | task | acceptance | status |
-|---|---|---|---|
-| T3.1 | B4 timestamps + child provenance in summariser input and headers (observed vs ingested time kept distinct) | superseded-decision fixture summarised chronologically | proposed |
-| T3.2 | B5 condensation reachable without a leaf pass under summary-side pressure | interrupted-sweep fixture drains via `compress()` | proposed |
-| T3.3 | B6 one deadline through serial/lookahead/fallbacks/L2/condensation; bounded future waits | never-resolving future ⇒ partial publish + cooldown within budget | proposed |
-| T3.4 | B7 frontier query in SQL (no 100k truncation) | >100k-node fixture selects real frontier | proposed |
-| T3.5 | B8 condensation input bounded by tokens (window-weighted), oldest-first kept | 4×12k children never one 48k request | proposed |
-| T3.6 | B14 escaped historical-data boundary around rendered summaries + policy line | fake headers/closers inert; replay recognition intact | proposed |
+**Still open, folded into the sections above**: P0.1-P0.3 are A1 and A2 (the summariser prompt
+design and the index-navigation gate); T2.4 is B6 (docs generated from the specs so they cannot
+drift); T2.5 is B5 (CI on the fork branch).
 
-## Phase 4 — I/O and operability at scale
-| id | task | status |
-|---|---|---|
-| T4.1 | B12 page-bounded expansion I/O | proposed |
-| T4.2 | B16 payload catalog instead of 240-char head | proposed |
-| T4.3 | B19 FTS optional at bootstrap | proposed |
-| T4.4 | B20 read-only operator entry point without engine startup | proposed |
-| T4.5 | B23 running-total prefix selection (only with a cap) | proposed |
+**Still open and NOT yet folded in** — carried here because each still needs a decision before
+it is worth a backlog entry, and none is a loss defect:
 
-## Phase 5 — the large ones
-| id | task | status |
-|---|---|---|
-| T5.1 | B13 durable prepare-then-publish pipeline (biggest 1M win) | proposed |
-| T5.2 | B17 repair of degraded historical summaries from sources | proposed |
-| T5.3 | B15 evaluation harness maintained as the standing quality gate (feeds P0.3) | proposed |
+| id | task |
+|---|---|
+| T2.3 | Sanitiser: keep inline literal `<think>` tags in quoted text, strip only trailing standalone reasoning. The current rule strips both; a quoted example in a code block can lose its tags. |
+| T2.6 | Transcript GC must compare exact original text before any rewrite (a sanitised-only match must not trigger one). The GC is opt-in (`large_output_transcript_gc_enabled`). |
+| T3.1 | Timestamps and child provenance in summariser input and node headers, with observed time kept distinct from ingested time. |
+| T3.5 | Condensation input bounded by tokens as well as by group count, oldest-first — four 12k children should not become one 48k request. |
+| T4.1-T4.5 | Page-bounded expansion I/O; a payload catalog instead of the 240-char head; FTS optional at bootstrap; a read-only operator entry point that does not start an engine; running-total prefix selection. |
+| T5.1-T5.3 | A durable prepare-then-publish pipeline (the biggest 1M win); repair of degraded historical summaries from their sources; the evaluation harness as a standing quality gate (feeds A2). |
 
 ## Process rules (so this list stays honest)
 - Every task gets an adversarial check ("how can the index still lie after this?"), not a plan-conformance check.
