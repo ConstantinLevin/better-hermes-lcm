@@ -3744,6 +3744,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         depth_cap_hits: list[int],
         omitted_tail_messages: int,
         dropped_internal_turns: int = 0,
+        redacted_internal_turns: int = 0,
     ) -> str:
         """fork: betterlcm — see marked_loss.assembly_omission_marker."""
         if (
@@ -3751,6 +3752,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
             and not depth_cap_hits
             and not omitted_tail_messages
             and not dropped_internal_turns
+            and not redacted_internal_turns
         ):
             return ""
         return marked_loss.assembly_omission_marker(
@@ -3758,6 +3760,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
             depth_cap_hits=depth_cap_hits,
             omitted_tail_messages=omitted_tail_messages,
             dropped_internal_turns=dropped_internal_turns,
+            redacted_internal_turns=redacted_internal_turns,
         )
 
     def _purge_embeddings_for_nodes(
@@ -6697,11 +6700,21 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
             1 for message in tail_selected
             if isinstance(message, dict) and _should_drop_active_assistant_message(message)
         )
+        # fork: betterlcm — a turn can be PARTLY internal: its visible text is replayed while
+        # a <think> block is not. Counting only whole dropped turns left that removal unnamed
+        # (round-2 verify-4 #16).
+        redacted_internal_turns = sum(
+            1 for message in tail_selected
+            if isinstance(message, dict)
+            and not _should_drop_active_assistant_message(message)
+            and _clean_active_assistant_message(message) is not message
+        )
         omission_marker = self._assembly_omission_marker(
             omitted_node_ids=omitted_node_ids,
             depth_cap_hits=depth_cap_hits,
             omitted_tail_messages=omitted_tail_messages,
             dropped_internal_turns=dropped_internal_turns,
+            redacted_internal_turns=redacted_internal_turns,
         )
         if omission_marker:
             # fork: betterlcm — the receipt is INDIVISIBLE: rather than dropping the one part
@@ -6724,6 +6737,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                         depth_cap_hits=depth_cap_hits,
                         omitted_tail_messages=omitted_tail_messages,
                         dropped_internal_turns=dropped_internal_turns,
+                        redacted_internal_turns=redacted_internal_turns,
                     )
                     if compact_marker and _fits(selected_parts[:-1] + [compact_marker]):
                         selected_parts[-1] = compact_marker

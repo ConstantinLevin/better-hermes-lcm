@@ -146,15 +146,24 @@ def _sanitize_string_media(text: str) -> str:
     if not _MEDIA_DATA_URI_RE.search(text):
         return text
 
+    # fork: betterlcm — how MANY attachments, not merely "some": two inline data URIs in one
+    # string collapsed into a single indication, so the summariser could not tell one image
+    # from six (round-2 verify-4 #15).
+    media_count = len(_MEDIA_DATA_URI_RE.findall(text))
     without_media = _MEDIA_DATA_URI_RE.sub("", text)
     without_media = without_media.strip()
     without_media = re.sub(r"\n{3,}", "\n\n", without_media)
 
+    marker = _MEDIA_ATTACHMENT_MARKER
+    suffix = _MEDIA_ATTACHMENT_SUFFIX
+    if media_count > 1:
+        marker = f"{_MEDIA_ATTACHMENT_MARKER[:-1]} ×{media_count}]"
+        suffix = f"{_MEDIA_ATTACHMENT_SUFFIX[:-1]} ×{media_count}]"
     if not without_media:
-        return _MEDIA_ATTACHMENT_MARKER
+        return marker
     if _MEDIA_ATTACHMENT_SUFFIX in without_media:
         return without_media
-    return f"{without_media}\n{_MEDIA_ATTACHMENT_SUFFIX}"
+    return f"{without_media}\n{suffix}"
 
 
 def _looks_like_media_block(block_type: str, block: Dict[str, Any]) -> bool:
@@ -395,6 +404,18 @@ def _injection_marker(removed: str, mark: bool, compact: bool = False) -> str:
     return marked_loss.injected_context_marker(len(removed))
 
 
+def _mark_header_removal(text: str, mark: bool, compact: bool) -> str:
+    """fork: betterlcm — the untrusted-context header is removed WITH a receipt when asked.
+
+    The header-removal branches ignored ``mark=True``, so one removal shape in this function
+    left no trace while every other one did (round-2 verify-4 #15).
+    """
+    def _replace(match: "re.Match[str]") -> str:
+        return _injection_marker(match.group(0), mark, compact)
+
+    return _UNTRUSTED_CONTEXT_HEADER_RE.sub(_replace, text)
+
+
 def strip_injected_context_blocks(text: str, *, mark: bool = False, compact: bool = False) -> str:
     """Remove transient memory/context blocks before compaction summarization.
 
@@ -407,7 +428,7 @@ def strip_injected_context_blocks(text: str, *, mark: bool = False, compact: boo
     cleaned = text
     changed = False
     if "<" not in text:
-        cleaned = _UNTRUSTED_CONTEXT_HEADER_RE.sub("", text)
+        cleaned = _mark_header_removal(text, mark, compact)
         changed = cleaned != text
         return cleaned.strip() if changed else cleaned
 
@@ -442,8 +463,13 @@ def strip_injected_context_blocks(text: str, *, mark: bool = False, compact: boo
                     removed = cleaned[opener.start():]
                     cleaned = cleaned[: opener.start()] + _injection_marker(removed, mark, compact)
                 else:
+                    # fork: betterlcm — an unmatched INLINE opening tag carries its content in
+                    # its attributes just as a self-closing one does; dropping it unmarked lost
+                    # that text silently (round-2 verify-4 #15).
                     removed = cleaned[opener.start():opener.end()]
-                    cleaned = cleaned[: opener.start()] + cleaned[opener.end() :]
+                    cleaned = (cleaned[: opener.start()]
+                               + _injection_marker(removed, mark, compact)
+                               + cleaned[opener.end():])
                 changed = True
                 continue
             removed = cleaned[opener.start():closer.end()]
@@ -452,7 +478,7 @@ def strip_injected_context_blocks(text: str, *, mark: bool = False, compact: boo
             changed = True
 
     before_header = cleaned
-    cleaned = _UNTRUSTED_CONTEXT_HEADER_RE.sub("", cleaned)
+    cleaned = _mark_header_removal(cleaned, mark, compact)
     changed = changed or cleaned != before_header
     return cleaned.strip() if changed else cleaned
 

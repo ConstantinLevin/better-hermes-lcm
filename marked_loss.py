@@ -390,6 +390,7 @@ def compact_assembly_omission_marker(
     depth_cap_hits: List[int],
     omitted_tail_messages: int,
     dropped_internal_turns: int = 0,
+    redacted_internal_turns: int = 0,
 ) -> str:
     """The one-line form, for a summary budget that cannot hold the full receipt.
 
@@ -406,6 +407,8 @@ def compact_assembly_omission_marker(
         counts.append(f"{omitted_tail_messages} tail message(s)")
     if dropped_internal_turns:
         counts.append(f"{dropped_internal_turns} internal-only turn(s)")
+    if redacted_internal_turns:
+        counts.append(f"{redacted_internal_turns} turn(s) with internal content removed")
     if not counts:
         return ""
     return (
@@ -421,6 +424,7 @@ def assembly_omission_marker(
     depth_cap_hits: List[int],
     omitted_tail_messages: int,
     dropped_internal_turns: int = 0,
+    redacted_internal_turns: int = 0,
 ) -> str:
     """One prefix part naming what the assembly budget/caps left out of this turn's context."""
     lines = [ASSEMBLY_OMISSION_MARKER_HEADER]
@@ -448,5 +452,14 @@ def assembly_omission_marker(
         lines.append(
             f"- {dropped_internal_turns} assistant turn(s) held only internal/reasoning content "
             "and are not replayed; the stored rows are unchanged (lcm_recent / lcm_expand)"
+        )
+    if redacted_internal_turns:
+        # fork: betterlcm — a turn can be PARTLY internal: the visible text is replayed and the
+        # reasoning block is not. Only whole dropped turns were counted, so a turn that lost a
+        # decision written inside <think> left no trace at all (round-2 verify-4 #16).
+        lines.append(
+            f"- {redacted_internal_turns} replayed assistant turn(s) had internal/reasoning "
+            "content removed from the replay; the stored rows are unchanged "
+            "(lcm_recent / lcm_expand)"
         )
     return "\n".join(lines)

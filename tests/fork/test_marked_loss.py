@@ -1435,3 +1435,23 @@ def test_rotate_covers_the_whole_span_or_does_not_advance(tmp_path, monkeypatch)
         assert e._lifecycle.get_by_conversation("live").current_frontier_store_id == e2_before
     finally:
         e.shutdown()
+
+
+def test_a_partly_internal_turn_is_named_in_the_assembly_receipt(tmp_path):
+    """round-2 verify-4 #16: a turn whose <think> block was removed from the replay while its
+    visible text stayed left no trace — only WHOLE internal-only turns were counted, so a
+    decision written inside the reasoning block vanished from the replayed context silently."""
+    e = _engine(tmp_path, "internal.db", incremental_max_depth=0)
+    try:
+        e.on_session_start("it", platform="cli", context_length=200_000)
+        assembled = e._assemble_context(None, [
+            {"role": "user", "content": "go"},
+            {"role": "assistant", "content": "<think>DECISION: cancel</think>Visible answer"},
+            {"role": "user", "content": "and now?"},
+        ])
+        rendered = "\n".join(str(m.get("content") or "") for m in assembled)
+        assert "Visible answer" in rendered
+        assert "DECISION: cancel" not in rendered, "internal content must not reach the provider"
+        assert "internal/reasoning content removed from the replay" in rendered, rendered
+    finally:
+        e.shutdown()
