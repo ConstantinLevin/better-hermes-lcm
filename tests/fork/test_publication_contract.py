@@ -303,3 +303,34 @@ def test_the_store_keeps_the_whole_host_envelope(tmp_path):
         assert store.get(ids[1])["envelope"] == {"message_id": "m-7"}
     finally:
         store.close()
+
+
+def test_an_edited_message_with_a_host_id_is_archived_as_a_revision(tmp_path):
+    """round-2 verify-4 #5: ingesting [user: ORIGINAL] and then [user: CORRECTED] left only
+    ORIGINAL in SQLite — the cursor treats the second snapshot as containing nothing new, so a
+    correction the host made to an already-stored message reached the plugin and vanished."""
+    cfg = LCMConfig(database_path=str(tmp_path / "revision.db"))
+    e = LCMEngine(config=cfg, hermes_home=str(tmp_path))
+    try:
+        e.on_session_start("rev", platform="cli", context_length=200_000)
+        e._ingest_messages([{"role": "user", "content": "ORIGINAL", "message_id": "m1"}])
+        e._store.commit()
+        e._ingest_messages([{"role": "user", "content": "CORRECTED", "message_id": "m1"}])
+        e._store.commit()
+
+        contents = [str(row.get("content") or "")
+                    for row in e._store.get_session_messages("rev")]
+        assert "ORIGINAL" in contents, "the superseded version stays in the archive"
+        assert "CORRECTED" in contents, "the correction was lost"
+        revision = next(row for row in e._store.get_session_messages("rev")
+                        if str(row.get("content")) == "CORRECTED")
+        assert revision["envelope"]["lcm_supersedes_store_id"] > 0
+        assert "already stored" in revision["envelope"]["lcm_revision_reason"]
+
+        # an unchanged snapshot stores nothing new
+        before = len(e._store.get_session_messages("rev"))
+        e._ingest_messages([{"role": "user", "content": "CORRECTED", "message_id": "m1"}])
+        e._store.commit()
+        assert len(e._store.get_session_messages("rev")) == before
+    finally:
+        e.shutdown()

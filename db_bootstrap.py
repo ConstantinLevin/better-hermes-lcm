@@ -304,6 +304,7 @@ _V5_CORE_OPTIONAL_COLUMNS: dict[str, frozenset[str]] = {
     # does not read it, so its presence must not classify the database as newer.
     "messages": frozenset({
         "ingested_at", "observed_at", "observed_at_source", "envelope_extra",
+        "host_message_id",
     }),
 }
 

@@ -230,8 +230,11 @@ without a new subsystem is closed; each has a fork test that fails on the previo
 | #38 | an empty extraction response meant "nothing to extract" | only the explicit answer does; the note names its complete span |
 | #39 | rotation advanced past what its capped marker read | the span is paged; a failed page keeps the frontier where it is |
 
-**Still open from this round:** #5 (corrections to already-ingested positions — needs occurrence
-identity, and the cursor-side heuristic was reverted for producing duplicates), #7–#12 and
+**Still open from this round:** #5 is now CLOSED for hosts that give their messages stable ids
+(the correction is archived as a new row naming the row it supersedes, and the superseded
+version stays); without host ids an edit to an already-ingested position is still invisible,
+because the only signal left is list position and the cursor-side heuristic that used it was
+reverted for producing duplicate rows. Also open: #7–#12 and
 #30–#32, #36 (the default-off subsystems: adaptive retrieval, requirements/assertions, rollups,
 embeddings, trajectory, backfill counters), #25 (the host's own response normalisation, outside
 the plugin), and #28 (the configured exclusions, documented in FORK.md as deliberate).

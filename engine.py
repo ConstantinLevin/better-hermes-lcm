@@ -144,7 +144,7 @@ from .sqlite_util import (
     _is_sqlite_locked_error,
     _temporary_sqlite_busy_timeout,
 )
-from .store import MessageStore
+from .store import MessageStore, host_message_id_of  # fork: betterlcm
 from .tokens import count_message_tokens, count_messages_tokens, count_tokens
 from . import tools as lcm_tools
 
@@ -2046,6 +2046,74 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         except Exception:  # pragma: no cover - a degraded store must not block assembly
             logger.debug("LCM could not check the archive for a missing tool result", exc_info=True)
             return None
+
+    def _record_host_message_revisions(self, ingested_prefix: List[Dict[str, Any]]) -> int:
+        """fork: betterlcm — archive corrections to messages this session already stored.
+
+        Only messages carrying a host-supplied id are considered, so a position that merely
+        MOVED (the active context legitimately reshapes after a compaction) can never be
+        mistaken for an edit — that mistake produced duplicate rows when it was tried against
+        list positions (see docs/TASKS.md). The superseded row is kept; the new row records
+        which one it replaces, so the archive holds both versions and the correction is the
+        newer of them.
+        """
+        if not ingested_prefix or not self._session_id:
+            return 0
+        if self._session_ignored or self._session_stateless:
+            return 0
+        candidates: dict[str, Dict[str, Any]] = {}
+        for message in ingested_prefix:
+            if not isinstance(message, dict):
+                continue
+            host_id = host_message_id_of(message)
+            if host_id:
+                candidates[host_id] = message  # the newest occurrence in this snapshot
+        if not candidates:
+            return 0
+        try:
+            stored = self._store.latest_rows_by_host_message_id(
+                self._session_id, list(candidates)
+            )
+        except Exception:
+            logger.debug("LCM revision check could not read the store", exc_info=True)
+            return 0
+        revisions = 0
+        for host_id, message in candidates.items():
+            row = stored.get(host_id)
+            if row is None:
+                continue
+            stored_content = str(row.get("content") or "")
+            if is_externalized_placeholder(stored_content) or extract_ingest_externalized_refs(
+                stored_content
+            ):
+                continue  # the stored form is a reference; a cheap comparison would lie
+            incoming = normalize_content_value(message.get("content")) or ""
+            if incoming == stored_content:
+                continue
+            revision = dict(message)
+            revision["lcm_supersedes_store_id"] = int(row.get("store_id") or 0)
+            revision["lcm_revision_reason"] = (
+                "the host edited a message this session had already stored; both versions are "
+                "kept and this one is the newer"
+            )
+            try:
+                new_id = self._store.append(
+                    self._session_id, revision, source=self._session_platform or "",
+                    conversation_id=self._conversation_id or "",
+                )
+            except Exception:
+                logger.warning("LCM could not archive an edited message", exc_info=True)
+                continue
+            revisions += 1
+            logger.info(
+                "LCM archived a host edit of store_id %s as store_id %s (host id %s)",
+                row.get("store_id"), new_id, host_id,
+            )
+        if revisions:
+            self._last_archived_revisions = int(
+                getattr(self, "_last_archived_revisions", 0)
+            ) + revisions
+        return revisions
 
     def _persist_frontier_marker(self) -> None:
         if not self._session_id or not self._conversation_id:
@@ -4776,6 +4844,13 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
 
         n = len(messages)
         cursor = min(max(self._ingest_cursor, 0), n)
+        # fork: betterlcm — an already-ingested position the host EDITED is content that
+        # reached the plugin and was never stored: the cursor treats that snapshot as holding
+        # nothing new (round-2 verify-4 #5). When the host gives its messages stable ids the
+        # edit is recognisable exactly, and the correction is archived as a new row that says
+        # which row it supersedes. Without host ids the fork still cannot see the edit; that
+        # remains documented as open.
+        self._record_host_message_revisions(messages[:cursor])
         scan_start = 0 if self._ingest_cursor_needs_reconcile else cursor
         ignored_original_messages = [False] * n
         if self._compiled_ignore_message_patterns:

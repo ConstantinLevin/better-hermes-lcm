@@ -65,7 +65,7 @@ _MESSAGE_ROLE_BIAS_SQL = "CASE m.role WHEN 'user' THEN 0 WHEN 'assistant' THEN 1
 _MESSAGE_SELECT_COLUMNS = (
     "store_id, session_id, source, role, content, tool_call_id, "
     "tool_calls, tool_name, timestamp, token_estimate, pinned, conversation_id, "
-    "ingested_at, observed_at, observed_at_source, envelope_extra"
+    "ingested_at, observed_at, observed_at_source, envelope_extra, host_message_id"
 )
 
 # fork: betterlcm — the columns are a PROJECTION of the host's message; everything else it
@@ -76,6 +76,20 @@ _MESSAGE_SELECT_COLUMNS = (
 _PROJECTED_MESSAGE_KEYS = frozenset({
     "role", "content", "tool_call_id", "tool_calls", "tool_name", "timestamp",
 })
+
+
+# Keys a host uses to give a message a stable identity of its own. When one is present, an
+# edit to an already-ingested message can be recognised EXACTLY, without guessing from list
+# positions (round-2 verify-4 #5 / verify-3 rank 2).
+_HOST_MESSAGE_ID_KEYS = ("message_id", "id", "uuid", "event_id")
+
+
+def host_message_id_of(msg: Dict[str, Any]) -> Optional[str]:
+    for key in _HOST_MESSAGE_ID_KEYS:
+        value = msg.get(key)
+        if isinstance(value, (str, int)) and str(value).strip():
+            return str(value).strip()[:200]
+    return None
 
 
 def _envelope_extra_json(msg: Dict[str, Any]) -> Optional[str]:
@@ -407,7 +421,8 @@ class MessageStore:
                 ingested_at REAL,
                 observed_at REAL,
                 observed_at_source TEXT,
-                envelope_extra TEXT
+                envelope_extra TEXT,
+                host_message_id TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_msg_session
                 ON messages(session_id, store_id);
@@ -487,6 +502,16 @@ class MessageStore:
             "envelope_extra",
             "ALTER TABLE messages ADD COLUMN envelope_extra TEXT",
         )
+        add_column_if_missing(  # fork: betterlcm — the host's own id for this message
+            self._conn,
+            columns,
+            "host_message_id",
+            "ALTER TABLE messages ADD COLUMN host_message_id TEXT",
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_messages_host_id "
+            "ON messages(session_id, host_message_id)"
+        )
         self._conn.execute(
             "UPDATE messages SET ingested_at = timestamp WHERE ingested_at IS NULL"
         )
@@ -518,8 +543,8 @@ class MessageStore:
                 """INSERT INTO messages
                    (session_id, source, conversation_id, role, content, tool_call_id, tool_calls,
                     tool_name, timestamp, token_estimate, pinned, ingested_at,
-                    observed_at, observed_at_source, envelope_extra)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    observed_at, observed_at_source, envelope_extra, host_message_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     session_id,
                     _normalize_source_value(source),
@@ -536,6 +561,7 @@ class MessageStore:
                     observed_at,
                     "host_message_timestamp" if observed_at is not None else None,
                     _envelope_extra_json(row),  # fork: betterlcm
+                    host_message_id_of(row),    # fork: betterlcm
                 ),
             )
             return cur.lastrowid
@@ -605,8 +631,8 @@ class MessageStore:
                     """INSERT INTO messages
                        (session_id, source, conversation_id, role, content, tool_call_id, tool_calls,
                         tool_name, timestamp, token_estimate, pinned, ingested_at,
-                        observed_at, observed_at_source, envelope_extra)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        observed_at, observed_at_source, envelope_extra, host_message_id)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         session_id,
                         _normalize_source_value(source),
@@ -623,6 +649,7 @@ class MessageStore:
                         observed_at,
                         "host_message_timestamp" if observed_at is not None else None,
                         _envelope_extra_json(msg),  # fork: betterlcm
+                        host_message_id_of(msg),    # fork: betterlcm
                     ),
                 )
                 ids.append(cur.lastrowid)
@@ -1429,6 +1456,28 @@ class MessageStore:
         ).fetchall()
         return [int(row[0]) for row in rows]
 
+    def latest_rows_by_host_message_id(self, session_id: str,
+                                       host_message_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+        """fork: betterlcm — the newest stored row for each host message id (verify-4 #5)."""
+        wanted = [str(value) for value in host_message_ids if value]
+        if not wanted:
+            return {}
+        found: Dict[str, Dict[str, Any]] = {}
+        batch = _SQLITE_MAX_BOUND_VARIABLES - 2
+        for start in range(0, len(wanted), batch):
+            chunk = wanted[start:start + batch]
+            placeholders = ",".join("?" * len(chunk))
+            rows = self._conn.execute(
+                f"""SELECT {_MESSAGE_SELECT_COLUMNS} FROM messages
+                    WHERE session_id = ? AND host_message_id IN ({placeholders})
+                    ORDER BY store_id""",
+                [session_id, *chunk],
+            ).fetchall()
+            for row in rows:
+                record = self._row_to_dict(row)
+                found[str(record.get("host_message_id"))] = record  # newest wins
+        return found
+
     # -- Search -------------------------------------------------------------
 
     def search(self, query: str, session_id: str | None = None,
@@ -1534,6 +1583,7 @@ class MessageStore:
                     f"""SELECT m.store_id, m.session_id, m.source, m.role, m.content, m.tool_call_id,
                               m.tool_calls, m.tool_name, m.timestamp, m.token_estimate, m.pinned, m.conversation_id,
                               m.ingested_at, m.observed_at, m.observed_at_source, m.envelope_extra,
+                              m.host_message_id,
                               rank as search_rank,
                               snippet(messages_fts, 0, '>>>', '<<<', '...', 40) as snippet
                        FROM messages_fts fts
@@ -1875,6 +1925,7 @@ class MessageStore:
             "store_id", "session_id", "source", "role", "content", "tool_call_id",
             "tool_calls", "tool_name", "timestamp", "token_estimate", "pinned", "conversation_id",
             "ingested_at", "observed_at", "observed_at_source", "envelope_extra",
+            "host_message_id",
         ]
         d = dict(zip(cols, row[:len(cols)]))
         # fork: betterlcm — the host fields the columns do not hold (round-2 verify-4 #4)
