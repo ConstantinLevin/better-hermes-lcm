@@ -10165,9 +10165,13 @@ class TestEngineCompress:
 
         assert "keep this real user content" in serialized
         assert "[ASSISTANT]: keep this real assistant content" in serialized
-        assert serialized.count("[ASSISTANT]:") == 1
+        # fork: betterlcm — the noise turns are still kept OUT of the summariser's input, but
+        # the removal is by wording, not by a trusted synthetic-origin signal, so each one
+        # leaves a one-line receipt instead of disappearing (round-4 verify-4 #8).
         assert "[ASSISTANT]: ACK" not in serialized
         assert "[ASSISTANT]: [heartbeat]" not in serialized
+        assert serialized.count("acknowledgement-shaped assistant turn") == 3
+        assert serialized.count("[ASSISTANT]:") == 4
 
     def test_compression_serialization_preserves_plain_content_whitespace(self, engine):
         serialized = engine._serialize_messages([

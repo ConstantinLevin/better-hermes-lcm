@@ -401,3 +401,46 @@ def test_a_pure_refusal_is_never_a_summary(tmp_path):
     # ... and a paraphrase that merely opens like a refusal still survives
     paraphrase = "I cannot start the daemon because the credentials expired at startup."
     assert escalation._is_index_shaped_summary(paraphrase, source) is True
+
+
+def test_the_summariser_input_receipts_survive_into_the_published_leaf(tmp_path):
+    """round-4 verify-4 #12: the serialiser's own removal markers went into the prompt and the
+    published summary was whatever the model wrote, so a model that did not copy them produced
+    a node that reads as covering material it never received."""
+    from hermes_lcm import escalation
+    from hermes_lcm.config import LCMConfig
+    from hermes_lcm.engine import LCMEngine
+
+    cfg = LCMConfig(database_path=str(tmp_path / "inputreceipts.db"), fresh_tail_count=1,
+                    leaf_chunk_tokens=10, incremental_max_depth=0)
+    e = LCMEngine(config=cfg, hermes_home=str(tmp_path))
+    try:
+        e.on_session_start("ir", platform="cli", context_length=262_144)
+        e._config.serialize_message_max_chars = 300
+        e._resolve_window_scaled_settings()
+        injected = "<active_memory>" + ("m" * 4_000) + "</active_memory>"
+        messages = [
+            {"role": "user", "content": "start " * 100 + injected + " end " * 100},
+            {"role": "user", "content": "second turn " * 50},
+            {"role": "user", "content": "the newest turn"},
+        ]
+        e._ingest_messages(messages)
+        e._store.commit()
+        e.threshold_tokens = 1
+        e._resolve_window_scaled_settings()
+
+        original = escalation._call_llm_for_summary
+        escalation._call_llm_for_summary = (
+            lambda *a, **k: "the user described a plan\nExpand for details about: plan"
+        )
+        try:
+            e.compress(list(messages), current_tokens=400_000)
+        finally:
+            escalation._call_llm_for_summary = original
+
+        nodes = e._dag.get_session_nodes("ir")
+        assert nodes, "no leaf was published"
+        rendered = "\n".join(node.summary for node in nodes)
+        assert "chars of injected context removed" in rendered or "elided" in rendered, rendered
+    finally:
+        e.shutdown()

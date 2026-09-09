@@ -106,11 +106,21 @@ def elide_text(text: str, cap: int, *, original_chars: int | None = None) -> str
         f"\n{TRUNCATED_LITERAL} [LCM elided {removed} of {len(text)} chars before summarising"
         f"{before_sanitising}; the full message is in the raw store — lcm_expand this node]\n"
     )
+    # fork: betterlcm — a marker that CROSSES the cut survived as a fragment ("[LCM: 1000 chars
+    # ") with its accounting and recovery clause gone (round-4 verify-4 #11). Scan the WHOLE
+    # text and carry every marker whose span is not completely inside what was kept.
     carried: List[str] = []
-    for fragment in marker_fragments(text[head:len(text) - tail]):
-        if fragment in carried or fragment in kept_head or fragment in kept_tail:
+    removed_start, removed_end = head, len(text) - tail
+    for match in _MARKER_FRAGMENT_RE.finditer(text):
+        if match.end() <= removed_start or match.start() >= removed_end:
+            continue  # entirely inside the kept head or tail
+        fragment = match.group(0).strip()[:_MARKER_FRAGMENT_MAX_CHARS]
+        if not fragment or fragment in carried:
             continue
         carried.append(fragment)
+    # ... and the half a cut left behind in the kept text goes, since the whole marker travels
+    kept_head = _drop_partial_markers(kept_head, carried)
+    kept_tail = _drop_partial_markers(kept_tail, carried)
     if carried:
         shown = carried[:20]
         more = f"\n[LCM: +{len(carried) - 20} further receipt(s) in the elided span]" if len(carried) > 20 else ""
@@ -306,6 +316,20 @@ _MARKER_FRAGMENT_RE = re.compile(r"\[(?:LCM|Context omitted:)[^\]\n]*\]?")
 _MARKER_FRAGMENT_MAX_CHARS = 2_000
 
 
+def _drop_partial_markers(kept: str, carried: List[str]) -> str:
+    """Remove a marker fragment the elision cut in half; the whole marker travels separately."""
+    if not kept or not carried:
+        return kept
+    for match in reversed(list(_MARKER_FRAGMENT_RE.finditer(kept))):
+        fragment = match.group(0).strip()
+        if fragment.endswith("]"):
+            continue  # a complete marker: leave it where it is
+        head_key = fragment[:40]
+        if any(whole.startswith(head_key) for whole in carried):
+            kept = kept[:match.start()] + kept[match.end():]
+    return kept
+
+
 def marker_fragments(text: str) -> List[str]:
     """Every marker this module wrote that occurs in ``text``, in order, de-duplicated.
 
@@ -426,6 +450,20 @@ def envelope_summary_suffix(envelope: dict, *, max_listed: int = 10) -> str:
             "the stored message holds them — lcm_expand]"
         )
     return "".join(parts)
+
+
+def acknowledgement_only_marker(content: str) -> str:
+    """fork: betterlcm — an acknowledgement-shaped turn removed from the summariser's input.
+
+    The removal is by WORDING, not by a trusted synthetic-origin signal, so a genuine
+    "Acknowledged." disappeared with nothing in its place (round-4 verify-4 #8). The stored row
+    is untouched; this line says the turn existed and how to read it.
+    """
+    head = content_head(content, limit=60)
+    return (
+        f"{RECEIPT_LINE_PREFIX} an acknowledgement-shaped assistant turn ({head!r}) is not "
+        "summarised; the stored row is unchanged — lcm_recent / lcm_expand]"
+    )
 
 
 def revision_rows_marker(store_ids: List[int]) -> str:

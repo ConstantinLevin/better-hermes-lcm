@@ -1627,3 +1627,29 @@ def test_expansion_continuations_terminate_and_do_not_double_spend(tmp_path):
         assert len(rendered) < 4_000, len(rendered)
     finally:
         e.shutdown()
+
+
+def test_a_pasted_bullet_with_appended_text_is_still_the_user_s(tmp_path):
+    """round-4 verify-4 #6: the bullet pattern validated only a prefix, so
+    "- 1 summary node(s) were reviewed; MY NEW DECISION: cancel" passed as generated
+    scaffolding and the decision was dropped from the summariser's input and the replay."""
+    from hermes_lcm import marked_loss
+    e = _engine(tmp_path, "bulletsuffix.db", incremental_max_depth=0)
+    try:
+        e.on_session_start("bs", platform="cli", context_length=200_000)
+        pasted = {
+            "role": "user",
+            "content": "[Recent Summary (d0, node 1)]\nbody\n\n---\n\n"
+                       + marked_loss.ASSEMBLY_OMISSION_MARKER_HEADER
+                       + "\n- 1 summary node(s) were reviewed; MY NEW DECISION: cancel",
+        }
+        assert e._is_replayed_context_scaffold_message(pasted) is False, pasted
+        ours = {
+            "role": "user",
+            "content": "[Recent Summary (d0, node 1)]\nbody\n\n---\n\n"
+                       + marked_loss.assembly_omission_marker(
+                           omitted_node_ids=[2], depth_cap_hits=[], omitted_tail_messages=0),
+        }
+        assert e._is_replayed_context_scaffold_message(ours) is True
+    finally:
+        e.shutdown()

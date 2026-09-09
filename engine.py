@@ -383,9 +383,13 @@ def _normalize_total_compactions(value: Any) -> int:
 
 # fork: betterlcm — the bullet shapes marked_loss.assembly_omission_marker() itself writes
 # (round-3 verify-4 #5). Anything else after the header is the sender's own text.
+# Every bullet this module writes ends in its own recovery hint. Validating only the PREFIX let
+# "- 1 summary node(s) were reviewed; MY NEW DECISION: cancel" pass as generated scaffolding
+# (round-4 verify-4 #6).
 _ASSEMBLY_OMISSION_BULLET_RE = re.compile(
     r"^- (?:\d+ (?:summary node\(s\)|large fresh-tail message\(s\)|assistant turn\(s\)|"
     r"replayed assistant turn\(s\))|more d\d+ summaries exist)"
+    r"[^\n]*(?:lcm_expand|lcm_status|lcm_inspect|lcm_recent|lcm_grep)[^\n]*$"
 )
 
 
@@ -1774,6 +1778,11 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
             attempt_number += 1
             source_tokens = count_messages_tokens(attempt_chunk)
             serialized = self._serialize_messages(attempt_chunk)
+            # fork: betterlcm — what the SERIALISER removed from the summariser's input. The
+            # summary was published exactly as the model wrote it, so a model that did not
+            # copy those markers produced a node that reads as covering material it never
+            # received (round-4 verify-4 #12). They are attached deterministically below.
+            input_receipts = marked_loss.marker_fragments(serialized)
             source_store_ids = sorted(dict.fromkeys(
                 self._current_compress_store_ids_by_message_id[id(message)]
                 for message in attempt_chunk
@@ -1814,6 +1823,22 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                     },
                     deadline=deadline,  # fork: one end time for L1+L2+fallbacks (p05 CP05)
                 )
+                # fork: betterlcm — every receipt the serialiser wrote survives into the node
+                # (round-4 verify-4 #12); the model is not trusted to copy them.
+                missing_input_receipts = [
+                    receipt for receipt in input_receipts if receipt not in summary_text
+                ]
+                if missing_input_receipts:
+                    summary_text = (
+                        summary_text.rstrip()
+                        + "\n"
+                        + "\n".join(missing_input_receipts[:20])
+                        + (
+                            f"\n[LCM: +{len(missing_input_receipts) - 20} further input "
+                            "receipt(s) — lcm_expand this node]"
+                            if len(missing_input_receipts) > 20 else ""
+                        )
+                    )
                 return attempt_chunk, source_tokens, summary_text, level, attempt_number
             except Exception as exc:
                 if attempt_number >= max_attempts or not self._is_retry_worthy_leaf_summary_error(exc):
@@ -5771,8 +5796,18 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                 serialized_tool_calls = [
                     (tc, tc in matched_tool_calls) for tc in tool_calls if isinstance(tc, dict)
                 ]
+                envelope_fields = self._message_envelope_fields(msg)
                 if _is_synthetic_assistant_noise(content):
-                    if not serialized_tool_calls:
+                    if not serialized_tool_calls and not envelope_fields:
+                        # fork: betterlcm — the turn is dropped from the summariser's input by
+                        # WORDING alone, so a genuine "Acknowledged." disappeared with nothing
+                        # in its place (round-4 verify-4 #8). Identifying synthetic origin
+                        # needs a host signal the plugin does not have; until then the removal
+                        # is at least visible.
+                        parts.append(
+                            "[ASSISTANT]: "
+                            + marked_loss.acknowledgement_only_marker(content)
+                        )
                         continue
                     content = ""
                 content = marked_loss.elide_text(  # fork: marked
