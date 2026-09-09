@@ -270,3 +270,46 @@ def test_a_failed_attachment_insert_leaves_no_committable_marker(tmp_path, monke
         assert contents == ["an unrelated later message"], contents
     finally:
         store.close()
+
+
+def test_one_modern_attachment_does_not_strand_a_legacy_body(tmp_path):
+    """round-5 verify-6 #2: the legacy call-id fallback ran only when the WHOLE chunk had no
+    explicit attachment, so a single explicitly linked output suppressed legacy recovery for
+    every other row in that chunk — the legacy body stayed stored, behind the advanced
+    frontier, and reachable from no node."""
+    import json
+    from hermes_lcm.store import MessageStore, RECOVERED_FOR_KEY
+
+    store = MessageStore(str(tmp_path / "mixed.db"))
+    try:
+        legacy_owner = store.append(
+            "s", {"role": "tool", "tool_call_id": "legacy", "content": "<persisted-output/>"},
+            source="cli")
+        legacy_body = store.append(
+            "s", {"role": "tool", "tool_call_id": "legacy",
+                  "content": "[LCM recovered host output for tool_call_id=legacy] LEGACY BYTES"},
+            source="cli")
+        modern_owner = store.append(
+            "s", {"role": "tool", "tool_call_id": "modern", "content": "<persisted-output/>"},
+            source="cli")
+        modern_body = store.append(
+            "s", {"role": "tool", "tool_call_id": "modern",
+                  "content": "[LCM recovered host output for tool_call_id=modern] MODERN BYTES"},
+            source="cli")
+        store._conn.execute(
+            "UPDATE messages SET envelope_extra = ? WHERE store_id = ?",
+            (json.dumps({RECOVERED_FOR_KEY: modern_owner}), modern_body),
+        )
+        store.commit()
+
+        found = store.recovered_body_ids_for_consumed_rows(
+            "s", [legacy_owner, modern_owner], ["legacy", "modern"],
+        )
+        assert set(found) == {legacy_body, modern_body}, found
+
+        # and a reused call id still cannot cross occurrences: the modern owner's call id is
+        # claimed by an explicit link, so it is never used for a session-wide legacy sweep
+        only_modern = store.recovered_body_ids_for_consumed_rows("s", [modern_owner], ["modern"])
+        assert only_modern == [modern_body]
+    finally:
+        store.close()

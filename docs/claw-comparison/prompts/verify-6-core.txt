@@ -1,0 +1,21 @@
+You are auditing "betterlcm" (a fork of the hermes-lcm plugin, Python, at /home/agent/projects/agentimprovement/betterlcm) before it ships.
+
+SCOPE — the CORE path only. That is: everything a default-configured install actually executes to carry a conversation into and out of the context window.
+  ingest -> store -> reconcile/rebind -> compaction (leaf + condensation) -> summariser input and output -> active-context assembly -> bypass trimming -> the retrieval tools the agent can call (lcm_grep, lcm_recall, lcm_recent, lcm_describe, lcm_expand, lcm_expand_query, lcm_inspect, lcm_status, lcm_doctor, lcm_load_session, lcm_compute) -> operator commands, backup/restore, maintenance and lifecycle.
+  Relevant modules include (not exhaustively): engine.py, store.py, dag.py, compaction.py, reconcile.py, assembly/bypass paths, escalation.py, extraction.py, sanitize.py, marked_loss.py, chunking.py, leaf_pipeline.py, fresh_tail.py, tools.py, search_query.py, retrieval_core.py, ingest_protection.py, externalize.py, placeholder_ledger.py, maintenance.py, lifecycle_state.py, reset_state.py, host_cooldown.py, window_scaling.py, window_scaled_mixin.py, config.py, presets.py, db_bootstrap.py, sqlite_util.py, node_meta.py, coverage_doctor.py, prompt_boundary.py, command.py, diagnostics.py, __init__.py.
+
+EXPLICITLY OUT OF SCOPE — do not audit and do not report on: reasoning.py, requirements_compiler.py, evidence_compiler.py, evidence_pack.py, selective_compiler.py, host_evidence.py, preanswer_evidence.py, assertion_*.py, adaptive_retrieval.py, query_view_store.py, vector_store.py, embedding_provider.py, trajectory_store.py, rollup_*.py, selective_recall.py, answer_contract.py. These are upstream opt-in subsystems, they are default-off, and the owner has decided to keep them as-is. The ONE exception: if one of them is reachable in the DEFAULT configuration (lcm_compute is), report only that reachability and what it can do to core state — nothing about its internal semantics.
+
+THE RULES the core must satisfy:
+ (a) content that reaches the plugin never becomes unreachable — not unstored, deleted, overwritten, or reachable from no summary node;
+ (b) anything removed from what the summariser reads, or from what the agent reads back, leaves a marker in its place saying what was removed and how to recover it;
+ (c) a bounded, capped, timed-out, failed or partial operation is never presented as complete (an empty result that reads as "there is nothing", a summary that reads as covering everything, a status that reads as healthy, a tool that reports complete=true after hitting a work cap);
+ (d) every summary and index has resolvable provenance;
+ (e) a marker cannot itself be trimmed away, and never says less than what was removed;
+ (f) correctness and crash-safety of the core: publication atomicity, session fencing on rebind/reset, transaction and rollback behaviour under concurrency, SQL correctness, ordering, cursor/pagination arithmetic, restart recovery, and any place a fix in this fork introduced a regression against upstream 8d1b1e6.
+
+Tuning is weighted between a 256k anchor and a 1M anchor (window_scaling.py). The anchors carry TUNING values only — the fork removes truncation and applies its correctness fixes at EVERY window. If you find a place where the 256k end still loses something the 1M end does not, that is a defect, not a design choice.
+
+Context: docs/TASKS.md is the ledger (read the "pass" sections, most recently the ninth) and docs/claw-comparison/ holds the earlier reports. Concentrate on what they did NOT cover. Several batches of fixes just landed; `git log -p 9b5911c~1..HEAD` shows them, and they are the most likely place for a fresh regression.
+
+For every finding: cite file:line, say which rule it breaks, give the trigger and whether the DEFAULT configuration reaches it, state the consequence in terms of what a reader or the next turn loses, and give a concrete fix direction. Probe the real functions to confirm — fault injection, small SQLite fixtures, direct calls, bounded worker fixtures. Distinguish confirmed from plausible. Say explicitly which core paths you checked and found clean, so the coverage is visible. Rank by severity (P1 = loses content, corrupts state, or lies about completeness in the default configuration). Do not modify any files. Write the final report as Markdown.

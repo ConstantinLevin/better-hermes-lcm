@@ -129,11 +129,30 @@ def elide_text(text: str, cap: int, *, original_chars: int | None = None) -> str
 
 
 def elide_args(args: str, cap: int) -> str:
-    """Tool-call arguments: keep the head, say how much is missing."""
+    """Tool-call arguments: keep the head, say how much is missing.
+
+    fork: betterlcm — a cut here must not swallow an EARLIER receipt. Sanitisation runs first
+    and can leave "[LCM: N chars of injected context removed]" inside the arguments; cutting the
+    tail then destroyed that record along with the text it accounted for (round-5 verify-6 #5).
+    Every marker whose span is not entirely inside the kept head travels with the elision.
+    """
     if cap <= 0 or len(args) <= cap:
         return args
     keep = max(1, round(cap * _ARGS_KEEP_RATIO))
-    return args[:keep] + f"...[LCM elided {len(args) - keep} of {len(args)} chars of arguments]"
+    carried: List[str] = []
+    for match in _MARKER_FRAGMENT_RE.finditer(args):
+        if match.end() <= keep:
+            continue  # entirely inside the kept head
+        fragment = match.group(0).strip()[:_MARKER_FRAGMENT_MAX_CHARS]
+        if fragment and fragment not in carried:
+            carried.append(fragment)
+    kept_head = _drop_partial_markers(args[:keep], carried)
+    note = f"...[LCM elided {len(args) - keep} of {len(args)} chars of arguments]"
+    if carried:
+        shown = carried[:20]
+        more = f"\n[LCM: +{len(carried) - 20} further receipt(s) in the elided arguments]" if len(carried) > 20 else ""
+        note += "\n" + "\n".join(shown) + more
+    return kept_head + note
 
 
 def content_head(text: str, limit: int = 240) -> str:
@@ -458,7 +477,34 @@ def leading_turns_dropped_marker(dropped: int, roles: List[str]) -> str:
 
 
 # Envelope fields that CHANGE what a turn means and are cheap to render inline.
-_INLINE_ENVELOPE_FIELDS = ("name", "is_error", "status", "error_code", "finish_reason")
+_INLINE_ENVELOPE_FIELDS = (
+    # fork: betterlcm — small fields that change what the CONTENT means. `exit_code`/`error`
+    # were only named, not shown, so a reader saw "operation done" with no way to tell it had
+    # failed without a second call (round-5 verify-6 #8).
+    "name", "is_error", "status", "error_code", "error", "exit_code", "finish_reason",
+)
+
+
+def envelope_inventory(envelope: dict) -> tuple[dict, list[str]]:
+    """fork: betterlcm — the same split as :func:`envelope_summary_suffix`, as data.
+
+    Returns (inline outcome fields, names of the fields left in the store). JSON-shaped
+    readers (``lcm_load_session``) need the structure rather than a rendered suffix; without
+    it a tool row's ``is_error``/``exit_code`` never reached the reader and a failed operation
+    read exactly like a successful one (round-5 verify-6 #8).
+    """
+    inline: dict = {}
+    listed: List[str] = []
+    if not isinstance(envelope, dict):
+        return inline, listed
+    for key, value in envelope.items():
+        if not isinstance(key, str) or key.startswith("lcm_") or value in (None, "", [], {}):
+            continue
+        if key in _INLINE_ENVELOPE_FIELDS and not isinstance(value, (dict, list)):
+            inline[key] = value
+            continue
+        listed.append(key)
+    return inline, sorted(listed)
 
 
 def envelope_summary_suffix(envelope: dict, *, max_listed: int = 10) -> str:

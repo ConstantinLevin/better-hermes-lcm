@@ -149,7 +149,9 @@ from .sqlite_util import (
 )
 from .store import (  # fork: betterlcm
     MessageStore,
+    PRE_PROTECTION_FINGERPRINT_KEY,
     host_message_id_of,
+    message_envelope_digest,
     message_envelope_fingerprint,
 )
 from .tokens import count_message_tokens, count_messages_tokens, count_tokens
@@ -583,6 +585,10 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         # not session-scoped, so it is not cleared on session reset.
         self._ingest_failure_count = 0
         self._consecutive_ingest_failures = 0
+        # fork: betterlcm — host message ids whose EDIT could not be archived. A correction
+        # that reached the plugin and was not stored makes retrieval's "nothing matched"
+        # answers untrustworthy, so it is reported rather than logged (round-5 verify-6 #4).
+        self._unarchived_revision_host_ids: set[str] = set()
         # Proactive-recall injection telemetry (SPEC F). Store-scoped counters so
         # a session reset does not zero the operator's running totals; surfaced
         # through lcm_status. injected = a block was placed this assembly;
@@ -1402,6 +1408,12 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         return False
 
     def _record_ingest_success(self) -> None:
+        # fork: betterlcm — an ingest that stored the new messages but could NOT archive a
+        # host edit is not a success: the corrected text is still missing from the store, and
+        # clearing the streak here made retrieval answer exhaustive negatives over it
+        # (round-5 verify-6 #4).
+        if getattr(self, "_unarchived_revision_host_ids", None):
+            return
         self._consecutive_ingest_failures = 0
 
     def _record_ingest_failure(self, where: str, error: Exception) -> None:
@@ -2156,9 +2168,13 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
             stored = self._store.latest_rows_by_host_message_id(
                 self._session_id, list(candidates)
             )
-        except Exception:
-            logger.warning("LCM revision check could not read the store", exc_info=True)
-            return 0  # nothing is cached for these ids: the next turn tries again
+        except Exception as error:
+            # fork: betterlcm — a lookup failure means edits may be unstored; that is an ingest
+            # failure, not a log line (round-5 verify-6 #4). Nothing is cached, so the next
+            # turn retries.
+            self._record_ingest_failure("host-edit revision lookup", error)
+            self._unarchived_revision_host_ids.update(str(host_id) for host_id in candidates)
+            return 0
         revisions = 0
         for host_id, message in candidates.items():
             row = stored.get(host_id)
@@ -2166,15 +2182,26 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                 settled[host_id] = fingerprints.get(host_id, "")
                 continue  # never stored under this id: nothing to supersede
             stored_content = str(row.get("content") or "")
+            stored_envelope = row.get("envelope") if isinstance(row.get("envelope"), dict) else {}
+            arrival_fingerprint = str(stored_envelope.get(PRE_PROTECTION_FINGERPRINT_KEY) or "")
             if is_externalized_placeholder(stored_content) or extract_ingest_externalized_refs(
                 stored_content
             ):
-                settled[host_id] = fingerprints.get(host_id, "")
-                continue  # the stored form is a reference; a cheap comparison would lie
+                # fork: betterlcm — the stored form is a REFERENCE, so comparing content would
+                # lie. Marking the id settled here meant an identifiable correction to such a
+                # row was dropped and never retried (round-5 verify-6 #3). The fingerprint of
+                # the message as it arrived answers the question exactly; without one (a row
+                # written before this existed) the id is left UNSETTLED so a later turn — or a
+                # host that stops externalizing it — can still archive the edit.
+                if not arrival_fingerprint:
+                    continue
+                if arrival_fingerprint == message_envelope_digest(message):
+                    settled[host_id] = fingerprints.get(host_id, "")
+                    continue
             # fork: betterlcm — the WHOLE envelope decides, not the content alone: an edit that
             # changed only tool arguments or reasoning metadata was never archived
             # (round-3 verify-4 #3).
-            if message_envelope_fingerprint(message) == message_envelope_fingerprint(row):
+            elif message_envelope_fingerprint(message) == message_envelope_fingerprint(row):
                 settled[host_id] = fingerprints.get(host_id, "")
                 continue
             revision = dict(message)
@@ -2188,10 +2215,17 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                     self._session_id, revision, source=self._session_platform or "",
                     conversation_id=self._conversation_id or "",
                 )
-            except Exception:
-                logger.warning("LCM could not archive an edited message", exc_info=True)
-                continue  # not settled: the fingerprint stays out of the cache
+            except Exception as error:
+                # fork: betterlcm — a correction that reached the plugin and was NOT stored is
+                # an ingest failure, not a log line. Swallowing it let the enclosing ingest
+                # report success, so `lcm_grep` answered `{"complete": true, "results": []}`
+                # for the corrected text while both failure counters stayed at zero
+                # (round-5 verify-6 #4). The id stays unsettled, so a later turn retries.
+                self._record_ingest_failure("host-edit revision archive", error)
+                self._unarchived_revision_host_ids.add(str(host_id))
+                continue
             settled[host_id] = fingerprints.get(host_id, "")
+            self._unarchived_revision_host_ids.discard(str(host_id))
             revisions += 1
             logger.info(
                 "LCM archived a host edit of store_id %s as store_id %s (host id %s)",
@@ -5052,6 +5086,17 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
             )
             return self._redact_active_replay_messages(messages)
 
+        # fork: betterlcm — this ingest belongs to the session it STARTED under. Ownership was
+        # read from mutable engine state again after the (potentially slow) protection work, so
+        # a rebind landing in between filed the old turn under the new session and then set the
+        # NEW session's cursor past a request that had never been stored — the next turn lost
+        # its own request from durable history (round-5 verify-6 #1). The identity is captured
+        # once here, the rows are written under it, and the cursor is only advanced while the
+        # engine is still bound to it.
+        ingest_session_id = str(self._session_id)
+        ingest_conversation_id = self._conversation_id
+        ingest_fence = self._publication_fence()
+
         n = len(messages)
         cursor = min(max(self._ingest_cursor, 0), n)
         # fork: betterlcm — an already-ingested position the host EDITED is content that
@@ -5391,6 +5436,20 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
             config=self._config,
             hermes_home=self._hermes_home,
         )
+        # fork: betterlcm — remember what the message looked like BEFORE protection rewrote it.
+        # The revision check compares an incoming edit against the stored row, and gave up (and
+        # cached the id as settled) whenever the stored form was an externalized reference, so
+        # an identifiable correction to such a row disappeared with no revision row and no
+        # receipt (round-5 verify-6 #3). This fingerprint keeps the comparison possible.
+        for original, protected_msg in zip(
+            (msg for _idx, msg in messages_to_store_with_index),
+            protected_messages,
+        ):
+            if protected_msg is original:
+                continue
+            if not isinstance(protected_msg, dict):
+                continue
+            protected_msg[PRE_PROTECTION_FINGERPRINT_KEY] = message_envelope_digest(original)
         recovery_tool_call_ids = self._active_replay_recovery_tool_call_ids(
             active_replay_messages
         )
@@ -5432,17 +5491,26 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                 rows_to_store.extend(protection_attachments.get(index, []))
         estimates = [count_message_tokens(m) for m in rows_to_store]
         self._store._append_protected_batch(
-            self._session_id,
+            ingest_session_id,  # fork: the session this ingest STARTED under
             rows_to_store,
             estimates,
             source=self._session_platform,
-            conversation_id=self._conversation_id,
+            conversation_id=ingest_conversation_id,
         )
         # Rollup staleness is driven by summary-node PUBLICATION
         # (_invalidate_rollups_for_published_node at every add_node site), not by
         # raw ingest: marking a period stale before its covering summary exists
         # would let a rebuild publish 'ready' from old sources and omit the leaf
         # (maintainer #388 P1).
+        # fork: betterlcm — a stale ingest never moves another generation's cursor. Doing so
+        # marked the NEW session's unstored request as already ingested (round-5 verify-6 #1).
+        if self._publication_fence() != ingest_fence:
+            logger.warning(
+                "LCM ingest for %s#%s completed after a rebind to %s#%s: the rows are stored "
+                "under the session they arrived in and the new session's cursor is untouched",
+                ingest_fence[0], ingest_fence[1], *self._publication_fence(),
+            )
+            return self._remember_active_replay_messages(messages, active_replay_messages)
         self._ingest_cursor = n
         self._compression_boundary_ingest_pending = False
         self._compression_boundary_active_placeholder_digest_budget = {}
@@ -5751,7 +5819,12 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         # the whole window: ~1,048,576 chars at 256k, 4,000,000 at 1M). elide_text/elide_args
         # treat a cap of 0 as "return the text unchanged".
         serialize_cap = max(0, int(self.effective_serialize_message_max_chars or 0))
-        args_cap = (serialize_cap // 6) if serialize_cap else 0
+        # fork: betterlcm — arguments get the SAME cap as the message, not a sixth of it.
+        # Dividing by six reintroduced truncation at 256k that does not happen at 1M: a
+        # 200,000-character argument lost its tail — and an earlier removal receipt inside that
+        # tail — while the same call survived whole at 1M (round-5 verify-6 #5). The cap only
+        # binds when an operator sets one, and then the cut is marked and carries receipts.
+        args_cap = serialize_cap
         for msg in messages:
             role = msg.get("role", "unknown")
             content = redact_sensitive_value(

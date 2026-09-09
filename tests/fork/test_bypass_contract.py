@@ -182,3 +182,29 @@ def test_the_bypass_receipt_counts_tool_call_arguments_too(tmp_path):
         assert counts[1] >= 10_000, receipt
     finally:
         e.shutdown()
+
+
+def test_a_second_bypass_compaction_does_not_erase_the_first_receipt(tmp_path):
+    """round-5 verify-6 #10: the refresh excluded existing receipts from its accounting and
+    then rewrote every surviving receipt with counts from the latest reduction alone, so a
+    second compaction erased the record of the first — two receipts both claimed the newest
+    numbers and the earlier loss was gone."""
+    e = _bypassed_engine(tmp_path, "bycum.db")
+    try:
+        first_input = [{"role": "user", "content": f"turn {i} " + "t" * 400} for i in range(10)]
+        first = e._fallback_tail_compaction(first_input, target_tokens=60)
+        first_receipt = next(m for m in first if marked_loss.is_bypass_omission_marker(m))
+        first_counts = marked_loss.bypass_omission_counts(first_receipt["content"])
+        assert first_counts[0] > 0
+
+        second_input = first + [
+            {"role": "user", "content": f"later {i} " + "u" * 400} for i in range(5)
+        ]
+        second = e._fallback_tail_compaction(second_input, target_tokens=60)
+        receipts = [m for m in second if marked_loss.is_bypass_omission_marker(m)]
+        assert len(receipts) == 1, "one cumulative receipt, not several restating one total"
+        counts = marked_loss.bypass_omission_counts(receipts[0]["content"])
+        assert counts[0] > first_counts[0], (first_counts, counts)
+        assert counts[1] > first_counts[1], (first_counts, counts)
+    finally:
+        e.shutdown()

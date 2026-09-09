@@ -1145,19 +1145,18 @@ class CompactionMixin:
             # session-wide call-id lookup gave one occurrence the archive rows of another when
             # a call id was reused (round-4 verify-4 #20); the legacy lookup is used only when
             # no explicit link exists at all (rows written before that link).
-            recovered_body_ids = self._store.attached_recovered_body_ids_for_rows(
-                self._session_id, consumed_store_ids
+            # fork: betterlcm — resolved PER CONSUMED ROW. Whole-chunk fallback meant one modern
+            # attachment suppressed legacy recovery for every other row in the chunk, stranding
+            # a legacy body behind the advanced frontier (round-5 verify-6 #2).
+            recovered_body_ids = self._store.recovered_body_ids_for_consumed_rows(
+                self._session_id,
+                consumed_store_ids,
+                [
+                    str(message.get("tool_call_id") or "")
+                    for message in source_lookup_chunk
+                    if str(message.get("role") or "") == "tool"
+                ],
             )
-            if not recovered_body_ids:
-                recovered_body_ids = self._store.attached_recovered_body_ids(
-                    self._session_id,
-                    [
-                        str(message.get("tool_call_id") or "")
-                        for message in source_lookup_chunk
-                        if str(message.get("role") or "") == "tool"
-                    ],
-                    exclude_ids=consumed_store_ids,
-                )
             published_source_ids = sorted(
                 summarised_source_ids
                 | set(consumed_store_ids)

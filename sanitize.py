@@ -47,18 +47,42 @@ def _contains_sensitive_redaction(value: Any) -> bool:
 
 
 def _structured_part_text(part: Dict[str, Any]) -> str:
+    """fork: betterlcm — EVERY text-bearing field of the block, not just the first one found.
+
+    A block can carry `text` (a reasoning stream) beside `content` (the visible answer, or a
+    failure message). Returning the first key meant the visible sibling was invisible to the
+    "does this block still say anything?" test, and the whole turn was dropped as internal-only
+    (round-5 verify-6 #9).
+    """
+    collected: list[str] = []
     for key in ("text", "content", "value"):
         value = part.get(key)
         if isinstance(value, str):
-            return value
+            if value:
+                collected.append(value)
+            continue
         if isinstance(value, dict):
-            nested = value.get("value")
-            if isinstance(nested, str):
-                return nested
-            nested = value.get("content")
-            if isinstance(nested, str):
-                return nested
-    return ""
+            for nested_key in ("value", "content", "text"):
+                nested = value.get(nested_key)
+                if isinstance(nested, str) and nested:
+                    collected.append(nested)
+    return "\n".join(collected)
+
+
+_STRUCTURAL_PART_KEYS = frozenset({"type", "cache_control", "text", "content", "value"})
+
+
+def _part_has_substantive_fields(part: Any) -> bool:
+    """Anything on this block other than its type and its (already inspected) text fields."""
+    if not isinstance(part, dict):
+        return False
+    for key, value in part.items():
+        if not isinstance(key, str) or key in _STRUCTURAL_PART_KEYS:
+            continue
+        if value is None or value == "" or value == [] or value == {}:
+            continue
+        return True
+    return False
 
 
 def _structured_part_has_visible_assistant_content(part: Any) -> bool:
@@ -73,7 +97,12 @@ def _structured_part_has_visible_assistant_content(part: Any) -> bool:
     if part_type in _INTERNAL_ASSISTANT_PART_TYPES:
         return False
     if part_type in _VISIBLE_TEXT_PART_TYPES:
-        return bool(_strip_reasoning_blocks(_structured_part_text(part)).strip())
+        if _strip_reasoning_blocks(_structured_part_text(part)).strip():
+            return True
+        # fork: betterlcm — a typed text block whose text is empty can still carry the thing
+        # that matters (annotations, a citation list, an outcome flag). Judging it by its text
+        # alone dropped the whole turn with no receipt (round-5 verify-6 #9).
+        return _part_has_substantive_fields(part)
 
     # Unknown non-internal content blocks may be visible (for example
     # images/audio/annotations in provider-specific formats).  Preserve
@@ -95,26 +124,26 @@ def _assistant_message_has_visible_content(msg: Dict[str, Any]) -> bool:
 
 
 def _strip_structured_text_part(part: Dict[str, Any]) -> Dict[str, Any] | None:
+    """fork: betterlcm — strip EVERY text field of the block, and judge the block afterwards.
+
+    This returned as soon as it had handled one key, so a block carrying `text` (reasoning)
+    beside `content` (the visible answer) either kept the reasoning and never cleaned the
+    sibling, or — when the first field stripped to nothing — threw the whole block away with
+    its siblings and its outcome flags still on it (round-5 verify-6 #9).
+    """
     cleaned = dict(part)
     for key in ("text", "content", "value"):
         value = cleaned.get(key)
         if isinstance(value, str):
-            stripped = _strip_reasoning_blocks(value)
-            if not stripped.strip():
-                return None
-            cleaned[key] = stripped
-            return cleaned
+            cleaned[key] = _strip_reasoning_blocks(value)
+            continue
         if isinstance(value, dict):
             nested = dict(value)
             for nested_key in ("value", "content", "text"):
                 nested_value = nested.get(nested_key)
                 if isinstance(nested_value, str):
-                    stripped = _strip_reasoning_blocks(nested_value)
-                    if not stripped.strip():
-                        return None
-                    nested[nested_key] = stripped
-                    cleaned[key] = nested
-                    return cleaned
+                    nested[nested_key] = _strip_reasoning_blocks(nested_value)
+            cleaned[key] = nested
     return cleaned if _structured_part_has_visible_assistant_content(cleaned) else None
 
 
@@ -182,24 +211,30 @@ def _mark_internal_removal(cleaned_content: Any) -> Any:
     return cleaned_content
 
 
-_TEXT_BEARING_KEYS = (
-    "text", "content", "value", "thinking", "reasoning", "summary", "data", "input", "output",
-)
-
-
 def _content_carries_text(value: Any) -> bool:
-    """Did this content hold anything at all? A blank turn loses nothing when it is dropped."""
+    """Did this content hold anything at all? A blank turn loses nothing when it is dropped.
+
+    fork: betterlcm — this asked a fixed list of text-bearing keys, so a reasoning block whose
+    payload sat in `encrypted_content`, or a text block carrying only `annotations`, counted as
+    empty and vanished with no receipt (round-5 verify-6 #9). Every key except the structural
+    ones counts; only `type`/`cache_control` are scaffolding rather than content.
+    """
     if isinstance(value, str):
         return bool(value.strip())
     if isinstance(value, list):
         return any(_content_carries_text(item) for item in value)
     if isinstance(value, dict):
-        return any(
-            _content_carries_text(value.get(key))
-            for key in _TEXT_BEARING_KEYS
-            if key in value
-        )
-    return False
+        for key, item in value.items():
+            if isinstance(key, str) and key in ("type", "cache_control"):
+                continue
+            if isinstance(item, (str, list, dict)):
+                if _content_carries_text(item):
+                    return True
+                continue
+            if item is not None:
+                return True
+        return False
+    return value is not None
 
 
 def _clean_active_assistant_message(msg: Dict[str, Any]) -> Dict[str, Any] | None:

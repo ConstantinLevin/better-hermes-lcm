@@ -485,18 +485,28 @@ class SummaryDAG:
         shallower ones stay in the old session instead of being deleted.
         """
         with self._db_lock:
-            if min_depth is None:
-                cur = self._conn.execute(
-                    "UPDATE summary_nodes SET session_id = ? WHERE session_id = ?",
-                    (new_session_id, old_session_id),
-                )
-            else:
-                cur = self._conn.execute(
-                    "UPDATE summary_nodes SET session_id = ? WHERE session_id = ? AND depth >= ?",
-                    (new_session_id, old_session_id, int(min_depth)),
-                )
-            moved = cur.rowcount
-            self._conn.commit()
+            # fork: betterlcm — same rollback discipline as `add_node_with_meta`. A failed
+            # commit here left the transaction open with the ownership change pending, the
+            # connection already reading the nodes under the new session, and the next
+            # unrelated publication committed the carry-over that had reported failure
+            # (round-5 verify-6 #11). BaseException, because a cancellation leaves the UPDATE
+            # pending just as effectively.
+            try:
+                if min_depth is None:
+                    cur = self._conn.execute(
+                        "UPDATE summary_nodes SET session_id = ? WHERE session_id = ?",
+                        (new_session_id, old_session_id),
+                    )
+                else:
+                    cur = self._conn.execute(
+                        "UPDATE summary_nodes SET session_id = ? WHERE session_id = ? AND depth >= ?",
+                        (new_session_id, old_session_id, int(min_depth)),
+                    )
+                moved = cur.rowcount
+                self._conn.commit()
+            except BaseException:
+                self._rollback_failed_publication()
+                raise
         return moved
 
     def get_frontier_token_total(self, session_id: str) -> int:

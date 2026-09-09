@@ -94,6 +94,11 @@ REVISION_SUPERSEDES_KEY = "lcm_supersedes_store_id"
 # Resolving it by tool_call_id was ambiguous when two calls shared an id and impossible when a
 # result had none (round-3 verify-4 #24).
 RECOVERED_FOR_KEY = "lcm_recovered_for_store_id"
+# fork: betterlcm — the fingerprint of the message as it ARRIVED, kept on rows whose stored
+# form was rewritten by ingest protection (externalized placeholder, quarantine, recovered
+# body). Without it the revision check could not compare an edit against such a row and treated
+# the id as settled, so an identifiable correction disappeared (round-5 verify-6 #3).
+PRE_PROTECTION_FINGERPRINT_KEY = "lcm_pre_protection_fingerprint"
 
 
 def is_revision_row(row: Dict[str, Any]) -> bool:
@@ -151,6 +156,16 @@ def message_envelope_fingerprint(msg: Dict[str, Any]) -> str:
         return json.dumps(payload, ensure_ascii=False, default=str, sort_keys=True)
     except Exception:  # pragma: no cover - default=str covers the usual cases
         return str(payload)
+
+
+def message_envelope_digest(msg: Dict[str, Any]) -> str:
+    """fork: betterlcm — :func:`message_envelope_fingerprint` as a fixed-size digest.
+
+    The fingerprint is the full serialised envelope, so it can never be STORED on a row: doing
+    that put the very payload ingest protection had just externalized back into the database.
+    Change detection only needs equality, so rows carry the digest.
+    """
+    return hashlib.sha256(message_envelope_fingerprint(msg).encode("utf-8")).hexdigest()
 
 
 def host_message_id_of(msg: Dict[str, Any]) -> Optional[str]:
@@ -1579,6 +1594,68 @@ class MessageStore:
             ).fetchall()
             found.extend(int(row[0]) for row in rows)
         return sorted(set(found) - excluded)
+
+    def recovered_body_ids_for_consumed_rows(
+        self,
+        session_id: str,
+        store_ids: List[int],
+        consumed_tool_call_ids: List[str] | None = None,
+    ) -> List[int]:
+        """fork: betterlcm — resolve recovered bodies PER CONSUMED ROW, not per chunk.
+
+        Two earlier shapes both lost rows. Unioning the explicit attachment link with the
+        session-wide call-id lookup gave one occurrence another occurrence's archive rows when a
+        call id was reused (round-4 verify-4 #20). Falling back to the legacy lookup only when
+        the WHOLE chunk had no explicit link meant one modern attachment suppressed legacy
+        recovery for every other row in that chunk, stranding a legacy body behind an advanced
+        frontier (round-5 verify-6 #2).
+
+        The rule is per row: a row with an explicit ``lcm_recovered_for_store_id`` link uses it;
+        a row without one falls back to its own ``tool_call_id``, and only call ids that no
+        explicitly linked body claims are used, so a reused id cannot cross occurrences.
+        """
+        wanted = {int(value) for value in store_ids or []}
+        if not wanted:
+            return []
+        explicit_by_owner: Dict[int, List[int]] = {}
+        explicit_call_ids: set[str] = set()
+        rows = self._conn.execute(
+            """SELECT store_id, tool_call_id, envelope_extra FROM messages
+               WHERE session_id = ? AND envelope_extra LIKE ?""",
+            (session_id, f"%{RECOVERED_FOR_KEY}%"),
+        ).fetchall()
+        for store_id, tool_call_id, envelope_extra in rows:
+            try:
+                envelope = json.loads(envelope_extra or "{}")
+            except (TypeError, ValueError):
+                continue
+            owner = int(envelope.get(RECOVERED_FOR_KEY) or 0)
+            if owner not in wanted:
+                continue
+            explicit_by_owner.setdefault(owner, []).append(int(store_id))
+            call_id = str(tool_call_id or "").strip()
+            if call_id:
+                explicit_call_ids.add(call_id)
+        found: set[int] = set()
+        for ids in explicit_by_owner.values():
+            found.update(ids)
+        # The consumed CHUNK supplies the call ids, not the consumed rows: a host truncation
+        # marker legitimately maps to no stored row, and its call id is the only thing that
+        # connects it to the archive row holding its bytes. Call ids an explicit link already
+        # claims are dropped, so a reused id cannot pull in another occurrence's rows.
+        legacy_call_ids = sorted(
+            {str(value).strip() for value in (consumed_tool_call_ids or []) if str(value or "").strip()}
+            - explicit_call_ids
+        )
+        if legacy_call_ids:
+            found.update(
+                self.attached_recovered_body_ids(
+                    session_id,
+                    legacy_call_ids,
+                    exclude_ids=sorted(wanted | found),
+                )
+            )
+        return sorted(found - wanted)
 
     def tool_result_store_ids_batch(self, session_id: str,
                                     tool_call_ids: List[str]) -> Dict[str, List[int]]:

@@ -127,11 +127,41 @@ def test_serialize_keeps_unmatched_tool_calls_marked(tmp_path):
         e.shutdown()
 
 
+def test_arguments_are_not_truncated_at_256k(tmp_path):
+    """round-5 verify-6 #5: the message cap was divided by six for arguments, so a 200,000-char
+    argument lost its tail at 256k and survived whole at 1M — a cut that fires at one window and
+    not the other. Arguments share the message cap, and the message cap is the whole window."""
+    e = _engine(tmp_path)
+    try:
+        e._set_context_length(262_144, source="test")
+        args = '{"command": "' + ("a" * 200_000) + '"}'
+        serialized = e._serialize_messages([
+            {"role": "assistant", "content": "run", "tool_calls": [
+                {"id": "c1", "type": "function",
+                 "function": {"name": "terminal", "arguments": args}}]},
+            {"role": "tool", "tool_call_id": "c1", "content": "ok"},
+        ])
+        assert args in serialized
+        assert "chars of arguments]" not in serialized
+    finally:
+        e.shutdown()
+
+
+def test_an_argument_cut_carries_the_receipts_it_crosses(tmp_path):
+    """An operator cap may still cut arguments — but not over an earlier removal's receipt."""
+    receipt = marked_loss.injected_context_marker(9_000)
+    args = '{"command": "' + ("a" * 400) + receipt + ("b" * 400) + '"}'
+    elided = marked_loss.elide_args(args, 500)
+    assert "chars of arguments]" in elided
+    assert receipt in elided, elided
+
+
 def test_serialize_marks_argument_elision(tmp_path):
     e = _engine(tmp_path)
     try:
-        # an explicit operator cap; the curve's own value is the whole window and never binds
-        e._config.serialize_message_max_chars = 3000
+        # an explicit operator cap; the curve's own value is the whole window and never binds.
+        # Arguments share the message cap — dividing it by six reintroduced a 256k-only cut.
+        e._config.serialize_message_max_chars = 500
         args = "{\"command\": \"" + "a" * 2000 + "\"}"
         serialized = e._serialize_messages([
             {"role": "assistant", "content": "run", "tool_calls": [
@@ -252,6 +282,36 @@ def test_below_threshold_cleanup_leaves_the_receipt_in_the_returned_context(tmp_
         assert rows[2]["content"] == "<think>DECISION: cancel</think>We cancel."
     finally:
         e.shutdown()
+
+
+def test_a_structured_turn_keeps_what_is_not_reasoning(tmp_path):
+    """round-5 verify-6 #9: the cleaner returned after the FIRST text field it handled and
+    judged the whole block by that one field, so a block carrying reasoning in `text` beside a
+    visible failure in `content` lost the failure, and a text block whose only payload was
+    `annotations` disappeared with no receipt at all."""
+    from hermes_lcm.sanitize import _clean_active_assistant_message
+
+    annotated = {"role": "assistant", "content": [
+        {"type": "text", "text": "", "annotations": [{"cite": "doc-1"}]},
+    ]}
+    assert _clean_active_assistant_message(annotated) is annotated  # kept, untouched
+
+    reasoning_only = {"role": "assistant", "content": [
+        {"type": "reasoning", "encrypted_content": "opaque", "id": "r-1", "summary": ""},
+    ]}
+    cleaned = _clean_active_assistant_message(reasoning_only)
+    assert cleaned is not None
+    assert marked_loss.INTERNAL_REPLAY_MARKER in str(cleaned["content"])
+
+    mixed = {"role": "assistant", "content": [
+        {"type": "text", "text": "<think>plan</think>", "content": "VISIBLE FAILURE",
+         "is_error": True},
+    ]}
+    cleaned = _clean_active_assistant_message(mixed)
+    rendered = str(cleaned["content"])
+    assert "VISIBLE FAILURE" in rendered and "is_error" in rendered
+    assert "plan" not in rendered
+    assert marked_loss.INTERNAL_REPLAY_MARKER in rendered
 
 
 def test_a_blank_turn_is_dropped_without_claiming_a_removal(tmp_path):
@@ -1729,5 +1789,31 @@ def test_expansion_synthesis_says_when_more_matches_exist(tmp_path, monkeypatch)
             {"prompt": "what was decided?", "query": "alpha", "max_results": 2}, engine=e))
         assert payload["complete"] is False, payload
         assert "messages" in payload.get("more_results_available_in", []), payload
+    finally:
+        e.shutdown()
+
+
+def test_load_session_reports_the_outcome_fields_it_does_not_render(tmp_path):
+    """round-5 verify-6 #8: the row serializer returned content and the column fields only, so
+    a tool result carrying is_error/exit_code came back as plain text — a failed operation read
+    exactly like a successful one — while claiming the row was complete."""
+    import json
+    from hermes_lcm import tools as lcm_tools
+
+    e = _engine(tmp_path)
+    try:
+        e.on_session_start("marked-session", context_length=262_144)
+        e._store.append("marked-session", {
+            "role": "tool", "tool_call_id": "c1", "content": "operation done",
+            "is_error": True, "exit_code": 7, "provider_metadata": {"request_id": "r-9"},
+        }, source="cli")
+        e._store.commit()
+        page = json.loads(lcm_tools.lcm_load_session(
+            {"session_id": "marked-session"}, engine=e))
+        row = page["messages"][-1]
+        assert row["envelope"]["is_error"] is True
+        assert row["envelope"]["exit_code"] == 7
+        assert "provider_metadata" in row["envelope_fields_omitted"]
+        assert row["envelope_recover_with"]["tool"] == "lcm_expand"
     finally:
         e.shutdown()

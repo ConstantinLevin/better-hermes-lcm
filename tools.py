@@ -46,6 +46,7 @@ from .ingest_protection import (
 )
 from .model_routing import apply_lcm_model_route
 from .prompt_boundary import build_untrusted_data_messages
+from . import marked_loss
 from .assertion_state import query_assertion_state
 from .assertion_store import ASSERTION_KINDS
 from .reasoning import (
@@ -1462,6 +1463,7 @@ def _expand_message_sources(
     next_source_offset: int | None = source_offset
     next_content_offset = content_offset
     next_tool_calls_offset = 0
+    next_envelope_offset = 0  # fork: betterlcm — the envelope has a cursor of its own
     corrupt_payload_refs: list[dict[str, Any]] = []  # fork: betterlcm (round-3 verify-3)
     has_more = source_offset < total_sources
 
@@ -1539,6 +1541,11 @@ def _expand_message_sources(
         # against the same budget and paged with their own offset rather than dumped whole.
         stored_tool_calls = stored.get("tool_calls")
         call_slice = None
+        # fork: betterlcm — the envelope slice (normal or corrupt) is tracked with the other
+        # fields, so it can be charged to the budget and consulted by the continuation
+        # decision. Leaving it out of both meant a 20,000-character envelope returned 15,991
+        # characters and reported has_more=false (round-5 verify-6 #6).
+        envelope_slice = None
         if stored_tool_calls:
             rendered = json.dumps(stored_tool_calls, ensure_ascii=False, default=str)
             call_start = tool_calls_offset if source_index == source_offset else 0
@@ -1633,6 +1640,7 @@ def _expand_message_sources(
                 raw_budget,
                 envelope_offset if source_index == source_offset else 0,
             )
+            envelope_slice = raw_slice  # one cursor and one budget line for both shapes
             expanded["envelope_raw"] = raw_slice["content"]
             expanded["envelope_raw_chars"] = raw_slice["content_chars"]
             expanded["envelope_raw_offset"] = raw_slice["content_offset"]
@@ -1698,7 +1706,16 @@ def _expand_message_sources(
         budget_used += count_tokens(sliced["content"])
         if call_slice is not None:
             budget_used += count_tokens(call_slice["content"])
-        if sliced["has_more"] or (call_slice is not None and call_slice["content_truncated"]):
+        # fork: betterlcm — the envelope is charged too, and an unfinished envelope keeps the
+        # source open. Neither happened, so a reader could be told the row was complete while
+        # thousands of characters of host metadata were still unread (round-5 verify-6 #6).
+        if envelope_slice is not None:
+            budget_used += count_tokens(envelope_slice["content"])
+        if (
+            sliced["has_more"]
+            or (call_slice is not None and call_slice["content_truncated"])
+            or (envelope_slice is not None and envelope_slice["content_truncated"])
+        ):
             next_source_offset = source_index
             # fork: betterlcm — a FINISHED body reports next_content_offset 0. Re-using that
             # zero while staying on the same source restarted the body on every page: a
@@ -1709,14 +1726,23 @@ def _expand_message_sources(
                 sliced["next_content_offset"] if sliced["has_more"]
                 else sliced["content_offset"] + sliced["content_returned_chars"]
             )
+            # fork: betterlcm — a FINISHED field parks its cursor at its own end, exactly like
+            # the body above. Resetting to 0 made a continuation for one field re-send another
+            # field the caller already had in full (round-5 verify-6 #6).
             next_tool_calls_offset = (
-                call_slice["next_content_offset"]
-                if call_slice is not None and call_slice["content_truncated"] else 0
-            )
+                call_slice["next_content_offset"] if call_slice["content_truncated"]
+                else call_slice["content_offset"] + call_slice["content_returned_chars"]
+            ) if call_slice is not None else 0
+            next_envelope_offset = (
+                envelope_slice["next_content_offset"] if envelope_slice["content_truncated"]
+                else envelope_slice["content_offset"] + envelope_slice["content_returned_chars"]
+            ) if envelope_slice is not None else 0
             has_more = True
             break
         next_source_offset = source_index + 1
         next_content_offset = 0
+        next_tool_calls_offset = 0
+        next_envelope_offset = 0
         has_more = next_source_offset < total_sources
     else:
         has_more = (source_offset + source_limit) < total_sources
@@ -1735,6 +1761,11 @@ def _expand_message_sources(
         next_tool_calls_offset=next_tool_calls_offset,
         has_more=has_more,
     )
+    # fork: betterlcm — every cursor travels with the page, or following the continuation
+    # restarts a field the caller already has (round-5 verify-6 #6).
+    pagination["envelope_offset"] = envelope_offset
+    if has_more:
+        pagination["next_envelope_offset"] = next_envelope_offset
     if missing_source_ids:
         pagination["missing_source_store_ids"] = missing_source_ids
         pagination["complete"] = False
@@ -1866,6 +1897,15 @@ def _expand_child_nodes(
         # say so, or it reads as a complete answer.
         pagination["missing_source_node_ids"] = missing_child_ids
         pagination["incomplete"] = True
+        # fork: betterlcm — say it in the SAME field every other path uses. `incomplete=True`
+        # alone was invisible to the block filter and to the synthesis completeness check, so a
+        # parent whose children were all missing answered complete=true (round-5 verify-6 #7).
+        pagination["complete"] = False
+        pagination["incomplete_reason"] = (
+            f"{len(missing_child_ids)} child node(s) recorded by this node are no longer in the DAG"
+        )
+    else:
+        pagination.setdefault("complete", True)
     return expanded, pagination
 
 
@@ -2034,7 +2074,11 @@ def _collect_context_blocks_for_node(
             blocks.append(block)
     elif node.source_type == "nodes":
         children, pagination = _expand_child_nodes(engine, node, max_tokens=remaining_tokens)
-        if children or pagination.get("has_more"):
+        # fork: betterlcm — a child block that carries ONLY a failure (a recorded child that
+        # cannot be read) is the block that matters. Dropping it when no child survived let a
+        # parent whose children were all missing synthesise as complete=true (round-5
+        # verify-6 #7), the same defect already fixed above for message sources.
+        if children or pagination.get("has_more") or pagination.get("complete") is False:
             blocks.append(
                 {
                     "type": "child_nodes",
@@ -2294,6 +2338,24 @@ def _serialize_loaded_message(
         item["tool_calls"] = row.get("tool_calls")
     if row.get("tool_name"):
         item["tool_name"] = row.get("tool_name")
+    # fork: betterlcm — the host envelope is part of the row. This serializer returned content
+    # and the column fields only, so a tool result carrying is_error/exit_code came back as
+    # plain text and a failed operation read exactly like a successful one, with
+    # content_truncated=false and has_more=false claiming the row was complete
+    # (round-5 verify-6 #8). Outcome fields are shown; the rest are named, with the call that
+    # returns them in full.
+    envelope = row.get("envelope")
+    if isinstance(envelope, dict) and envelope:
+        inline, omitted = marked_loss.envelope_inventory(envelope)
+        if inline:
+            item["envelope"] = inline
+        if omitted:
+            item["envelope_fields_omitted"] = omitted
+    if row.get("envelope_corrupt"):
+        item["envelope_corrupt"] = True
+        item["envelope_raw_chars"] = int(row.get("envelope_raw_chars") or 0)
+    if item.get("envelope_fields_omitted") or item.get("envelope_corrupt"):
+        item["envelope_recover_with"] = {"tool": "lcm_expand", "store_id": row.get("store_id")}
     store_id = row.get("store_id")
     if include_exact_ref and isinstance(store_id, int) and content_slice["content_returned_chars"] > 0:
         item["exact_ref"] = f"lcm:{store_id}:0-{content_slice['content_returned_chars']}"
@@ -3091,11 +3153,18 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
     # The engine logged the failure and the tool still answered "no matching history"
     # (verify-4 #11): a false exhaustive negative over content that just reached the plugin.
     consecutive_ingest_failures = int(getattr(engine, "_consecutive_ingest_failures", 0) or 0)
-    if consecutive_ingest_failures:
-        search_failures.append({
+    unarchived_revisions = sorted(getattr(engine, "_unarchived_revision_host_ids", None) or [])
+    if consecutive_ingest_failures or unarchived_revisions:
+        entry = {
             "source": "current_turn_ingest",
             "error": str(getattr(engine, "_last_ingest_error", "") or "ingest failed")[:300],
-        })
+        }
+        if unarchived_revisions:
+            # fork: betterlcm — a host EDIT that could not be archived means the corrected
+            # text was never stored; naming the ids says which history is unreliable here
+            # (round-5 verify-6 #4).
+            entry["unarchived_revision_host_ids"] = unarchived_revisions[:20]
+        search_failures.append(entry)
 
     if content_scope in {"history", "both"}:
         try:
@@ -6241,12 +6310,21 @@ def lcm_expand(args: Dict[str, Any], **kwargs) -> str:
                         else sliced["content_offset"] + sliced["content_returned_chars"]
                     ),
                     "tool_calls_offset": call_slice["next_content_offset"],
-                    # fork: carry the envelope cursor too (round-4 verify-2 #9)
+                    # fork: carry the envelope cursor too (round-4 verify-2 #9). A CORRUPT
+                    # envelope uses the same cursor under different field names; consulting
+                    # only the normal-envelope fields reset it to 0 and re-sent the corrupt
+                    # text from the start on every call continuation (round-5 verify-6 #6).
                     "envelope_offset": (
                         result.get("envelope_next_offset")
                         if result.get("envelope_truncated")
-                        else int(result.get("envelope_offset") or 0)
-                        + int(result.get("envelope_returned_chars") or 0)
+                        else result.get("envelope_raw_next_offset")
+                        if result.get("envelope_raw_truncated")
+                        else int(result.get("envelope_offset") or result.get("envelope_raw_offset") or 0)
+                        + int(
+                            result.get("envelope_returned_chars")
+                            or result.get("envelope_raw_returned_chars")
+                            or 0
+                        )
                     ),
                 }
         if include_exact_ref and sliced["content_returned_chars"] > 0:
@@ -6609,6 +6687,25 @@ def lcm_expand_query(args: Dict[str, Any], **kwargs) -> str:
         bool(item.get("summary_truncated")) or bool(item.get("pagination", {}).get("has_more"))
         for item in context_pagination
     )
+    # fork: betterlcm — a FIELD left unread makes the context truncated too. Only whole-page
+    # `has_more` and summary truncation counted, so a row whose envelope or tool calls were cut
+    # reached synthesis and the answer still said context_truncated=false (round-5 verify-6 #7).
+    _TRUNCATED_FIELD_FLAGS = (
+        "content_truncated", "tool_calls_truncated",
+        "envelope_truncated", "envelope_raw_truncated",
+    )
+    if not context_truncated:
+        for block in context_blocks:
+            if not isinstance(block, dict):
+                continue
+            for message in block.get("messages") or []:
+                if isinstance(message, dict) and any(
+                    message.get(flag) for flag in _TRUNCATED_FIELD_FLAGS
+                ):
+                    context_truncated = True
+                    break
+            if context_truncated:
+                break
 
     selected_nodes = nodes[:max_results]
     matches = [
@@ -6718,10 +6815,36 @@ def lcm_expand_query(args: Dict[str, Any], **kwargs) -> str:
         payload["missing_source_store_ids"] = sorted(
             {int(value) for ids in unreadable_sources for value in ids}
         )
+    # fork: betterlcm — completeness is the conjunction of EVERY traversal and hydration
+    # outcome, not just the missing-raw-row one. A corrupt externalized payload and a missing
+    # child node both set `complete=False` on their own block, and both were ignored here, so
+    # the answer read as fully expanded over evidence that was never available
+    # (round-5 verify-6 #7).
+    incomplete_blocks = [
+        {
+            "node_id": block.get("node_id"),
+            "type": block.get("type"),
+            "reason": (
+                block["pagination"].get("incomplete_reason")
+                or "this block could not be expanded completely"
+            ),
+            **({"corrupt_payloads": block["pagination"]["corrupt_payloads"]}
+               if block["pagination"].get("corrupt_payloads") else {}),
+            **({"missing_source_node_ids": block["pagination"]["missing_source_node_ids"]}
+               if block["pagination"].get("missing_source_node_ids") else {}),
+        }
+        for block in context_blocks
+        if isinstance(block, dict)
+        and isinstance(block.get("pagination"), dict)
+        and block["pagination"].get("complete") is False
+    ]
+    if incomplete_blocks:
+        payload["incomplete_context_blocks"] = incomplete_blocks
     payload["complete"] = not (
         missing_node_ids or unresolved_nodes or unprocessed_node_ids
         or answer_unfinished or context_truncated
         or search_incompleteness or unreadable_sources
+        or incomplete_blocks  # fork: every failed traversal or hydration counts
         or more_results_beyond_limit  # fork: a capped selection is not a complete answer
     )
     return json.dumps(payload)

@@ -276,3 +276,48 @@ def test_a_symbol_query_keeps_its_conjunction(tmp_path):
         assert hits == ["alpha∀ beta"], hits
     finally:
         dag.close()
+
+
+def test_an_unarchived_host_edit_makes_search_incomplete(tmp_path, monkeypatch):
+    """round-5 verify-6 #4: a correction that reached the plugin and could not be stored was
+    logged and swallowed. The enclosing ingest reported success, both failure counters stayed
+    at zero, and lcm_grep answered {"complete": true, "results": []} over the corrected text."""
+    import json
+    import sqlite3
+    from hermes_lcm import tools as lcm_tools
+    from hermes_lcm.config import LCMConfig
+    from hermes_lcm.engine import LCMEngine
+
+    engine = LCMEngine(config=LCMConfig(database_path=str(tmp_path / "revfail.db")),
+                       hermes_home=str(tmp_path))
+    try:
+        engine.on_session_start("rev", context_length=262_144)
+        engine._ingest_messages([
+            {"role": "user", "content": "deploy at noon", "message_id": "m-1"},
+        ])
+        real_append = engine._store.append
+
+        def refuse(*args, **kwargs):
+            raise sqlite3.OperationalError("database is locked")
+
+        monkeypatch.setattr(engine._store, "append", refuse)
+        engine._ingest_messages([
+            {"role": "user", "content": "deploy at MIDNIGHT", "message_id": "m-1"},
+        ])
+        monkeypatch.setattr(engine._store, "append", real_append)
+
+        assert engine._unarchived_revision_host_ids == {"m-1"}
+        assert engine._ingest_failure_count >= 1
+        # a later ingest that stores fine must NOT clear the streak while the edit is missing
+        engine._record_ingest_success()
+        assert engine._consecutive_ingest_failures >= 1
+
+        result = json.loads(lcm_tools.lcm_grep({"query": "MIDNIGHT"}, engine=engine))
+        assert result.get("complete") is not True
+        failures = result.get("search_failures") or result.get("failures") or []
+        assert any(
+            "m-1" in (entry.get("unarchived_revision_host_ids") or [])
+            for entry in failures
+        ), result
+    finally:
+        engine.shutdown()

@@ -662,3 +662,71 @@ def test_a_corrupt_envelope_is_returned_whole_and_paged(tmp_path):
         assert seen == broken                          # every character is reachable
     finally:
         engine.shutdown()
+
+
+def test_an_ingest_that_outlives_its_session_files_under_the_session_it_started_in(tmp_path):
+    """round-5 verify-6 #1: ownership was read from mutable engine state again AFTER the
+    protection work, so a rebind landing in between filed the old turn under the new session
+    and then set the NEW session's cursor past a request that had never been stored."""
+    cfg = LCMConfig()
+    cfg.database_path = str(tmp_path / "fence.db")
+    engine = LCMEngine(config=cfg, hermes_home=str(tmp_path))
+    try:
+        engine.on_session_start("old", context_length=200_000)
+        real_batch = engine._store._append_protected_batch
+        rebound = {"done": False}
+
+        def rebind_then_store(session_id, rows, estimates, **kwargs):
+            if not rebound["done"]:
+                rebound["done"] = True
+                engine.on_session_start("new", context_length=200_000)
+            return real_batch(session_id, rows, estimates, **kwargs)
+
+        engine._store._append_protected_batch = rebind_then_store
+        engine._ingest_messages([{"role": "user", "content": "OLD SESSION SECRET"}])
+        engine._store._append_protected_batch = real_batch
+
+        old_rows = [r["content"] for r in engine._store.get_session_messages("old")]
+        new_rows = [r["content"] for r in engine._store.get_session_messages("new")]
+        assert old_rows == ["OLD SESSION SECRET"], (old_rows, new_rows)
+        assert new_rows == []
+        # and the new session's cursor was not advanced past its own unstored request
+        engine._ingest_messages([{"role": "user", "content": "NEW SESSION REQUEST"}])
+        assert [r["content"] for r in engine._store.get_session_messages("new")] == [
+            "NEW SESSION REQUEST"
+        ]
+    finally:
+        engine.shutdown()
+
+
+def test_a_failed_carry_over_commit_leaves_no_pending_ownership_change(tmp_path):
+    """round-5 verify-6 #11: `reassign_session_nodes` lacked the rollback discipline used by
+    node publication, so a failed commit left the transaction open with the ownership change
+    pending, and the next unrelated publication committed it."""
+    dag = SummaryDAG(str(tmp_path / "carry.db"))
+    try:
+        node_id = dag.add_node(_node(session="old"))
+
+        class _RefusingCommit:
+            def __init__(self, connection):
+                self._connection = connection
+
+            def __getattr__(self, name):
+                return getattr(self._connection, name)
+
+            def commit(self):
+                raise sqlite3.OperationalError("disk I/O error")
+
+        real_connection = dag._conn
+        dag._conn = _RefusingCommit(real_connection)
+        try:
+            with pytest.raises(sqlite3.OperationalError):
+                dag.reassign_session_nodes("old", "new")
+        finally:
+            dag._conn = real_connection
+
+        assert dag._conn.in_transaction is False
+        assert [n.node_id for n in dag.get_session_nodes("old")] == [node_id]
+        assert dag.get_session_nodes("new") == []
+    finally:
+        dag.close()

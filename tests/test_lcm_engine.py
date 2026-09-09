@@ -23675,6 +23675,10 @@ class TestEngineTools:
             # and an expansion says whether every source it names could be read (verify-4 #15)
             "tool_calls_offset": 0,
             "next_tool_calls_offset": 0,
+            # fork: betterlcm — the envelope has a cursor of its own and travels with the page
+            # (round-5 verify-6 #6)
+            "envelope_offset": 0,
+            "next_envelope_offset": 0,
             "has_more": True,
             "remaining_sources": 2,
             "complete": True,

@@ -290,3 +290,72 @@ def test_a_truncated_child_summary_can_be_finished(tmp_path):
         assert collected == long_summary, (len(collected), len(long_summary))
     finally:
         e.shutdown()
+
+
+def test_node_expansion_charges_and_pages_the_envelope(tmp_path):
+    """round-5 verify-6 #6: envelope slices were neither charged to the node-expansion budget
+    nor consulted by its continuation decision, so a 20,000-character envelope returned part of
+    itself and reported has_more=false, complete=true."""
+    from hermes_lcm.dag import SummaryNode
+    import time as _time
+
+    cfg = LCMConfig(database_path=str(tmp_path / "env.db"))
+    engine = LCMEngine(config=cfg, hermes_home=str(tmp_path))
+    try:
+        engine.on_session_start("env", platform="cli", context_length=262_144)
+        store_id = engine._store.append(
+            "env",
+            {"role": "user", "content": "short", "reasoning_content": "z" * 20_000},
+            source="cli",
+        )
+        engine._store.commit()
+        node_id = engine._dag.add_node_with_meta(
+            SummaryNode(session_id="env", depth=0, summary="s\nExpand for details about: x",
+                        token_count=5, source_token_count=50, source_ids=[store_id],
+                        source_type="messages", created_at=_time.time()),
+            level=1,
+        )
+
+        seen = ""
+        args = {"node_id": node_id, "max_tokens": 500}
+        for _ in range(200):
+            page = json.loads(lcm_tools.lcm_expand(args, engine=engine))
+            row = page["expanded"][0]
+            seen += row.get("envelope") or ""
+            if not row.get("envelope_truncated"):
+                assert page["pagination"]["complete"] is True
+                break
+            # an unfinished envelope keeps the page open
+            assert page["pagination"]["has_more"] is True
+            args = dict(row["envelope_continue_with"], max_tokens=500)
+        assert "z" * 20_000 in seen
+    finally:
+        engine.shutdown()
+
+
+def test_a_parent_whose_children_are_gone_does_not_synthesise_as_complete(tmp_path):
+    """round-5 verify-6 #7: an empty child block carrying only the failure was dropped, and the
+    final completeness check ignored every source-failure flag except missing raw rows."""
+    from hermes_lcm import tools as tools_module
+
+    cfg = LCMConfig(database_path=str(tmp_path / "orphan.db"))
+    engine = LCMEngine(config=cfg, hermes_home=str(tmp_path))
+    try:
+        engine.on_session_start("orph", platform="cli", context_length=262_144)
+        from hermes_lcm.dag import SummaryNode
+        import time as _time
+        parent = SummaryNode(session_id="orph", depth=1, summary="a parent summary",
+                             token_count=5, source_token_count=50, source_ids=[9999],
+                             source_type="nodes", created_at=_time.time())
+        parent_id = engine._dag.add_node_with_meta(parent, level=2)
+        node = engine._dag.get_node(parent_id)
+        blocks = tools_module._collect_expansion_context_blocks(engine, node, max_tokens=500) \
+            if hasattr(tools_module, "_collect_expansion_context_blocks") else None
+        if blocks is None:
+            children, pagination = tools_module._expand_child_nodes(engine, node, max_tokens=500)
+            assert pagination["complete"] is False
+            assert pagination["missing_source_node_ids"] == [9999]
+        else:
+            assert any(b.get("pagination", {}).get("complete") is False for b in blocks)
+    finally:
+        engine.shutdown()

@@ -596,16 +596,39 @@ class BypassMixin:
         ]
         dropped = original_messages[:max(0, len(original_messages) - len(surviving))]
         dropped_chars = max(0, _chars(original_messages) - _chars(surviving))
+        # fork: betterlcm — the receipt is CUMULATIVE. Every surviving receipt was rewritten
+        # with counts from the latest reduction alone, so a second bypass compaction erased
+        # the record of the first: two receipts both claimed 6 messages / 3,046 characters
+        # where 10 / 5,100 had already gone (round-5 verify-6 #10). Earlier receipts state
+        # what they removed; those numbers are carried forward and this call's own reduction
+        # is added exactly once.
+        prior_messages = 0
+        prior_chars = 0
+        for message in original:
+            if not marked_loss.is_bypass_omission_marker(message):
+                continue
+            counted_messages, counted_chars = marked_loss.bypass_omission_counts(
+                str(message.get("content") or "")
+            )
+            prior_messages += counted_messages
+            prior_chars += counted_chars
+        total_messages = prior_messages + len(dropped)
+        total_chars = prior_chars + dropped_chars
         refreshed: List[Dict[str, Any]] = []
+        receipt_written = False
         for message in trimmed:
             if not marked_loss.is_bypass_omission_marker(message):
                 refreshed.append(message)
                 continue
+            if receipt_written:
+                # one cumulative receipt, not several copies each restating the same total
+                continue
             was_compact = "msg /" in str(message.get("content") or "")
-            content = marked_loss.bypass_omission_marker(len(dropped), dropped_chars)
+            content = marked_loss.bypass_omission_marker(total_messages, total_chars)
             if was_compact:
                 content = marked_loss.compact_bypass_omission_marker(content)
             refreshed.append({**message, "content": content})
+            receipt_written = True
         return refreshed
 
     def _compress_lcm_bypassed_session(
