@@ -1439,6 +1439,7 @@ def _expand_message_sources(
     source_limit: int | None = None,
     content_offset: int = 0,
     tool_calls_offset: int = 0,  # fork: betterlcm — resume a paged tool-call rendering
+    envelope_offset: int = 0,  # fork: betterlcm — resume a paged envelope rendering
     hydrate_externalized_content: bool = False,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     from .tokens import count_tokens
@@ -1530,13 +1531,7 @@ def _expand_message_sources(
         }
         if content_source == "externalized_payload":
             expanded["transcript_content"] = transcript_content
-        # fork: betterlcm — the host fields the columns do not project belong to this row too;
-        # node expansion omitted them while reporting completion (round-3 verify-4 #8).
-        if isinstance(stored.get("envelope"), dict) and stored["envelope"]:
-            expanded["envelope"] = stored["envelope"]
-        if stored.get("envelope_corrupt"):
-            expanded["envelope_corrupt"] = True
-            expanded["envelope_raw"] = stored.get("envelope_raw") or "" 
+
         # fork: betterlcm — an assistant turn's tool CALLS are part of what it said. Omitting
         # them made a call-only assistant message expand as empty content with
         # `has_more: false` — a recovery path reporting success while returning nothing of what
@@ -1557,20 +1552,72 @@ def _expand_message_sources(
                 expanded["tool_calls_truncated"] = True
                 expanded["tool_calls_next_offset"] = call_slice["next_content_offset"]
                 # fork: the continuation must come back to THIS node with the call offset;
-                # raw-store expansion does not render tool calls at all (verify-1 on T04).
+                # raw-store expansion does not render tool calls at all (verify-1 on T04). It
+                # carries the BODY cursor too, or the continuation re-sends what it already
+                # delivered (round-2 verify-2 #8). The envelope cursor is filled in below, once
+                # the envelope slice is known, so a continuation never restarts another field
+                # (round-4 verify-2 #9).
                 expanded["tool_calls_continue_with"] = {
                     "tool": "lcm_expand",
                     "node_id": int(node.node_id),
                     "source_offset": source_index,
                     "source_limit": 1,
-                    # fork: carry the BODY cursor too, or the continuation re-sends the body
-                    # it already delivered (round-2 verify-2 #8)
                     "content_offset": (
                         sliced["next_content_offset"] if sliced["has_more"]
                         else sliced["content_offset"] + sliced["content_returned_chars"]
                     ),
                     "tool_calls_offset": call_slice["next_content_offset"],
+                    "envelope_offset": envelope_offset if source_index == source_offset else 0,
                 }
+        # fork: betterlcm — the host fields the columns do not project belong to this row too;
+        # node expansion omitted them while reporting completion (round-3 verify-4 #8), and
+        # then returned them WHOLE, which put a 200,000-character reasoning field inside a
+        # 50-token request (round-4 verify-2 #8). Same bounded representation as the raw path.
+        if isinstance(stored.get("envelope"), dict) and stored["envelope"]:
+            rendered_envelope = json.dumps(stored["envelope"], ensure_ascii=False, default=str)
+            envelope_budget = max(
+                0,
+                remaining_tokens
+                - count_tokens(sliced["content"])
+                - (count_tokens(call_slice["content"]) if call_slice is not None else 0),
+            )
+            envelope_slice = _slice_content_for_response(
+                rendered_envelope,
+                envelope_budget,
+                envelope_offset if source_index == source_offset else 0,
+            )
+            expanded["envelope"] = envelope_slice["content"]
+            expanded["envelope_chars"] = envelope_slice["content_chars"]
+            expanded["envelope_offset"] = envelope_slice["content_offset"]
+            expanded["envelope_returned_chars"] = envelope_slice["content_returned_chars"]
+            if expanded.get("tool_calls_continue_with"):
+                expanded["tool_calls_continue_with"]["envelope_offset"] = (
+                    envelope_slice["next_content_offset"]
+                    if envelope_slice["content_truncated"]
+                    else envelope_slice["content_offset"]
+                    + envelope_slice["content_returned_chars"]
+                )
+            if envelope_slice["content_truncated"]:
+                expanded["envelope_truncated"] = True
+                expanded["envelope_next_offset"] = envelope_slice["next_content_offset"]
+                expanded["envelope_continue_with"] = {
+                    "tool": "lcm_expand",
+                    "node_id": int(node.node_id),
+                    "source_offset": source_index,
+                    "source_limit": 1,
+                    "content_offset": (
+                        sliced["next_content_offset"] if sliced["has_more"]
+                        else sliced["content_offset"] + sliced["content_returned_chars"]
+                    ),
+                    "envelope_offset": envelope_slice["next_content_offset"],
+                    "tool_calls_offset": (
+                        call_slice["next_content_offset"]
+                        if call_slice is not None and call_slice["content_truncated"] else 0
+                    ),
+                }
+        if stored.get("envelope_corrupt"):
+            expanded["envelope_corrupt"] = True
+            expanded["envelope_raw"] = stored.get("envelope_raw") or "" 
         if stored.get("tool_call_id") and stored.get("role") == "tool":
             expanded["tool_call_id"] = stored.get("tool_call_id")
         if stored.get("role") == "tool":
@@ -5975,6 +6022,7 @@ def lcm_expand(args: Dict[str, Any], **kwargs) -> str:
     content_offset = _parse_non_negative_int(args.get("content_offset", 0), 0)
     tool_calls_offset = _parse_non_negative_int(args.get("tool_calls_offset", 0), 0)  # fork
     envelope_offset = _parse_non_negative_int(args.get("envelope_offset", 0), 0)  # fork
+
     raw_include_exact_ref = args.get("include_exact_ref", False)
     if not isinstance(raw_include_exact_ref, bool):
         return json.dumps({"error": "include_exact_ref must be a boolean"})
@@ -6058,13 +6106,19 @@ def lcm_expand(args: Dict[str, Any], **kwargs) -> str:
         # are CHARGED to the same budget and paged with their own cursor: returning a
         # 200,000-character reasoning field whole turned a 50-token request into 50,000
         # (round-3 verify-2 #6).
+        from .tokens import count_tokens as _count_tokens_raw
+        raw_budget_used = _count_tokens_raw(sliced["content"])
         if isinstance(stored.get("envelope"), dict) and stored["envelope"]:
             from .tokens import count_tokens as _count_tokens_envelope
             rendered_envelope = json.dumps(stored["envelope"], ensure_ascii=False, default=str)
-            envelope_budget = max(0, max_tokens - _count_tokens_envelope(sliced["content"]))
+            # fork: betterlcm — the budget is spent ONCE, in order: content, then the
+            # envelope, then the calls. Giving each field the whole remainder let two fields
+            # spend the same tokens and their continuations cycle (round-4 verify-2 #9).
+            envelope_budget = max(0, max_tokens - raw_budget_used)
             envelope_slice = _slice_content_for_response(
                 rendered_envelope, envelope_budget, envelope_offset
             )
+            raw_budget_used += _count_tokens_envelope(envelope_slice["content"])
             result["envelope"] = envelope_slice["content"]
             result["envelope_chars"] = envelope_slice["content_chars"]
             result["envelope_offset"] = envelope_slice["content_offset"]
@@ -6081,6 +6135,9 @@ def lcm_expand(args: Dict[str, Any], **kwargs) -> str:
                         else sliced["content_offset"] + sliced["content_returned_chars"]
                     ),
                     "envelope_offset": envelope_slice["next_content_offset"],
+                    # fork: every continuation carries EVERY cursor, or following one restarts
+                    # a field the caller already has (round-4 verify-2 #9)
+                    "tool_calls_offset": tool_calls_offset,
                 }
         # fork: betterlcm — an assistant turn's tool CALLS are part of what it said. Node
         # expansion renders and pages them; the raw-row path returned the text with
@@ -6095,7 +6152,7 @@ def lcm_expand(args: Dict[str, Any], **kwargs) -> str:
             # base64 into the answer; the stored row itself is untouched.
             safe_calls = _sanitized_tool_calls_for_response(stored_tool_calls)
             rendered_calls = json.dumps(safe_calls, ensure_ascii=False, default=str)
-            call_budget = max(0, max_tokens - _count_tokens(sliced["content"]))
+            call_budget = max(0, max_tokens - raw_budget_used)
             call_slice = _slice_content_for_response(rendered_calls, call_budget, tool_calls_offset)
             result["tool_calls"] = call_slice["content"]
             if rendered_calls != json.dumps(stored_tool_calls, ensure_ascii=False, default=str):
@@ -6118,6 +6175,13 @@ def lcm_expand(args: Dict[str, Any], **kwargs) -> str:
                         else sliced["content_offset"] + sliced["content_returned_chars"]
                     ),
                     "tool_calls_offset": call_slice["next_content_offset"],
+                    # fork: carry the envelope cursor too (round-4 verify-2 #9)
+                    "envelope_offset": (
+                        result.get("envelope_next_offset")
+                        if result.get("envelope_truncated")
+                        else int(result.get("envelope_offset") or 0)
+                        + int(result.get("envelope_returned_chars") or 0)
+                    ),
                 }
         if include_exact_ref and sliced["content_returned_chars"] > 0:
             exact_start = sliced["content_offset"]
@@ -6182,6 +6246,7 @@ def lcm_expand(args: Dict[str, Any], **kwargs) -> str:
             source_limit=source_limit,
             content_offset=content_offset,
             tool_calls_offset=tool_calls_offset,  # fork: resume paged tool calls
+            envelope_offset=envelope_offset,  # fork: resume a paged envelope
             hydrate_externalized_content=hydrate_externalized,  # fork
         )
         return json.dumps(

@@ -297,20 +297,26 @@ _MARKER_LINE_PREFIXES = (
 # A marker is often INLINE, not on a line of its own: sanitisation replaces an injected block
 # in the middle of a sentence. Preserving whole lines alone therefore missed exactly the
 # receipts that mattered (round-2 verify-4 #13).
-_MARKER_FRAGMENT_RE = re.compile(r"\[(?:LCM|Context omitted:)[^\n]*")
+# The receipt is the BRACKETED marker, not the rest of the line: a marker followed by 200,000
+# ordinary characters restored the whole elided body when the fragment ran to the end of the
+# line (round-4 verify-2 #7). Markers never contain a closing bracket of their own.
+_MARKER_FRAGMENT_RE = re.compile(r"\[(?:LCM|Context omitted:)[^\]\n]*\]?")
+# A receipt this module writes is far shorter than this; the bound only stops a pathological
+# unterminated marker from carrying a whole message with it.
+_MARKER_FRAGMENT_MAX_CHARS = 2_000
 
 
 def marker_fragments(text: str) -> List[str]:
     """Every marker this module wrote that occurs in ``text``, in order, de-duplicated.
 
-    fork: betterlcm — the fragment is NOT shortened. A 300-character cut removed the recovery
-    clause from an 800-character receipt, so the surviving text said something was missing
-    without saying how to get it (round-3 verify-4 #10). A receipt that is worth carrying is
-    worth carrying whole.
+    fork: betterlcm — the fragment is not shortened below its closing bracket. A 300-character
+    cut removed the recovery clause from a long receipt (round-3 verify-4 #10); running to the
+    end of the line restored the surrounding body (round-4 verify-2 #7). The marker itself is
+    what travels.
     """
     found: List[str] = []
     for match in _MARKER_FRAGMENT_RE.finditer(str(text or "")):
-        fragment = match.group(0).strip()
+        fragment = match.group(0).strip()[:_MARKER_FRAGMENT_MAX_CHARS]
         if fragment and fragment not in found:
             found.append(fragment)
     return found

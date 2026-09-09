@@ -1574,3 +1574,56 @@ def test_a_quoted_leading_turn_receipt_with_user_text_is_stored(tmp_path):
         assert e._is_replayed_context_scaffold_message(with_text) is False, with_text
     finally:
         e.shutdown()
+
+
+def test_expansion_continuations_terminate_and_do_not_double_spend(tmp_path):
+    """round-4 verify-2 #8/#9: node expansion returned the whole envelope unbudgeted, and in
+    the raw path each field received the entire remaining budget while its continuation omitted
+    the other fields' cursors — following them cycled forever on the same page."""
+    import json
+    from hermes_lcm import tools as lcm_tools
+    e = _engine(tmp_path, "cursors.db", incremental_max_depth=0)
+    try:
+        e.on_session_start("cu", platform="cli", context_length=200_000)
+        store_id = e._store.append("cu", {
+            "role": "assistant", "content": "body",
+            "reasoning_content": "r" * 450,
+            "tool_calls": [{"id": "c1", "type": "function",
+                            "function": {"name": "t", "arguments": "a" * 450}}],
+        }, source="cli")
+        e._store.commit()
+
+        args = {"store_id": store_id, "max_tokens": 30}
+        seen_states = set()
+        pages = 0
+        while pages < 60:
+            payload = json.loads(lcm_tools.lcm_expand(dict(args), engine=e))
+            pages += 1
+            state = (
+                int(payload.get("content_offset") or 0),
+                int(payload.get("envelope_offset") or 0),
+                int(payload.get("tool_calls_offset") or 0),
+            )
+            assert state not in seen_states, f"continuation cycled at {state}"
+            seen_states.add(state)
+            continuation = (
+                payload.get("envelope_continue_with")
+                or payload.get("tool_calls_continue_with")
+            )
+            if continuation is None:
+                break
+            args = {k: v for k, v in continuation.items() if k != "tool"}
+            args["max_tokens"] = 30
+        assert pages < 60, "the continuations never finished"
+
+        # and a node expansion charges the envelope to its budget
+        node_id = e._dag.add_node_with_meta(SummaryNode(
+            session_id="cu", depth=0, summary="s\n[Expand for details: s]", token_count=5,
+            source_token_count=50, source_ids=[store_id], source_type="messages",
+            created_at=time.time()), level=1)
+        node_payload = json.loads(lcm_tools.lcm_expand(
+            {"node_id": node_id, "max_tokens": 50}, engine=e))
+        rendered = json.dumps(node_payload["expanded"], ensure_ascii=False)
+        assert len(rendered) < 4_000, len(rendered)
+    finally:
+        e.shutdown()
