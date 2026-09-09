@@ -368,3 +368,37 @@ def test_a_timed_out_retrieval_is_not_reported_as_no_progress():
     assert result["status"] == "incomplete", result
     assert result["retrieval_complete"] is False
     assert result["timeout"] is True
+
+
+def test_a_contradicting_deferred_reference_is_seen_in_words_and_synonyms(tmp_path):
+    """round-4 verify-4 #15/#16: the deferred screen required a digit AND the literal canonical
+    unit, so "20 dollars" against unit usd and "twenty points" screened as irrelevant and the
+    result still certified. And when coverage was refused, only answer_sufficient was
+    downgraded — computation_sufficient with its canonical answer survived."""
+    from hermes_lcm.config import LCMConfig
+    from hermes_lcm.engine import LCMEngine
+    from hermes_lcm.requirements_compiler import compile_preanswer_evidence
+
+    cfg = LCMConfig(database_path=str(tmp_path / "deferred2.db"))
+    e = LCMEngine(config=cfg, hermes_home=str(tmp_path))
+    try:
+        e.on_session_start("d2", platform="cli", context_length=200_000)
+        refs = []
+        for index in range(13):
+            text = ("Atlas cost twenty dollars." if index == 12
+                    else f"Atlas cost 15 dollars in review {index}.")
+            store_id = e._store.append("d2", {"role": "user", "content": text}, source="cli")
+            refs.append(f"lcm:{store_id}:0-{len(text)}")
+        e._store.commit()
+
+        result = compile_preanswer_evidence(
+            "How much did Atlas cost?",
+            baseline_refs=refs,
+            engine=e,
+            enabled=True,
+            budgets={"max_retrieval_calls": 0},
+        )
+        assert result["metrics"]["deferred_material_candidates"] >= 1, result["metrics"]
+        assert result["state"] not in {"answer_sufficient", "computation_sufficient"}, result["state"]
+    finally:
+        e.shutdown()

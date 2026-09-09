@@ -1284,6 +1284,20 @@ def _deferred_material_count(refs, contract, *, engine) -> int:
     if not refs or contract is None:
         return 0
     unit = str(getattr(contract, "requested_unit", "") or "").casefold()
+    # fork: betterlcm — when the question NAMES its operands, a deferred reference matters only
+    # if it mentions one of them; "Unrelated recipe note 11." cannot change "how much time do I
+    # save by cycling instead of walking?" (round-4 verify-4 #15, keeping the saturated-baseline
+    # behaviour intact).
+    anchors = {
+        str(getattr(slot, "anchor", "") or "").casefold()
+        for slot in (getattr(contract, "slots", ()) or ())
+        if str(getattr(slot, "anchor", "") or "").strip()
+    }
+    anchors |= {
+        str(anchor or "").casefold()
+        for anchor in (getattr(contract, "anchors", ()) or ())
+        if str(anchor or "").strip()
+    }
     store_ids: list[int] = []
     for raw in refs:
         text = raw if isinstance(raw, str) else str((raw or {}).get("exact_ref") or "")
@@ -1308,12 +1322,46 @@ def _deferred_material_count(refs, contract, *, engine) -> int:
         if not content:
             material += 1  # unreadable: it could be anything
             continue
-        if not re.search(r"(?<!\w)\d", content):
+        folded = content.casefold()
+        # fork: betterlcm — a NUMBER can be spelled out, and a unit can be named in words:
+        # requiring a digit and the literal canonical unit missed "twenty points" and
+        # "20 dollars" against unit "usd", so a contradicting reference screened as irrelevant
+        # (round-4 verify-4 #15).
+        has_number = bool(_DIGIT_NUMBER_RE.search(content)) or bool(
+            _WORD_NUMBER_RE.search(content)
+        )
+        if not has_number:
             continue
-        if unit and unit not in content.casefold():
+        if anchors and not any(anchor in folded for anchor in anchors):
+            continue
+        if unit and not _unit_named_in(folded, unit):
             continue
         material += 1
     return material
+
+
+# The words a unit can be written as, beside its canonical name.
+_UNIT_SYNONYMS = {
+    "usd": ("usd", "dollar", "dollars", "$"),
+    "eur": ("eur", "euro", "euros", "€"),
+    "gbp": ("gbp", "pound", "pounds", "£"),
+    "jpy": ("jpy", "yen", "¥"),
+    "minute": ("minute", "minutes", "min", "mins"),
+    "hour": ("hour", "hours", "hr", "hrs"),
+    "day": ("day", "days"),
+    "week": ("week", "weeks"),
+    "month": ("month", "months"),
+    "year": ("year", "years"),
+    "page": ("page", "pages"),
+    "point": ("point", "points"),
+}
+
+
+def _unit_named_in(folded_content: str, unit: str) -> bool:
+    for name in _UNIT_SYNONYMS.get(unit, (unit,)):
+        if name and name in folded_content:
+            return True
+    return unit in folded_content
 
 
 def _base_result(
@@ -1399,11 +1447,20 @@ def _finish(result: dict[str, Any], *, started: float) -> dict[str, Any]:
                 if unparsed else
                 f"{deferred} unexamined candidate reference(s) state values of this kind"
             )
-        if result.get("state") == "answer_sufficient":
+        # fork: betterlcm — refusing coverage has to revoke the CERTIFICATE, not merely one
+        # label: the Bali/Kyoto fixture reported finite_coverage=false and still returned
+        # computation_sufficient with "1 vacation" and a populated context
+        # (round-4 verify-4 #16).
+        if result.get("state") in {"answer_sufficient", "computation_sufficient"}:
             result["state"] = "partial"
             result["reason_code"] = (
                 "unparsed_unit_clauses" if unparsed else "deferred_candidates_not_examined"
             )
+            if unparsed:
+                result["computation"] = None
+                result["computation_sha256"] = None
+                result["closed_requirements"] = []
+                result["context"] = None
     context = result.get("context")
     result["metrics"]["latency_ms"] = round(
         (time.perf_counter() - started) * 1_000.0, 3
