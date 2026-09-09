@@ -1273,6 +1273,49 @@ def _baseline_identity(
     }
 
 
+def _deferred_material_count(refs, contract, *, engine) -> int:
+    """How many unexamined references could change this answer.
+
+    fork: betterlcm — a budget that stopped after twelve references hid a thirteenth saying 20
+    points behind twelve saying 15, and the result still certified sufficiency
+    (round-3 verify-4 #15). Unexamined NOISE is not a reason to refuse a certificate; an
+    unexamined row that states a value of the requested kind is. Content only, no hydration.
+    """
+    if not refs or contract is None:
+        return 0
+    unit = str(getattr(contract, "requested_unit", "") or "").casefold()
+    store_ids: list[int] = []
+    for raw in refs:
+        text = raw if isinstance(raw, str) else str((raw or {}).get("exact_ref") or "")
+        match = _EXACT_REF_RE.fullmatch(text.strip())
+        if match is not None:
+            store_ids.append(int(match.group("store_id")))
+        elif isinstance(raw, Mapping) and raw.get("store_id") is not None:
+            try:
+                store_ids.append(int(raw["store_id"]))
+            except (TypeError, ValueError):
+                continue
+    if not store_ids:
+        return 0
+    try:
+        rows = engine._store.get_batch(store_ids)
+    except Exception:  # pragma: no cover - a degraded store cannot prove anything
+        return len(store_ids)
+    material = 0
+    for store_id in store_ids:
+        row = rows.get(store_id) if isinstance(rows, Mapping) else None
+        content = str((row or {}).get("content") or "")
+        if not content:
+            material += 1  # unreadable: it could be anything
+            continue
+        if not re.search(r"(?<!\w)\d", content):
+            continue
+        if unit and unit not in content.casefold():
+            continue
+        material += 1
+    return material
+
+
 def _base_result(
     *,
     contract: AnswerContract | None,
@@ -1339,6 +1382,28 @@ def _base_result(
 
 
 def _finish(result: dict[str, Any], *, started: float) -> dict[str, Any]:
+    # fork: betterlcm — one place where a certificate is refused. Candidates the budgets never
+    # examined can change the answer, and a unit clause the grammatical filter could not read
+    # leaves an enumeration unproven (round-3 verify-4 #15/#16).
+    metrics = result.get("metrics") or {}
+    certificate = result.get("coverage_certificate") or {}
+    deferred = int(metrics.get("deferred_material_candidates") or 0)
+    unparsed = int((certificate or {}).get("unparsed_unit_clauses") or 0)
+    if deferred or unparsed:
+        result.setdefault("trace", {})["truncated"] = True
+        if result.get("finite_coverage"):
+            result["finite_coverage"] = False
+            result["finite_coverage_refused_reason"] = (
+                f"{unparsed} clause(s) mentioning the requested unit could not be read as "
+                "events; the row scan is exhaustive, the interpretation is not"
+                if unparsed else
+                f"{deferred} unexamined candidate reference(s) state values of this kind"
+            )
+        if result.get("state") == "answer_sufficient":
+            result["state"] = "partial"
+            result["reason_code"] = (
+                "unparsed_unit_clauses" if unparsed else "deferred_candidates_not_examined"
+            )
     context = result.get("context")
     result["metrics"]["latency_ms"] = round(
         (time.perf_counter() - started) * 1_000.0, 3
@@ -1741,6 +1806,32 @@ def _source_event_clause(
     )
 
 
+# fork: betterlcm — verbs that place a clause OUTSIDE the counted event on purpose (buying a
+# vacation package is not taking one). A clause carrying one of these was read and deliberately
+# excluded; a clause carrying none was not read at all, and that difference decides whether an
+# exhausted row scan proves exhaustive enumeration (round-3 verify-4 #16).
+_DELIBERATE_NON_EVENT_RE = re.compile(
+    r"\b(?:bought|buy|buying|purchas(?:e|ed|ing)|book(?:ed|ing)?|plan(?:ned|ning)?|"
+    r"cancel(?:led|ed|ling)?|consider(?:ed|ing)?|might|may|hope[ds]?|want(?:ed)?|would|could|"
+    r"should|never|not)\b",
+    re.IGNORECASE,
+)
+
+
+def _event_clause_verdict(clause: str, *, role, unit, question=None) -> str:
+    """``"event"`` | ``"excluded"`` | ``"unreadable"`` for one unit-bearing clause."""
+    if _source_event_clause(clause, role=role, unit=unit, question=question):
+        return "event"
+    normalized = " ".join(str(clause or "").casefold().split())
+    if str(role or "").casefold() != "user":
+        return "excluded"
+    if normalized.rstrip().endswith("?"):
+        return "excluded"
+    if _DELIBERATE_NON_EVENT_RE.search(normalized):
+        return "excluded"
+    return "unreadable"
+
+
 def _finite_enumeration(
     question: str,
     contract: AnswerContract,
@@ -1762,6 +1853,10 @@ def _finite_enumeration(
         "scanned_rows": int(scan.get("returned_rows") or 0),
         "truncated": bool(scan.get("truncated")),
         "material_clauses": 0,
+        # fork: betterlcm — clauses that mention the requested unit but the grammatical filter
+        # could not read either way. Dropping them before counting turned an exhausted ROW scan
+        # into an exhaustive EVENT interpretation (round-3 verify-4 #16).
+        "unparsed_unit_clauses": 0,
         "unknown_time_clauses": 0,
         "unavailable_as_of_clauses": 0,
         "ungrounded_key_clauses": 0,
@@ -1777,12 +1872,15 @@ def _finite_enumeration(
     for row in scan.get("rows") or []:
         content = str(row.get("content") or "")
         for start, end, clause in _material_clauses(content, contract.requested_unit):
-            if not _source_event_clause(
+            verdict = _event_clause_verdict(
                 clause,
                 role=row.get("role"),
                 unit=contract.requested_unit,
                 question=question,
-            ):
+            )
+            if verdict != "event":
+                if verdict == "unreadable":
+                    certificate["unparsed_unit_clauses"] += 1  # fork: round-3 verify-4 #16
                 continue
             certificate["material_clauses"] += 1
             hydrated = _normalize_ref(
@@ -2031,13 +2129,18 @@ def compile_preanswer_evidence(
     ranked_baseline_input = _rank_baseline_inputs(baseline_input, contract)
     baseline: list[dict[str, Any]] = []
     seen: set[str] = set()
+    examined = 0
     for raw in ranked_baseline_input[: limits.max_candidates]:
+        examined += 1
         hydrated = _normalize_ref(raw, engine=engine, origin="baseline")
         if hydrated is not None and hydrated["exact_ref"] not in seen:
             seen.add(hydrated["exact_ref"])
             baseline.append(hydrated)
             if len(baseline) >= limits.max_hydrated_candidates:
                 break
+    # fork: betterlcm — what this call never looked at, and how much of it matters
+    # (round-3 verify-4 #15)
+    deferred_refs = list(ranked_baseline_input[examined:])
     result = _base_result(
         contract=contract,
         limits=limits,
@@ -2057,6 +2160,10 @@ def compile_preanswer_evidence(
         baseline, contract, limit=limits.max_candidates
     )
     result["metrics"]["candidate_count"] = len(baseline_candidates)
+    result["metrics"]["deferred_candidates"] = len(deferred_refs)  # fork: round-3 #15
+    result["metrics"]["deferred_material_candidates"] = _deferred_material_count(
+        deferred_refs, contract, engine=engine
+    )
 
     if contract.operation == "scalar":
         direct, reason = _select_scalar(baseline_candidates, contract)

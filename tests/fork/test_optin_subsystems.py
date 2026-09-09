@@ -267,3 +267,40 @@ def test_grounding_refuses_a_value_the_quote_does_not_attribute(tmp_path):
     finally:
         assertions.close()
         messages.close()
+
+
+def test_unexamined_candidates_that_could_change_the_answer_block_sufficiency(tmp_path):
+    """round-3 verify-4 #15: twelve references saying 15 points followed by a thirteenth saying
+    20 returned answer_sufficient with 15 and trace.truncated=false — the thirteenth was never
+    hydrated. Unexamined NOISE is fine; an unexamined row stating a value of the requested kind
+    is not."""
+    from hermes_lcm.config import LCMConfig
+    from hermes_lcm.engine import LCMEngine
+    from hermes_lcm.requirements_compiler import compile_preanswer_evidence
+
+    cfg = LCMConfig(database_path=str(tmp_path / "deferred.db"))
+    e = LCMEngine(config=cfg, hermes_home=str(tmp_path))
+    try:
+        e.on_session_start("dc", platform="cli", context_length=200_000)
+        refs = []
+        for index in range(13):
+            points = 20 if index == 12 else 15
+            store_id = e._store.append(
+                "dc", {"role": "user", "content": f"Alice scored {points} points in game {index}."},
+                source="cli")
+            refs.append(f"lcm:{store_id}:0-{len(f'Alice scored {points} points in game {index}.')}")
+        e._store.commit()
+
+        result = compile_preanswer_evidence(
+            "How many points did Alice score?",
+            baseline_refs=refs,
+            engine=e,
+            enabled=True,
+            budgets={"max_retrieval_calls": 0},
+        )
+        assert result["metrics"]["deferred_candidates"] >= 1, result["metrics"]
+        assert result["metrics"]["deferred_material_candidates"] >= 1, result["metrics"]
+        assert result["state"] != "answer_sufficient", result["state"]
+        assert result["trace"]["truncated"] is True
+    finally:
+        e.shutdown()
