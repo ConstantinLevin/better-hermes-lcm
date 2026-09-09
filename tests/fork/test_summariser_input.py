@@ -338,3 +338,25 @@ def test_every_removal_branch_leaves_a_receipt():
     two = _sanitize_string_media(
         "a data:image/png;base64," + "A" * 20 + " and data:image/png;base64," + "B" * 20)
     assert "×2" in two, two
+
+
+def test_the_summariser_sees_the_envelope_fields_or_a_receipt_for_them(tmp_path):
+    """round-3 verify-4 #8: an assistant turn carrying reasoning_content="DECISION cancel" and
+    is_error=True serialized as "[ASSISTANT]: Visible" — a failed step read exactly like a
+    successful one, and the decision reached the summariser nowhere."""
+    from hermes_lcm.config import LCMConfig
+    from hermes_lcm.engine import LCMEngine
+
+    cfg = LCMConfig(database_path=str(tmp_path / "envsum.db"))
+    e = LCMEngine(config=cfg, hermes_home=str(tmp_path))
+    try:
+        e.on_session_start("es", platform="cli", context_length=200_000)
+        serialized = e._serialize_messages([
+            {"role": "assistant", "content": "Visible",
+             "reasoning_content": "DECISION cancel the rollout", "is_error": True},
+        ])
+        assert "is_error=True" in serialized, serialized
+        assert "reasoning_content" in serialized, serialized
+        assert "not summarised here" in serialized
+    finally:
+        e.shutdown()

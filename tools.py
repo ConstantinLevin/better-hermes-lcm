@@ -1530,6 +1530,13 @@ def _expand_message_sources(
         }
         if content_source == "externalized_payload":
             expanded["transcript_content"] = transcript_content
+        # fork: betterlcm — the host fields the columns do not project belong to this row too;
+        # node expansion omitted them while reporting completion (round-3 verify-4 #8).
+        if isinstance(stored.get("envelope"), dict) and stored["envelope"]:
+            expanded["envelope"] = stored["envelope"]
+        if stored.get("envelope_corrupt"):
+            expanded["envelope_corrupt"] = True
+            expanded["envelope_raw"] = stored.get("envelope_raw") or "" 
         # fork: betterlcm — an assistant turn's tool CALLS are part of what it said. Omitting
         # them made a call-only assistant message expand as empty content with
         # `has_more: false` — a recovery path reporting success while returning nothing of what

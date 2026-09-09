@@ -151,6 +151,12 @@ def _envelope_extra_json(msg: Dict[str, Any]) -> Optional[str]:
         and key not in _PROJECTED_MESSAGE_KEYS
         and not key.startswith("_lcm")
     }
+    # fork: betterlcm — a timestamp the observed_at column cannot represent is still something
+    # the host sent; dropping it lost the only record of when the turn happened
+    # (round-3 verify-4 #8).
+    supplied_timestamp = msg.get("timestamp")
+    if supplied_timestamp not in (None, "") and _normalize_observed_at(supplied_timestamp) is None:
+        extra.setdefault("timestamp_raw", supplied_timestamp)
     if not extra:
         return None
     try:
@@ -2060,7 +2066,11 @@ class MessageStore:
             try:
                 d["envelope"] = json.loads(d["envelope_extra"])
             except (TypeError, ValueError, json.JSONDecodeError):
+                # fork: betterlcm — corrupt envelope JSON is not an empty envelope; the raw text
+                # is kept so the fields can still be recovered by hand (round-3 verify-4 #8).
                 d["envelope"] = {}
+                d["envelope_corrupt"] = True
+                d["envelope_raw"] = str(d.get("envelope_extra") or "")[:20_000]
         d.pop("envelope_extra", None)
         d["source"] = _normalize_source_value(d.get("source"))
         d["conversation_id"] = _normalize_conversation_id_value(d.get("conversation_id"))

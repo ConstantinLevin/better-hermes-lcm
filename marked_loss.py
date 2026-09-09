@@ -382,6 +382,46 @@ def leading_turns_dropped_marker(dropped: int, roles: List[str]) -> str:
     )
 
 
+# Envelope fields that CHANGE what a turn means and are cheap to render inline.
+_INLINE_ENVELOPE_FIELDS = ("name", "is_error", "status", "error_code", "finish_reason")
+
+
+def envelope_summary_suffix(envelope: dict, *, max_listed: int = 10) -> str:
+    """fork: betterlcm — render the small outcome fields, inventory the rest.
+
+    The summariser was given ``[ASSISTANT]: Visible`` for a turn whose envelope also carried
+    ``reasoning_content="DECISION cancel"`` and ``is_error=True``: a failed step read exactly
+    like a successful one and a decision reached the summariser nowhere (round-3 verify-4 #8).
+    Small fields are rendered; larger ones are named with their size and left in the store.
+    """
+    if not isinstance(envelope, dict) or not envelope:
+        return ""
+    inline: List[str] = []
+    listed: List[str] = []
+    for key, value in envelope.items():
+        if not isinstance(key, str) or key.startswith("lcm_") or value in (None, "", [], {}):
+            continue
+        if key in _INLINE_ENVELOPE_FIELDS and not isinstance(value, (dict, list)):
+            inline.append(f"{key}={value}")
+            continue
+        try:
+            size = len(value) if isinstance(value, (str, list, dict)) else len(str(value))
+        except Exception:  # pragma: no cover - defensive
+            size = 0
+        listed.append(f"{key} ({size} chars)")
+    parts = []
+    if inline:
+        parts.append(" [" + ", ".join(inline[:max_listed]) + "]")
+    if listed:
+        shown = ", ".join(sorted(listed)[:max_listed])
+        more = f" (+{len(listed) - max_listed} more)" if len(listed) > max_listed else ""
+        parts.append(
+            f"\n{RECEIPT_LINE_PREFIX} envelope field(s) not summarised here: {shown}{more}; "
+            "the stored message holds them — lcm_expand]"
+        )
+    return "".join(parts)
+
+
 def revision_rows_marker(store_ids: List[int]) -> str:
     """Name archived corrections that supersede rows this node covers.
 

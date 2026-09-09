@@ -2201,6 +2201,22 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                 self._ingest_cursor_needs_reconcile = previous_needs_reconcile
                 self._last_prefix_revision_fingerprints = previous_fingerprints
 
+    @staticmethod
+    def _message_envelope_fields(msg: Dict[str, Any]) -> dict:
+        """fork: betterlcm — the host fields beside the projected ones, from either shape."""
+        envelope = msg.get("envelope")
+        if isinstance(envelope, dict):
+            return envelope
+        return {
+            key: value for key, value in msg.items()
+            if isinstance(key, str)
+            and key not in {"role", "content", "tool_calls", "tool_call_id", "tool_name",
+                            "timestamp", "store_id", "session_id", "source",
+                            "conversation_id", "token_estimate", "pinned", "ingested_at",
+                            "observed_at", "observed_at_source", "host_message_id"}
+            and not key.startswith("_lcm")
+        }
+
     def _persist_frontier_marker(self) -> None:
         if not self._session_id or not self._conversation_id:
             return
@@ -5678,6 +5694,9 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                     content = marked_loss.elide_text(  # fork: marked
                         content, serialize_cap, original_chars=raw_chars
                     )
+                content += marked_loss.envelope_summary_suffix(  # fork: round-3 verify-4 #8
+                    self._message_envelope_fields(msg)
+                )
                 parts.append(f"[TOOL RESULT {tool_id}]: {content}")
                 continue
 
@@ -5718,11 +5737,17 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                         suffix = "" if is_matched else " " + marked_loss.unmatched_tool_call_note()
                         tc_parts.append(f"  {name}({args}){suffix}")
                     content += "\n[Tool calls:\n" + "\n".join(tc_parts) + "\n]"
+                content += marked_loss.envelope_summary_suffix(  # fork: round-3 verify-4 #8
+                    self._message_envelope_fields(msg)
+                )
                 parts.append(f"[ASSISTANT]: {content}")
                 continue
 
             content = marked_loss.elide_text(  # fork: marked
                 content, serialize_cap, original_chars=raw_chars
+            )
+            content += marked_loss.envelope_summary_suffix(  # fork: round-3 verify-4 #8
+                self._message_envelope_fields(msg)
             )
             parts.append(f"[{role.upper()}]: {content}")
 
