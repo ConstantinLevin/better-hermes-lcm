@@ -1728,13 +1728,28 @@ def _expand_child_nodes(
                 has_more = True
                 break
             summary, summary_truncated = _truncate_text_to_token_budget(summary, remaining_tokens)
+        rendered_summary = summary[:1000] if max_tokens is None else summary
+        was_truncated = summary_truncated or (
+            max_tokens is None and len(child.summary) > 1000
+        )
         expanded.append(
             {
                 "node_id": child.node_id,
                 "source_index": source_index,
                 "depth": child.depth,
-                "summary": summary[:1000] if max_tokens is None else summary,
-                "summary_truncated": summary_truncated or (max_tokens is None and len(child.summary) > 1000),
+                "summary": rendered_summary,
+                "summary_truncated": was_truncated,
+                # fork: betterlcm — where the REST of this summary is. Pointing at expansion
+                # returned the child's sources, never the omitted suffix of its own summary
+                # (round-3 verify-4 #13).
+                **({
+                    "summary_chars": len(child.summary or ""),
+                    "summary_continue_with": {
+                        "tool": "lcm_describe",
+                        "node_id": int(child.node_id),
+                        "summary_offset": len(rendered_summary),
+                    },
+                } if was_truncated else {}),
                 "token_count": child.token_count,
                 "source_token_count": child.source_token_count,
                 "expand_hint": child.expand_hint,
@@ -5854,6 +5869,25 @@ def lcm_describe(args: Dict[str, Any], **kwargs) -> str:
         # (verify-4 #14 / p02 T01).
         index_offset = _parse_non_negative_int(args.get("index_offset", 0), 0)
         info.update(_node_index_slice_payload(engine, node, offset=index_offset))
+        # fork: betterlcm — a node's OWN summary is pageable here. A truncated child summary
+        # said summary_truncated=true and pointed at expansion, which returns the child's
+        # SOURCES, so the omitted suffix of the summary itself was advertised and unreachable
+        # (round-3 verify-4 #13).
+        summary_offset = _parse_non_negative_int(args.get("summary_offset", 0), 0)
+        summary_text = str(node.summary or "")
+        summary_max = _parse_positive_int(args.get("summary_max_chars"), 0) or 4_000
+        summary_end = min(len(summary_text), summary_offset + summary_max)
+        info["summary"] = summary_text[summary_offset:summary_end]
+        info["summary_chars"] = len(summary_text)
+        info["summary_offset"] = summary_offset
+        info["summary_complete"] = summary_end >= len(summary_text)
+        if summary_end < len(summary_text):
+            info["summary_next_offset"] = summary_end
+            info["summary_continue_with"] = {
+                "tool": "lcm_describe",
+                "node_id": int(node.node_id),
+                "summary_offset": summary_end,
+            }
         return json.dumps(info)
 
     depth_stats = engine._dag.get_session_depth_stats(session_id)

@@ -249,3 +249,44 @@ def test_an_unreadable_sidecar_is_reported_not_silently_dropped(tmp_path, monkey
         assert payload.get("complete") is False
     finally:
         e.shutdown()
+
+
+def test_a_truncated_child_summary_can_be_finished(tmp_path):
+    """round-3 verify-4 #13: a truncated child summary said summary_truncated=true and pointed
+    at expansion, which returns the child's SOURCES — so the omitted suffix of the summary
+    itself was advertised and unreachable."""
+    import time
+    from hermes_lcm.dag import SummaryNode
+    e = _engine(tmp_path, incremental_max_depth=0)
+    try:
+        e.on_session_start("cs", platform="cli", context_length=200_000)
+        long_summary = "decision " * 400 + "\nExpand for details about: decisions"
+        child = e._dag.add_node_with_meta(SummaryNode(
+            session_id="cs", depth=0, summary=long_summary, token_count=500,
+            source_token_count=2000, source_ids=[1], source_type="messages",
+            created_at=time.time()), level=1)
+        parent = e._dag.add_node_with_meta(SummaryNode(
+            session_id="cs", depth=1, summary="the parent", token_count=5,
+            source_token_count=500, source_ids=[child], source_type="nodes",
+            created_at=time.time()), level=1)
+
+        payload = json.loads(lcm_tools.lcm_expand({"node_id": parent, "max_tokens": 40}, engine=e))
+        rendered_child = payload["expanded"][0]
+        assert rendered_child["summary_truncated"] is True
+        continuation = rendered_child["summary_continue_with"]
+        assert continuation["tool"] == "lcm_describe"
+
+        rest = json.loads(lcm_tools.lcm_describe(
+            {k: v for k, v in continuation.items() if k != "tool"}, engine=e))
+        assert rest["summary"], rest
+        assert rest["summary_offset"] == continuation["summary_offset"]
+        # walking the continuations reconstructs the whole stored summary
+        collected = rendered_child["summary"] + rest["summary"]
+        while not rest.get("summary_complete"):
+            rest = json.loads(lcm_tools.lcm_describe(
+                {k: v for k, v in rest["summary_continue_with"].items() if k != "tool"},
+                engine=e))
+            collected += rest["summary"]
+        assert collected == long_summary, (len(collected), len(long_summary))
+    finally:
+        e.shutdown()
