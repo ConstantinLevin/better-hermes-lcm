@@ -1357,13 +1357,19 @@ class MessageStore:
           "your match was candidate 501" (verify-4 #12).
         """
         def _finish(found: List[Dict[str, Any]], *, complete: bool, scanned: int,
-                    cap: int, path: str = "fts") -> List[Dict[str, Any]]:
+                    cap: int, path: str = "fts", more_available: bool | None = None,
+                    work_capped: bool | None = None) -> List[Dict[str, Any]]:
+            # fork: betterlcm — "this page is exact", "the corpus holds more" and "the scan hit
+            # its work cap" are three different facts; collapsing them made a correct ordered
+            # page report as a capped failure (round-2 verify-2 #11).
             if progress is not None:
                 progress.update({
                     "complete": complete,
                     "scanned_rows": scanned,
                     "candidate_cap": cap,
                     "path": path,
+                    "more_available": (not complete) if more_available is None else bool(more_available),
+                    "work_capped": (scanned >= cap) if work_capped is None else bool(work_capped),
                 })
             return found[:limit]
         safe_query = sanitize_fts5_query(query, allow_operators=allow_operators)
@@ -1469,23 +1475,32 @@ class MessageStore:
 
             rows_exhausted = len(rows) < fetch_limit
             if not apply_directness_adjustment or rows_exhausted or len(results) <= limit:
-                return _finish(results, complete=rows_exhausted, scanned=scanned_rows,
-                               cap=candidate_cap)
+                # a full page whose order is the DATABASE order is already the exact top-k:
+                # nothing unscanned sorts ahead of a row the same ORDER BY already ranked
+                exact = rows_exhausted or (
+                    not apply_directness_adjustment and limit > 0 and len(results) >= limit
+                )
+                return _finish(results, complete=exact, scanned=scanned_rows,
+                               cap=candidate_cap, more_available=not rows_exhausted,
+                               work_capped=scanned_rows >= candidate_cap and not rows_exhausted)
 
             worst_visible_primary = _fts_primary_value(results[min(limit, len(results)) - 1], sort)
             last_fetched_primary = raw_primary_values[-1]
             best_unseen_primary = last_fetched_primary - max_rank_bonus
             if best_unseen_primary > worst_visible_primary:
                 # the ranking bound proves nothing unseen can enter the page
-                return _finish(results, complete=True, scanned=scanned_rows, cap=candidate_cap)
+                return _finish(results, complete=True, scanned=scanned_rows, cap=candidate_cap,
+                               more_available=not rows_exhausted, work_capped=False)
 
             if scanned_rows >= candidate_cap:
-                return _finish(results, complete=False, scanned=scanned_rows, cap=candidate_cap)
+                return _finish(results, complete=False, scanned=scanned_rows, cap=candidate_cap,
+                               more_available=True, work_capped=True)
 
             offset += len(rows)
             remaining = candidate_cap - scanned_rows
             if remaining <= 0:
-                return _finish(results, complete=False, scanned=scanned_rows, cap=candidate_cap)
+                return _finish(results, complete=False, scanned=scanned_rows, cap=candidate_cap,
+                               more_available=True, work_capped=True)
             fetch_limit = min(fetch_limit * 2, remaining)
 
     def _search_like(self, query: str, session_id: str | None = None,
@@ -1505,7 +1520,8 @@ class MessageStore:
             # fork: a query that sanitizes to nothing was never run — say so (verify-4 #12)
             if progress is not None:
                 progress.update({"complete": False, "scanned_rows": 0, "candidate_cap": 0,
-                                 "path": "like", "no_terms": True})
+                                 "path": "like", "no_terms": True,
+                                 "more_available": False, "work_capped": False})
             return []
         fetch_limit = compute_search_fetch_limit(limit, terms, phrases)
 
@@ -1743,6 +1759,8 @@ class MessageStore:
                 "scanned_rows": scanned,
                 "candidate_cap": cap,
                 "path": "like",
+                "more_available": scanned >= cap,
+                "work_capped": scanned >= cap,
             })
         return results[:limit]
 

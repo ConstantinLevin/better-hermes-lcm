@@ -5824,13 +5824,16 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         force_overflow: bool = False,
         critical_budget_pressure: bool = False,
         deadline: Optional[float] = None,  # fork: betterlcm (budget regime only)
-    ) -> None:
-        """Check if any depth level has enough nodes for condensation."""
+    ) -> int:
+        """Check if any depth level has enough nodes for condensation.
+
+        Returns the number of condensation groups PUBLISHED (fork: betterlcm).
+        """
         self._last_condensation_suppressed_reason = ""
 
         max_depth = self.effective_incremental_max_depth  # fork: curved
         if max_depth == 0:
-            return  # condensation disabled
+            return 0  # condensation disabled
 
         # fork: betterlcm — the interpolated trigger is a CONJUNCTION, exactly as designed:
         # condense when ``len(uncondensed) >= fanin AND frontier > t*0.20*W``. The budget is a
@@ -5845,7 +5848,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         frontier_budget = int(self.effective_condense_budget_tokens or 0)
         if frontier_budget > 0 and self._summary_frontier_tokens() <= frontier_budget:
             self._last_condensation_suppressed_reason = "frontier_within_budget"
-            return
+            return 0
 
         # When max_depth is -1 (unlimited), derive the upper bound from
         # the deepest existing node + 1, so condensation can always
@@ -5927,6 +5930,10 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
 
         if not condensed_any and leaf_compacted_this_turn and self._config.cache_friendly_condensation_enabled:
             self._last_condensation_suppressed_reason = suppression_reason
+        # fork: betterlcm — tell the caller whether anything was actually PUBLISHED. A
+        # condensation that spent a model call and wrote a new parent used to be invisible to
+        # compress(), which then returned "noop" with the original context (round-2 verify-2 #7).
+        return groups_published
 
     def _select_oldest_condensation_group(
         self, fanin: int, max_depth: int, *, depth: Optional[int] = None
@@ -6020,7 +6027,18 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         inherited = marked_loss.inherited_receipts(node.summary for node in nodes)
         missing = [line for line in inherited if line not in summary_text]
         if missing:
-            summary_text = summary_text.rstrip() + "\n" + "\n".join(missing)
+            verbatim = summary_text.rstrip() + "\n" + "\n".join(missing)
+            if len(missing) == 1 or count_tokens(verbatim) < source_tokens:
+                summary_text = verbatim
+            else:
+                # fork: betterlcm — copying four children's distinct receipts verbatim made the
+                # "condensed" parent larger than its sources and raised the pressure this call
+                # exists to reduce (round-2 verify-2 #9). The children keep the full receipts
+                # and stay reachable from this node's source_ids, so the parent carries a
+                # receipt naming how many there are and where to read them.
+                summary_text = summary_text.rstrip() + "\n" + marked_loss.aggregated_inherited_receipt_marker(
+                    missing, [node.node_id for node in nodes]
+                )
         summary_tokens = count_tokens(summary_text)
         condensed_node = SummaryNode(
             session_id=self._session_id,

@@ -638,13 +638,45 @@ _NON_INDEX_ACKNOWLEDGEMENTS = frozenset({
 })
 
 
-def _is_index_shaped_summary(result: str) -> bool:
+# Words a refusal uses to talk about ITSELF. They are not evidence that a reply is about the
+# source, so they never count towards the overlap below.
+_REFUSAL_VOCABULARY = frozenset({
+    "cannot", "can't", "unable", "comply", "assist", "help", "request", "requested", "sorry",
+    "apologize", "apologise", "policy", "policies", "guidelines", "content", "provide",
+    "provided", "summarize", "summarise", "summary", "summarizing", "text", "source", "sources",
+    "material", "instead", "however", "because", "would", "could", "should", "there", "that",
+    "this", "with", "from", "have", "your", "about", "here", "please", "asked", "answer",
+})
+_TOKEN_RE = re.compile(r"[A-Za-z0-9_./:@-]{3,}")
+
+
+def _index_evidence_tokens(text: str) -> set[str]:
+    """Words specific enough that sharing them means the reply is talking about the source."""
+    tokens = set()
+    for raw in _TOKEN_RE.findall(str(text or "")):
+        token = raw.strip("./:-@").lower()
+        if len(token) < 4 and not any(character.isdigit() for character in token):
+            continue
+        if not token or token in _REFUSAL_VOCABULARY:
+            continue
+        tokens.add(token)
+    return tokens
+
+
+def _is_index_shaped_summary(result: str, source_text: str = "") -> bool:
     """Does this reply index the source at all, or is it an acknowledgement/refusal?
 
     Deliberately narrow: it rejects replies that carry no information about the source at all
     — bare acknowledgements and refusals — and nothing else. A terse summary is still a
     summary; judging coverage properly needs the source's own topics and belongs to the
     index-navigation gate, not here.
+
+    fork: betterlcm — when the SOURCE is available, a reply that opens with refusal wording is
+    judged by what it shares with the source rather than by its length. Counting the words
+    after the phrase rejected real, short historical facts ("I cannot reproduce the timeout.",
+    "As an AI, Atlas benchmarks recovery.") and accepted long genuine refusals
+    (round-2 verify-2 #10). Without a source only the shape is knowable, so the word count
+    stays as the fallback.
     """
     normalized = " ".join(str(result or "").split())
     if not normalized:
@@ -652,14 +684,16 @@ def _is_index_shaped_summary(result: str) -> bool:
     lowered = normalized.lower()
     if lowered.rstrip(".!") in _NON_INDEX_ACKNOWLEDGEMENTS:
         return False
-    # A refusal is a WHOLE reply that says nothing about the source. Testing the opening words
-    # alone rejected real summaries that begin with those words ("I cannot reproduce the timeout
-    # after raising the limit to 120 seconds; the remaining issue is DNS"), so the phrase counts
-    # only when almost nothing follows it (verify-2 regression #10).
     for marker in _NON_INDEX_REFUSAL_MARKERS:
         if not lowered.startswith(marker):
             continue
         remainder = normalized[len(marker):].strip(" ,.;:!—-")
+        source_tokens = _index_evidence_tokens(source_text)
+        if source_tokens:
+            # two distinct specific words from the source: a refusal about the summariser's own
+            # ability shares none of them, a terse fact about the source shares several
+            shared = _index_evidence_tokens(remainder) & source_tokens
+            return len(shared) >= 2
         if len(remainder.split()) < 6:
             return False
     return True
@@ -713,7 +747,7 @@ def summarize_with_escalation(
         # so "OK" was a valid summary of a chunk holding a decision, a rejection and a fix: the
         # compaction succeeded and the node said nothing about what was underneath
         # (audit p05 ES06). A reply that indexes nothing is a route failure, not a summary.
-        if not _is_index_shaped_summary(result):
+        if not _is_index_shaped_summary(result, text):
             rejected_as_non_index.append(result.strip()[:120])
             return False
         if count_tokens(result) < source_tokens:

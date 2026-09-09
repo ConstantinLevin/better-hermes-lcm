@@ -157,6 +157,27 @@ window_scaling indexes its immutable metadata once; the test harness keeps its o
   generation carried through publication — the one publication contract in Phase 5, not a
   local guard.
 
+## Fourth pass — round-2 verify-2 regressions (commits `3f318a0`, this one)
+
+The second auditor round re-ran verify-2 against the third pass and reported 12 confirmed
+regressions (3 P1, 9 P2). All twelve are closed; each has a fork test that fails on the
+previous revision.
+
+| # | what the audit found | what the fork does now |
+|---|---|---|
+| #1 | the orphan-result receipt became the newest message and displaced the live request | receipts are placed BEFORE the newest user turn and never take its protection |
+| #2 | inline-recovered bytes had no replay identity, so compaction could not map the row | the marker row keeps its identity; the recovered bytes live in an extra archive row |
+| #3 | deadline expiry between condensation depths escaped as a bare `TimeoutError` | it is raised as `SummaryUnavailableError`, so committed progress is published and the cooldown arms |
+| #4 | the incremental packing estimate is not additive, so an exactly-fitting summary was dropped | a candidate is re-counted exactly before it is rejected |
+| #5 | the compact omission footer was not recognised as scaffolding and was re-ingested as raw text | renderer and recogniser share the prefix constant; the test walks every emitted shape |
+| #6 | each attempt built its own lookahead pool: 2 → 4 → 6 live workers over three retries | one pool per engine, reused across attempts and released in `shutdown()` |
+| #7 | condensation without leaf work published a parent and returned `noop` with the old context | `_maybe_condense()` returns what it published; compress() reassembles and accounts for it |
+| #8 | a finished body reported offset 0, so every tool-call page re-sent the whole body | body and calls keep independent EOF cursors, both carried in the continuation |
+| #9 | inherited receipts made a "condensation" larger than its sources | verbatim while it fits, else one aggregate receipt naming the children that hold them |
+| #10 | the index-shape gate rejected short historical facts that open like a refusal | with the source in hand the gate asks what the reply SHARES with it (two specific words) |
+| #11 | a correct ordered page was reported as a work-cap failure | `complete` / `more_available` / `work_capped` are separate facts in every search path |
+| #12 | `build_snippet` regex-scanned per term and re-folded the source after each miss | ASCII sources take a plain scan over one folded copy: 104ms → 8ms on 2.2M characters |
+
 ## Still open — from the partitioned audits
 
 Fourteen audits ran: four aspect comparisons against lossless-claw, three cross-cutting

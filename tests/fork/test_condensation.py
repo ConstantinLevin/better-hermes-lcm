@@ -298,3 +298,71 @@ def test_a_condensed_parent_inherits_its_children_s_loss_receipts(tmp_path, monk
         assert receipt in parent.summary, parent.summary
     finally:
         e.shutdown()
+
+
+def test_distinct_child_receipts_do_not_make_the_parent_bigger_than_its_sources(tmp_path, monkeypatch):
+    """round-2 verify-2 #9: acceptance judged the model's output, then receipts were appended
+    to it — four children with DISTINCT receipts published a 287-token "condensation" of 242
+    tokens of sources, raising the pressure the call exists to reduce."""
+    from hermes_lcm import escalation
+    from hermes_lcm.tokens import count_tokens
+    monkeypatch.setattr(
+        escalation, "_call_llm_for_summary",
+        lambda *a, **k: "merged prose covering the four topics the children indexed, with the "
+                        "decisions and the rejected approaches kept\nExpand for details about: merged")
+    e = _engine(tmp_path, None, condensation_fanin=4, incremental_max_depth=2)
+    try:
+        e._session_id = "bloat"
+        children = []
+        for index in range(4):
+            # the real shape: a long receipt attached to a short child summary
+            receipt = (
+                f"[LCM: {index + 2} repl(y/ies) to ignored host-injected message(s) about "
+                f"topic-{index} are sources of this node and were excluded from the summariser "
+                f"input; nothing is deleted, expand node {index} or lcm_grep for the text]"
+            )
+            body = f"c{index}"
+            children.append(e._dag.add_node_with_meta(SummaryNode(
+                session_id="bloat", depth=0, summary=f"{body}\n{receipt}",
+                token_count=count_tokens(f"{body}\n{receipt}"), source_token_count=100,
+                source_ids=[index + 1], source_type="messages",
+                created_at=time.time() + index), level=1))
+        nodes = [e._dag.get_node(node_id) for node_id in children]
+        source_tokens = sum(n.token_count for n in nodes)
+        e._condense_summary_nodes(nodes)
+        parent = next(n for n in e._dag.get_session_nodes("bloat") if n.depth == 1)
+        assert parent.token_count < source_tokens, parent.summary
+        # the loss record is still there, and it says where the verbatim receipts live
+        assert "loss receipt(s)" in parent.summary, parent.summary
+        assert all(str(node.node_id) in parent.summary for node in nodes), parent.summary
+        # ... and the children still carry them verbatim
+        for node in nodes:
+            assert "repl(y/ies) to ignored host-injected" in node.summary
+    finally:
+        e.shutdown()
+
+
+def test_condensation_without_leaf_work_returns_the_context_it_published(tmp_path, mock_summariser):
+    """round-2 verify-2 #7: the no-leaf branch reached condensation, spent a model call and
+    published a new depth-1 parent — and then returned the ORIGINAL input with status "noop"
+    and compression_count 0, so the agent never saw the summary that had just been written."""
+    e = _engine(tmp_path, None, condensation_fanin=2, incremental_max_depth=2,
+                fresh_tail_count=8, leaf_chunk_tokens=100_000)
+    try:
+        e._session_id = "cp07"
+        for index in range(4):
+            _leaf(e, 500, earliest=1000 + index)
+        e.threshold_tokens = 1
+        before = e.compression_count
+        original = [{"role": "user", "content": "just the tail"}]
+        returned = e.compress(list(original), current_tokens=10_000)
+
+        depths = {n.depth for n in e._dag.get_session_nodes("cp07")}
+        assert 1 in depths, "nothing was published, the probe is wrong"
+        assert e._last_compression_status == "compacted", e._last_compression_status
+        assert e.compression_count == before + 1
+        assert returned != original, "the published summary never reached the agent"
+        rendered = "\n".join(str(m.get("content") or "") for m in returned)
+        assert "Summary" in rendered, rendered
+    finally:
+        e.shutdown()

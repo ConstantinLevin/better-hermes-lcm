@@ -1089,3 +1089,51 @@ def test_a_candidate_that_exactly_fits_is_still_rendered(tmp_path):
         assert "first summary" in rendered and "second summary" in rendered, rendered
     finally:
         e.shutdown()
+
+
+def test_a_finished_body_is_not_re_sent_on_every_tool_call_page(tmp_path):
+    """round-2 verify-2 #8: a finished body reported next_content_offset 0, and the paginator
+    re-used that zero while staying on the same source — a 196-character body with a
+    100-character call took 101 pages and returned 19,600 characters of body."""
+    import json
+    from hermes_lcm import tools as lcm_tools
+    e = _engine(tmp_path, "bodypage.db", incremental_max_depth=0)
+    try:
+        e.on_session_start("bp", platform="cli", context_length=200_000)
+        body = "b" * 196
+        first = e._store.append("bp", {
+            "role": "assistant", "content": body,
+            "tool_calls": [{"id": "c0", "type": "function", "function": {
+                "name": "t", "arguments": json.dumps({"cmd": "y" * 60})}}],
+        }, source="cli")
+        second = e._store.append("bp", {"role": "user", "content": "the next source"}, source="cli")
+        e._store.commit()
+        node_id = e._dag.add_node_with_meta(SummaryNode(
+            session_id="bp", depth=0, summary="one call\n[Expand for details: call]",
+            token_count=5, source_token_count=200, source_ids=[first, second],
+            source_type="messages", created_at=time.time()), level=1)
+
+        args = {"node_id": node_id, "max_tokens": 50}
+        pages = 0
+        body_chars = 0
+        seen_second_source = False
+        while pages < 40:
+            payload = json.loads(lcm_tools.lcm_expand(dict(args), engine=e))
+            pages += 1
+            for message in payload["expanded"]:
+                if message["store_id"] == first:
+                    body_chars += len(message["content"])
+                if message["store_id"] == second:
+                    seen_second_source = True
+            pagination = payload["pagination"]
+            if not pagination.get("has_more"):
+                break
+            args = {"node_id": node_id, "max_tokens": 50,
+                    "source_offset": pagination["next_source_offset"],
+                    "content_offset": pagination.get("next_content_offset") or 0,
+                    "tool_calls_offset": pagination.get("next_tool_calls_offset") or 0}
+        assert seen_second_source, "the later source never came back"
+        assert body_chars <= len(body), f"the body was re-sent: {body_chars} chars of {len(body)}"
+        assert pages <= 8, f"{pages} pages to walk 196 characters and one call"
+    finally:
+        e.shutdown()

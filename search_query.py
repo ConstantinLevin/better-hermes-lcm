@@ -433,17 +433,30 @@ def build_snippet(text: str, terms: List[str], width: int = 80) -> str:
     # (``"İ".lower()`` is two characters), so offsets taken in a lowered copy and applied to
     # the original drifted: 100 dotted capital I's before the match produced a snippet holding
     # neither the match nor any source text (audit p05 SQ05).
+    #
+    # ASCII content — the overwhelmingly common case, and the one this helper runs on for
+    # every LIKE-search hit — takes a straight ``find`` on ONE lowered copy instead. For ASCII
+    # text and any term, ``lowered.find(term.lower())`` and ``re.IGNORECASE`` agree exactly
+    # (a non-ASCII term cannot occur in ASCII text at all), and the regex scan per absent term
+    # plus a fresh ``content.lower()`` after each miss cost 104ms on a 2.2M-character source
+    # against 5.6ms for the plain scan (round-2 verify-2 #12). Non-ASCII content keeps the
+    # exact regex path, but folds the source only once.
+    ascii_content = content.isascii()
+    lowered = content.lower()
     for term in terms:
         if not term:
             continue
-        match = re.search(re.escape(term), content, re.IGNORECASE)
-        idx = match.start() if match else -1
-        if idx < 0:
-            # Fold-only equality (ß/ss, İ/i̇) still deserves a snippet; accept the lowered
-            # offset only when the original text at that offset really is the term.
-            candidate = content.lower().find(term.lower())
-            if candidate >= 0 and content[candidate:candidate + len(term)].lower() == term.lower():
-                idx = candidate
+        if ascii_content:
+            idx = lowered.find(term.lower())
+        else:
+            match = re.search(re.escape(term), content, re.IGNORECASE)
+            idx = match.start() if match else -1
+            if idx < 0:
+                # Fold-only equality (ß/ss, İ/i̇) still deserves a snippet; accept the lowered
+                # offset only when the original text at that offset really is the term.
+                candidate = lowered.find(term.lower())
+                if candidate >= 0 and content[candidate:candidate + len(term)].lower() == term.lower():
+                    idx = candidate
         if idx >= 0:
             start = max(0, idx - width // 2)
             end = min(len(content), idx + len(term) + width // 2)

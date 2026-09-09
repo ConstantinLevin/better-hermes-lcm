@@ -141,3 +141,51 @@ def test_a_capped_raw_message_scan_is_reported_too(tmp_path):
         assert progress["scanned_rows"] >= progress["candidate_cap"]
     finally:
         e.shutdown()
+
+
+def test_an_exact_ordered_page_is_not_reported_as_a_work_cap_failure(tmp_path):
+    """round-2 verify-2 #11: "give me the newest match" over 1000 matching summaries returned
+    the correct newest row and reported complete=false with a work-cap warning, although the
+    cap was never reached. A full page in the database's own order IS the exact answer."""
+    from hermes_lcm import tools as lcm_tools
+    cfg = LCMConfig(database_path=str(tmp_path / "topk.db"))
+    e = LCMEngine(config=cfg, hermes_home=str(tmp_path))
+    try:
+        e.on_session_start("tk", platform="cli", context_length=200_000)
+        base = time.time()
+        for index in range(1000):
+            e._dag.add_node(SummaryNode(session_id="tk", depth=0, summary=f"漢字 note {index}",
+                                        token_count=3, source_token_count=9,
+                                        source_ids=[index + 1], source_type="messages",
+                                        created_at=base + index))
+        progress: dict = {}
+        hits = e._dag.search("漢字", session_id="tk", limit=1, sort="recency", progress=progress)
+        assert [n.summary for n in hits] == ["漢字 note 999"], "the newest match"
+        assert progress["complete"] is True, progress
+        assert progress["work_capped"] is False, progress
+        assert progress["more_available"] is True, "the corpus really does hold more"
+        assert progress["scanned_rows"] < progress["candidate_cap"]
+
+        payload = json.loads(lcm_tools.lcm_grep(
+            {"query": "漢字", "sort": "recency", "limit": 1, "scope": "history"}, engine=e))
+        assert payload["complete"] is True, payload
+        assert "bounded_scans" not in payload
+        assert payload["more_results_available"] is True
+        assert "work cap" not in json.dumps(payload)
+    finally:
+        e.shutdown()
+
+
+def test_ascii_snippets_never_pay_for_a_regex_scan_per_absent_term(monkeypatch):
+    """round-2 verify-2 #12: build_snippet ran an ignore-case regex over the whole source for
+    every term and re-folded the source after each miss — 104ms on a 2.2M-character source
+    against 5.6ms for a plain scan, on a helper that runs per LIKE-search hit."""
+    def forbidden(*args, **kwargs):  # pragma: no cover - the point is that it is not called
+        raise AssertionError("ASCII content must not take the regex path")
+
+    monkeypatch.setattr(search_query.re, "search", forbidden)
+    source = ("lorem ipsum dolor sit amet " * 20_000) + " NEEDLE tail"
+    snippet = search_query.build_snippet(source, ["absent1", "absent2", "needle"])
+    assert "NEEDLE" in snippet
+    # and a term that is absent everywhere still falls back to the head of the source
+    assert search_query.build_snippet("plain ascii text", ["zzz"]).startswith("plain ascii")

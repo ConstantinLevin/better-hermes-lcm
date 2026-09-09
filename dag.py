@@ -757,15 +757,32 @@ class SummaryDAG:
         ``candidate_cap`` and ``path``.
         """
         def _finish(found: List[SummaryNode], *, complete: bool, scanned: int,
-                    cap: int, path: str) -> List[SummaryNode]:
+                    cap: int, path: str, more_available: bool | None = None,
+                    work_capped: bool | None = None) -> List[SummaryNode]:
+            # fork: betterlcm — three different things used to collapse into ``complete``:
+            # an ordered page that IS the correct answer, a corpus with more matches past
+            # this page, and a scan that actually hit its work cap. A correct top-k page was
+            # reported as a capped failure (round-2 verify-2 #11), which teaches the agent to
+            # distrust results that are in fact exact.
             if progress is not None:
                 progress.update({
                     "complete": complete,
                     "scanned_rows": scanned,
                     "candidate_cap": cap,
                     "path": path,
+                    "more_available": (not complete) if more_available is None else bool(more_available),
+                    "work_capped": (scanned >= cap) if work_capped is None else bool(work_capped),
                 })
             return found[:limit]
+
+        def _page_is_exact_top_k(found: List[SummaryNode]) -> bool:
+            """True when the SQL ordering IS the requested ordering and the page is full.
+
+            Nothing unscanned can enter a page that is already ``limit`` long in the same
+            order the database applied, so the answer is exact even though the corpus holds
+            more matches.
+            """
+            return len(found) >= limit > 0
 
         safe_query = sanitize_fts5_query(query)
         terms = extract_search_terms(safe_query)
@@ -831,14 +848,22 @@ class SummaryDAG:
                 offset += len(rows)
                 remaining = candidate_cap - scanned_rows
                 if remaining <= 0:
-                    return _finish(results, complete=False, scanned=scanned_rows,
-                                   cap=candidate_cap, path="fts")
+                    return _finish(results, complete=_page_is_exact_top_k(results),
+                                   scanned=scanned_rows, cap=candidate_cap, path="fts",
+                                   more_available=True, work_capped=True)
                 fetch_limit = min(fetch_limit * 2, remaining)
                 continue
 
             if exhausted or not apply_directness_adjustment or len(results) <= limit:
-                return _finish(results, complete=rows_exhausted, scanned=scanned_rows,
-                               cap=candidate_cap, path="fts")
+                # without the directness adjustment the page order is the database order,
+                # so a full page is already the exact top-k
+                exact = rows_exhausted or (
+                    not apply_directness_adjustment and _page_is_exact_top_k(results)
+                )
+                return _finish(results, complete=exact, scanned=scanned_rows,
+                               cap=candidate_cap, path="fts",
+                               more_available=not rows_exhausted,
+                               work_capped=scanned_rows >= candidate_cap and not rows_exhausted)
 
             worst_visible_primary = _fts_primary_value(results[min(limit, len(results)) - 1], sort)
             last_fetched_primary = _fts_primary_value(raw_nodes[-1], sort)
@@ -846,13 +871,15 @@ class SummaryDAG:
             if best_unseen_primary > worst_visible_primary:
                 # the ranking bound proves nothing unseen can enter the page
                 return _finish(results, complete=True, scanned=scanned_rows,
-                               cap=candidate_cap, path="fts")
+                               cap=candidate_cap, path="fts",
+                               more_available=not rows_exhausted, work_capped=False)
 
             offset += len(rows)
             remaining = candidate_cap - scanned_rows
             if remaining <= 0:
                 return _finish(results, complete=False, scanned=scanned_rows,
-                               cap=candidate_cap, path="fts")
+                               cap=candidate_cap, path="fts",
+                               more_available=True, work_capped=True)
             fetch_limit = min(fetch_limit * 2, remaining)
 
     @staticmethod
@@ -864,13 +891,16 @@ class SummaryDAG:
                      source: str | None = None,
                      progress: dict[str, Any] | None = None) -> List[SummaryNode]:
         def _finish(found: List[SummaryNode], *, complete: bool, scanned: int,
-                    cap: int) -> List[SummaryNode]:
+                    cap: int, more_available: bool | None = None,
+                    work_capped: bool | None = None) -> List[SummaryNode]:
             if progress is not None:
                 progress.update({
                     "complete": complete,
                     "scanned_rows": scanned,
                     "candidate_cap": cap,
                     "path": "like",
+                    "more_available": (not complete) if more_available is None else bool(more_available),
+                    "work_capped": (scanned >= cap) if work_capped is None else bool(work_capped),
                 })
             return found[:limit]
 
@@ -883,7 +913,8 @@ class SummaryDAG:
             # fork: a query that sanitizes to nothing was never run — say so
             if progress is not None:
                 progress.update({"complete": False, "scanned_rows": 0, "candidate_cap": 0,
-                                 "path": "like", "no_terms": True})
+                                 "path": "like", "no_terms": True,
+                                 "more_available": False, "work_capped": False})
             return []
         fetch_limit = compute_search_fetch_limit(limit, terms, phrases)
 
@@ -944,15 +975,22 @@ class SummaryDAG:
             nodes.sort(key=lambda node: _fallback_result_sort_key(node, sort))
             rows_exhausted = len(rows) < fetch_limit
             if not source or rows_exhausted or scanned_rows >= candidate_cap:
-                # without a source filter one ordered page is the answer for THIS page;
-                # more rows may exist beyond it whenever the page came back full
-                return _finish(nodes, complete=rows_exhausted, scanned=scanned_rows,
-                               cap=candidate_cap)
+                # fork: betterlcm — a full page under a recency sort was ordered by the SAME
+                # clock the Python ranking uses, so a page already ``limit`` long is the exact
+                # newest-first answer; only relevance/hybrid ordering, which is computed in
+                # Python after the fetch, can still be displaced by an unscanned row.
+                exact = rows_exhausted or (
+                    self._is_recency_sort(sort) and len(nodes) >= limit > 0
+                )
+                return _finish(nodes, complete=exact, scanned=scanned_rows,
+                               cap=candidate_cap, more_available=not rows_exhausted,
+                               work_capped=scanned_rows >= candidate_cap and not rows_exhausted)
 
             offset += len(rows)
             remaining = candidate_cap - scanned_rows
             if remaining <= 0:
-                return _finish(nodes, complete=False, scanned=scanned_rows, cap=candidate_cap)
+                return _finish(nodes, complete=False, scanned=scanned_rows, cap=candidate_cap,
+                               more_available=True, work_capped=True)
             fetch_limit = min(fetch_limit * 2, remaining)
 
     # -- DAG traversal ------------------------------------------------------

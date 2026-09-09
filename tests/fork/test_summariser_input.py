@@ -95,6 +95,27 @@ def test_an_acknowledgement_is_not_a_summary(monkeypatch):
     ):
         assert escalation._is_index_shaped_summary(accepted) is True, accepted
 
+    # round-2 verify-2 #10: SHORT historical facts that open the same way are summaries too,
+    # and a long, fluent refusal is not. With the source in hand the gate asks what the reply
+    # shares with it instead of counting the words after the phrase.
+    source = (
+        "User: the deploy failed, credentials expired at 14:02. Assistant: I tried to "
+        "reproduce the timeout on Atlas; benchmarks of recovery show the DNS path is fine. "
+        "We raised the limit to 120 seconds and cancelled the rollout."
+    )
+    for accepted in (
+        "I cannot reproduce the timeout.",
+        "I cannot deploy: credentials expired.",
+        "As an AI, Atlas benchmarks recovery.",
+    ):
+        assert escalation._is_index_shaped_summary(accepted, source) is True, accepted
+    for refused in (
+        "I cannot assist with this request because the content appears to violate policy; "
+        "please provide different material instead.",
+        "I can't help with that.",
+    ):
+        assert escalation._is_index_shaped_summary(refused, source) is False, refused
+
     monkeypatch.setattr(escalation, "_call_llm_for_summary",
                         lambda *a, **k: "OK")
     with pytest.raises(SummaryUnavailableError) as raised:

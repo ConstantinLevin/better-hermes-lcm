@@ -250,6 +250,23 @@ def inherited_receipts(summaries: Iterable[str]) -> List[str]:
     return seen
 
 
+def aggregated_inherited_receipt_marker(receipts: List[str], node_ids: List[int]) -> str:
+    """One line standing for receipts whose verbatim copies would defeat condensation.
+
+    fork: betterlcm — a condensed parent inherits its children's receipts verbatim, and four
+    children carrying distinct receipts made the "condensed" parent LARGER than its sources
+    (round-2 verify-2 #9), which raises the very pressure condensation exists to reduce. The
+    children are still stored, still reachable from this node's ``source_ids``, and still carry
+    the full receipts, so the aggregate names how many there are and where to read them. It is
+    itself a receipt line, so a further condensation inherits it in turn.
+    """
+    ids = ", ".join(str(node_id) for node_id in node_ids)
+    return (
+        f"{RECEIPT_LINE_PREFIX} {len(receipts)} loss receipt(s) from the source summaries are "
+        f"kept verbatim on node(s) {ids} — lcm_expand(node_id=...) to read them]"
+    )
+
+
 def compact_assembly_omission_marker(
     *,
     omitted_node_ids: List[int],

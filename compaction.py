@@ -1240,24 +1240,25 @@ class CompactionMixin:
             # because nothing new could be compacted (audit p05 CP04). Condensation gates
             # itself on the frontier budget and the fan-in, so this is a no-op unless the pile
             # really is too large.
+            condensation_published = 0  # fork: betterlcm — round-2 verify-2 #7
             if not cleanup_only:
                 try:
                     if threshold_full_sweep_active:
                         if sweep_raw_drained:
-                            _passes, sweep_stop_reason = self._run_threshold_sweep_condensation(
+                            condensation_published, sweep_stop_reason = self._run_threshold_sweep_condensation(
                                 target_tokens=sweep_target_tokens,
                                 pass_budget=max(0, sweep_max_passes - leaf_passes),
                                 deadline=sweep_deadline,
                                 focus_topic=focus_topic,
                             )
                     else:
-                        self._maybe_condense(
+                        condensation_published = int(self._maybe_condense(
                             focus_topic=focus_topic,
                             leaf_compacted_this_turn=False,
                             force_overflow=force_overflow,
                             critical_budget_pressure=critical_budget_pressure,
                             deadline=leaf_deadline,
-                        )
+                        ) or 0)
                 except SummaryUnavailableError as exc:
                     self._last_leaf_summary_error = str(exc)
                     logger.warning(
@@ -1280,7 +1281,14 @@ class CompactionMixin:
                 working_messages,
                 preexisting_dependent_reply_records,
             )
-            if dropped_replayed_scaffold_messages:
+            # fork: betterlcm — condensation publishes a new parent, so the summary prefix the
+            # agent reads has CHANGED. Reassembling only when replayed scaffolding was dropped
+            # meant a spent model call and a new depth-1 node returned status "noop" with the
+            # original context and no compression accounting (round-2 verify-2 #7).
+            reassemble_active_context = bool(
+                dropped_replayed_scaffold_messages or condensation_published
+            )
+            if reassemble_active_context:
                 leading_anchor_count = self._leading_anchor_count(active_context_messages)
                 anchor_leading_count = self._leading_anchor_count(anchor_source_messages)
                 self._pending_context_anchor_messages = anchor_source_messages[anchor_leading_count:]
@@ -1297,7 +1305,16 @@ class CompactionMixin:
                     active_context_messages,
                     insert_missing_tool_stubs=False,
                 )
-            if sanitized_messages != working_messages or ingest_cleanup_changed_active_context:
+            if condensation_published:
+                # fork: betterlcm — real published work, even with no leaf pass this turn
+                self._ingest_cursor = len(sanitized_messages)
+                self.compression_count += 1
+                self._last_compaction_duration_ms = (
+                    time.perf_counter() - _compress_started
+                ) * 1000.0
+                self._last_compression_status = "compacted"
+                self._last_compression_noop_reason = ""
+            elif sanitized_messages != working_messages or ingest_cleanup_changed_active_context:
                 # _ingest_messages() already advanced the cursor to the original
                 # active-context length. If the host continues from a sanitized
                 # or reassembled context, keeping the old cursor could make the
@@ -1307,7 +1324,7 @@ class CompactionMixin:
                 self._last_compression_status = "sanitized"
                 self._last_compression_noop_reason = ""
             else:
-                if dropped_replayed_scaffold_messages:
+                if reassemble_active_context:
                     # The active context changed even though no new leaf node was
                     # written. Keep the cursor aligned with the returned context
                     # so the next appended turn is ingested instead of skipped.
@@ -1319,7 +1336,7 @@ class CompactionMixin:
                 duration_ms = (time.perf_counter() - _compress_started) * 1000.0
                 self._last_threshold_full_sweep = {
                     **self._last_threshold_full_sweep,
-                    "status": "noop",
+                    "status": "compacted" if condensation_published else "noop",
                     "duration_ms": round(duration_ms, 3),
                     "stop_reason": sweep_stop_reason or noop_reason,
                     "budget_exhausted": sweep_stop_reason

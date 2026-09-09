@@ -1466,6 +1466,12 @@ def _expand_message_sources(
                     "node_id": int(node.node_id),
                     "source_offset": source_index,
                     "source_limit": 1,
+                    # fork: carry the BODY cursor too, or the continuation re-sends the body
+                    # it already delivered (round-2 verify-2 #8)
+                    "content_offset": (
+                        sliced["next_content_offset"] if sliced["has_more"]
+                        else sliced["content_offset"] + sliced["content_returned_chars"]
+                    ),
                     "tool_calls_offset": call_slice["next_content_offset"],
                 }
         if stored.get("tool_call_id") and stored.get("role") == "tool":
@@ -1513,7 +1519,15 @@ def _expand_message_sources(
             budget_used += count_tokens(call_slice["content"])
         if sliced["has_more"] or (call_slice is not None and call_slice["content_truncated"]):
             next_source_offset = source_index
-            next_content_offset = sliced["next_content_offset"]
+            # fork: betterlcm — a FINISHED body reports next_content_offset 0. Re-using that
+            # zero while staying on the same source restarted the body on every page: a
+            # 196-character body with a 100-character call took 101 pages and returned 19,600
+            # characters of body (round-2 verify-2 #8). Body and calls need independent EOF
+            # positions, so a finished body parks the cursor at its own end.
+            next_content_offset = (
+                sliced["next_content_offset"] if sliced["has_more"]
+                else sliced["content_offset"] + sliced["content_returned_chars"]
+            )
             next_tool_calls_offset = (
                 call_slice["next_content_offset"]
                 if call_slice is not None and call_slice["content_truncated"] else 0
@@ -2778,6 +2792,35 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
     results: list[Dict[str, Any]] = []
     search_failures: list[Dict[str, str]] = []  # fork: betterlcm — see the except blocks below
     bounded_scans: list[Dict[str, Any]] = []  # fork: scans that stopped at a work cap
+    more_results_available = False  # fork: exact page, corpus holds more (round-2 verify-2 #11)
+
+    def _scan_note(source_name: str, scan: Dict[str, Any]) -> Dict[str, Any] | None:
+        """fork: betterlcm — classify one scan: exact, more-to-come, or actually capped.
+
+        A full ordered page is the correct answer even when the corpus holds more matches;
+        reporting it as a work-cap failure taught the agent to distrust exact results.
+        """
+        nonlocal more_results_available
+        if scan.get("more_available"):
+            more_results_available = True
+        if scan.get("complete") is not False:
+            return None
+        if scan.get("no_terms"):
+            reason = "query kept no searchable term"
+        elif scan.get("work_capped"):
+            reason = "stopped at the candidate work cap"
+        elif scan.get("fts_error"):
+            reason = "index error, fell back to substring scan"
+        else:
+            reason = "ranking could not be proven exhaustive for this page"
+        return {
+            "source": source_name,
+            "scanned_rows": int(scan.get("scanned_rows") or 0),
+            "candidate_cap": int(scan.get("candidate_cap") or 0),
+            "path": str(scan.get("path") or ""),
+            "reason": reason,
+            "work_capped": bool(scan.get("work_capped")),
+        }
     # fork: betterlcm — if the current turn could not be stored, this search cannot see it.
     # The engine logged the failure and the tool still answered "no matching history"
     # (verify-4 #11): a false exhaustive negative over content that just reached the plugin.
@@ -2803,13 +2846,9 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
                 time_to=time_to,
                 progress=message_progress,
             )
-            if message_progress.get("complete") is False:
-                bounded_scans.append({
-                    "source": "messages",
-                    "scanned_rows": int(message_progress.get("scanned_rows") or 0),
-                    "candidate_cap": int(message_progress.get("candidate_cap") or 0),
-                    "path": str(message_progress.get("path") or ""),
-                })
+            message_scan = _scan_note("messages", message_progress)
+            if message_scan is not None:
+                bounded_scans.append(message_scan)
             for hit in msg_hits:
                 results.append(
                     _shape_message_hit(
@@ -2841,13 +2880,9 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
                 source=source,
                 progress=node_progress,
             )
-            if node_progress.get("complete") is False:
-                bounded_scans.append({
-                    "source": "summaries",
-                    "scanned_rows": int(node_progress.get("scanned_rows") or 0),
-                    "candidate_cap": int(node_progress.get("candidate_cap") or 0),
-                    "path": str(node_progress.get("path") or ""),
-                })
+            node_scan = _scan_note("summaries", node_progress)
+            if node_scan is not None:
+                bounded_scans.append(node_scan)
             for node in node_hits:
                 results.append(_shape_summary_hit(node))
         except Exception as exc:
@@ -3106,13 +3141,22 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
             response["bounded_scans"] = bounded_scans
         response["complete"] = False
         response["search_note"] = (
-            "Part of this search did not run or stopped at a work cap (see search_failures / "
+            "Part of this search did not run or stopped early (see search_failures / "
             "bounded_scans); absence from these results is not evidence of absence from "
             "history. Narrow the query, or use lcm_load_session / lcm_expand on a known "
             "session or store_id."
         )
     else:
         response["complete"] = True
+    if more_results_available:
+        # fork: betterlcm — an EXACT page over a corpus that holds more matches. This is not a
+        # failure and must not read as one: it is the ordinary "there is a next page" signal.
+        response["more_results_available"] = True
+        response.setdefault(
+            "pagination_note",
+            "This page is exact for the requested ordering; more matches exist beyond it. "
+            "Raise limit or narrow the query to see them.",
+        )
     return json.dumps(response)
 
 
