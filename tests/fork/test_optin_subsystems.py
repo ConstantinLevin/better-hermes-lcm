@@ -220,3 +220,50 @@ def test_the_final_answer_verifier_refuses_added_claims(tmp_path):
         decision = verify_final_answer(candidate, trace)
         assert decision.status == "fallback", (candidate, decision)
         assert "own answer" in decision.reason
+
+
+def test_grounding_refuses_a_value_the_quote_does_not_attribute(tmp_path):
+    """round-3 verify-4 #18/#19: presence in the quote was treated as attribution, so a span
+    saying "Alice paid 10 USD; Bob paid 30 USD" grounded Alice=30 and the computation attached
+    genuine citations to a relationship they do not support. A quote can also state a number in
+    order to DENY it."""
+    from hermes_lcm.reasoning import ground_evidence, question_date_as_of_epoch
+    from hermes_lcm.assertion_store import AssertionStore
+    from hermes_lcm.store import MessageStore
+
+    db_path = tmp_path / "grounding.db"
+    messages = MessageStore(db_path)
+    assertions = AssertionStore(db_path)
+    try:
+        both = "Alice paid 10 USD; Bob paid 30 USD."
+        store_id = messages.append("s", {"role": "user", "content": both}, source="cli")
+        denial = "Atlas did not cost 10 USD."
+        denial_id = messages.append("s", {"role": "user", "content": denial}, source="cli")
+        messages.commit()
+        as_of = question_date_as_of_epoch("2099-12-31")
+
+        misattributed = ground_evidence(
+            [{"store_id": store_id, "span_start": 0, "span_end": len(both), "quote": both,
+              "value": 30, "unit": "usd", "label": "Alice"}],
+            messages=messages, assertions=assertions, as_of=as_of,
+        )
+        assert misattributed.status != "grounded", misattributed
+        assert "different clauses" in misattributed.reason, misattributed.reason
+
+        correct = ground_evidence(
+            [{"store_id": store_id, "span_start": 0, "span_end": len(both), "quote": both,
+              "value": 10, "unit": "usd", "label": "Alice"}],
+            messages=messages, assertions=assertions, as_of=as_of,
+        )
+        assert correct.status == "grounded", correct.reason
+
+        negated = ground_evidence(
+            [{"store_id": denial_id, "span_start": 0, "span_end": len(denial), "quote": denial,
+              "value": 10, "unit": "usd", "label": "Atlas"}],
+            messages=messages, assertions=assertions, as_of=as_of,
+        )
+        assert negated.status != "grounded", negated
+        assert "negates" in negated.reason, negated.reason
+    finally:
+        assertions.close()
+        messages.close()

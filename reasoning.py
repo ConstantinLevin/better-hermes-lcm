@@ -38,7 +38,10 @@ _MAX_QUOTE_CHARS = 24_000
 _MAX_LABEL_CHARS = 300
 _MAX_NUMERIC_DIGITS = 1_000
 _MAX_DECIMAL_ABS = Decimal("1e308")
-_NUMBER_RE = re.compile(r"-?\d[\d,]*(?:\.\d+)?")
+# fork: betterlcm — a COMPLETE numeric lexeme. Without the boundaries, "1e3 USD" offered 1 and
+# 3 as explicit numbers and grounding accepted an operand worth 3 from a quote that says 1000
+# (round-3 verify-4 #19). A fragment of a number is not a number the quote states.
+_NUMBER_RE = re.compile(r"(?<!\w)(?<!\d\.)-?\d[\d,]*(?:\.\d+)?(?!\w)(?!\.\d)")
 _COMPUTATION_TRIGGER_RE = re.compile(
     r"\b(how many|how much|count|total|sum|difference|more than|less than|ago|"
     r"how long|since|between|before|after|last|latest|previous|earliest|first|"
@@ -603,8 +606,10 @@ def _explicit_numbers(text: str) -> list[int | Decimal]:
     ]
     values.extend(
         _WORD_NUMBERS[match.group(0).casefold()]
+        # fork: betterlcm — a whole WORD-number, not a component of one: "twenty-five" offered
+        # 5 (round-3 verify-4 #19).
         for match in re.finditer(
-            r"\b(?:" + "|".join(_WORD_NUMBERS) + r")\b",
+            r"(?<![\w-])(?:" + "|".join(_WORD_NUMBERS) + r")(?![\w-])",
             text,
             re.IGNORECASE,
         )
@@ -628,7 +633,50 @@ def _numeric_values_match(parsed: int | Decimal, value: int | float) -> bool:
         return False
     if isinstance(value, int):
         return parsed == value
-    return abs(Decimal(parsed) - converted) <= Decimal("1e-9")
+    # fork: betterlcm — EXACT. An absolute 1e-9 tolerance accepted 0 as the value of a quote
+    # saying 0.0000000001 (round-3 verify-4 #19); a value the quote does not state is not
+    # grounded in it. Decimal(str(float)) is exact for the literals a quote can contain.
+    return Decimal(parsed) == converted
+
+
+_CLAUSE_SPLIT_RE = re.compile(
+    r"(?<=[.;:!?])\s+|\s+(?:and|but|while|whereas|although|however)\s+",
+    re.IGNORECASE,
+)
+_NEGATION_RE = re.compile(
+    r"\b(?:not|never|no|none|without|neither|nor|cannot|refused|denied|rejected|excluding|"
+    r"except)\b|n't\b",
+    re.IGNORECASE,
+)
+
+
+def _clauses(text: str) -> list[str]:
+    return [part for part in _CLAUSE_SPLIT_RE.split(str(text or "")) if part.strip()]
+
+
+def _clause_containing_value(quote: str, value) -> "str | None":
+    """The single clause of ``quote`` that states ``value``, or None when that is ambiguous.
+
+    fork: betterlcm — presence in the quote is not attribution. "Alice paid 10 USD; Bob paid
+    30 USD" contains both names and both numbers, so label=Alice value=30 passed every check
+    and the computation attached genuine citations to a relationship they do not support
+    (round-3 verify-4 #18/#19). When two clauses state the same value the quote does not
+    establish which one is meant either, so the operand is refused.
+    """
+    matches: list[str] = []
+    for clause in (_clauses(quote) or [str(quote or "")]):
+        if isinstance(value, str):
+            if value and value in clause:
+                matches.append(clause)
+            continue
+        if any(_numeric_values_match(number, value) for number in _explicit_numbers(clause)):
+            matches.append(clause)
+    return matches[0] if len(matches) == 1 else None
+
+
+def _clause_denies_value(clause: str) -> bool:
+    """True when the clause states the value in order to deny or qualify it."""
+    return bool(_NEGATION_RE.search(str(clause or "")))
 
 
 def _numeric_value_has_unit(value: int | float, unit: str, quote: str) -> bool:
@@ -838,6 +886,22 @@ def _ground_one(
         return None, error
     if label and label.casefold() not in quote.casefold():
         return None, "label is not explicit in its exact quote"
+    # fork: betterlcm — presence is not attribution, and a quote can state a value in order to
+    # DENY it (round-3 verify-4 #18/#19).
+    if value not in (None, "") and isinstance(value, (int, float, str)):
+        clause = _clause_containing_value(quote, value)
+        if clause is None:
+            return None, "the exact quote does not state this value in a single clause"
+        if label and label.casefold() not in clause.casefold():
+            return None, (
+                "the exact quote does not attribute this value to this label: they are in "
+                "different clauses"
+            )
+        # Only NUMERIC values: a quoted string value can legitimately be a negative fact
+        # ("no green deployment lane" IS the claim), while "Atlas did not cost $10" states the
+        # number precisely to deny it.
+        if isinstance(value, (int, float)) and _clause_denies_value(clause):
+            return None, "the exact quote negates or qualifies this value"
     key, error = _bounded_optional_text(raw.get("key"), "key")
     if error:
         return None, error
