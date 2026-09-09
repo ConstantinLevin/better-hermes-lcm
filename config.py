@@ -20,7 +20,6 @@ logger = logging.getLogger(__name__)
 FORCED_OFF_LEVERS: dict[str, object] = {
     "large_output_externalization_enabled": False,
     "large_output_active_replay_stubbing_enabled": False,
-    "tool_response_char_scale": 0.0,
 }
 
 
@@ -859,9 +858,14 @@ class LCMConfig:
     condense_group_cap: int = 0               # condensation groups per compress() (0 = curve)
     serialize_message_max_chars: int = 0      # pre-summariser per-message cap (chars)
     expand_page_tokens: int = 0               # lcm_expand default page size
-    # RETIRED, always 0 (fork: better-hermeslcm). It scaled the retrieval tools' response
-    # character caps, and those caps are gone: `limit` is the caller's bound, and an oversized
-    # response is the host's spillover problem. Nothing reads it any more.
+    # Scales the response character caps in `lcm_query_state` and `lcm_compute` (0.0 = use the
+    # curve, which resolves 1.0 at 256k to 4.0 at 1M). Those two are the only readers left:
+    # the core retrieval tools have no response caps any more, because `limit` is the caller's
+    # bound and an oversized response is the host's spillover problem. Both remaining readers
+    # are subsystem tools that are default-off and out of scope for this fork, so this stays
+    # exactly as upstream left it. It was briefly listed in FORCED_OFF_LEVERS, which did
+    # nothing at all: 0.0 is this field's "unset" sentinel, so forcing it to 0.0 forces the
+    # curve rather than switching anything off.
     tool_response_char_scale: float = 0.0
     sqlite_cache_kib: int = 0                 # SQLite cache_size (KiB) for lcm.db
     token_cache_size: int = 0                 # tokens.py lru_cache size

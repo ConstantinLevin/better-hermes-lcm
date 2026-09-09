@@ -154,7 +154,8 @@ quality values are decided on merit and are usually the *same fraction* at both 
 | `incremental_max_depth` 3 → 5 | preference | how tall the index may get before it stops deepening |
 | `summary_circuit_breaker_failure_threshold` 2 → 4 | preference | failure tolerance |
 | `l2_budget_ratio` 0.50 → 0.80 | preference | L2 is the *fallback* route and asks for something terser on purpose; a higher ratio makes the retry less different from the attempt that failed |
-| `stub_threshold_tokens`, `expansion_context_tokens`, `expand_page_tokens`, `tool_response_char_scale` | preference | paging and stubbing budgets; every cut on these paths is marked and carries a continuation |
+| `stub_threshold_tokens`, `expansion_context_tokens`, `expand_page_tokens` | preference | paging budgets on paths that page: `lcm_expand` publishes `next_content_offset` and `has_more`, so a page boundary is a cursor, not a cut |
+| `tool_response_char_scale` | preference (subsystem only) | it scales the response caps in `lcm_query_state` and `lcm_compute`, its last two readers, both default-off subsystem tools this fork does not touch. The core retrieval tools have no response caps left |
 | `sweep_target_tokens` | preference | only reachable with the sweep flag, which is off by default |
 | `sqlite_cache_kib`, `token_cache_size` | preference | pure performance, no behavioural effect |
 

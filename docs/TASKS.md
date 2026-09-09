@@ -29,8 +29,6 @@ sync, lossless-claw watch) · **F** outstanding verification (strict superiority
 | A5 | **verify-4 #6's smallest case**: an assembly budget too small for even the 12-token receipt records the omission in `lcm_status` instead of the prefix. | Deliberate trade-off — making room would drop the caller's own latest message. Revisit only if a host reports it. |
 | A6 | **verify-4 #10 structured omission records**: receipts are prose lines, not machine-readable records. | Architectural; would change every marker's shape. |
 
-| A12 | **Retire the levers that can be flipped into a doctrine violation.** `large_output_externalization_enabled` externalizes an inline body at ingest, which puts a ref in the replay the agent never saw -- we swallow what the host gives us, and the host already has its own spillover. `large_output_active_replay_stubbing_enabled` requires it. Both are hard-coded off in `FORCED_OFF_LEVERS` and that part stands. The third entry, `tool_response_char_scale`, is a **no-op**: `0.0` is the anchor's unset sentinel, so the curve still resolves it 1.0 -> 4.0, and the field comment claiming nothing reads it any more is false. Its last two consumers are `lcm_query_state` and `lcm_compute` via `_scaled_cap` -- subsystem tools, out of scope. So the honest fix is to drop the false `FORCED_OFF_LEVERS` entry and correct the comment, not to add another lever. A setting that must never be turned on is not a setting. |
-
 ### A-bis. Trust and truthfulness of what a summary says
 
 | id | what | why it matters |
