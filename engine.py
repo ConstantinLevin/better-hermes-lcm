@@ -6317,6 +6317,10 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                 condensed_any = True
                 published_this_pass += 1
                 groups_published += 1
+                # fork: betterlcm — record progress AS it happens: assigning the counter after
+                # the loop meant a later group's failure hid the groups already published
+                # (round-4 verify-2 #11).
+                self._last_condensation_published = groups_published
 
                 logger.info(
                     "LCM condensation: d%d × %d → d%d (L%d, %d→%d tokens)",
@@ -6455,8 +6459,18 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
             )
             if count_tokens(verbatim) < source_tokens:
                 summary_text = verbatim
-            else:
+            elif count_tokens(aggregate) < source_tokens:
                 summary_text = aggregate
+            else:
+                # fork: betterlcm — the PUBLISHED text has to converge, receipts included. When
+                # even the one-line aggregate does not, publishing would raise the pressure this
+                # call exists to reduce, so the condensation is refused: the children stay, with
+                # their receipts, and nothing is lost (round-4 verify-2 #10).
+                raise SummaryUnavailableError(
+                    "condensation would not converge: the summary plus its inherited receipts "
+                    f"({count_tokens(aggregate)} tokens) is not smaller than its "
+                    f"{source_tokens}-token sources"
+                )
         summary_tokens = count_tokens(summary_text)
         condensed_node = SummaryNode(
             session_id=fence[0],  # fork: the session this work was started for

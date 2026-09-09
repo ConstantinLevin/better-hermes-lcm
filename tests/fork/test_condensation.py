@@ -332,6 +332,8 @@ def test_distinct_child_receipts_do_not_make_the_parent_bigger_than_its_sources(
         e._condense_summary_nodes(nodes)
         parent = next(n for n in e._dag.get_session_nodes("bloat") if n.depth == 1)
         assert parent.token_count < source_tokens, parent.summary
+        # round-4 verify-2 #10: the aggregate itself has to converge, or the condensation is
+        # refused rather than published larger than its sources
         # the loss record is still there, and it says where the verbatim receipts live
         assert "loss receipt(s)" in parent.summary, parent.summary
         assert all(str(node.node_id) in parent.summary for node in nodes), parent.summary
@@ -364,5 +366,80 @@ def test_condensation_without_leaf_work_returns_the_context_it_published(tmp_pat
         assert returned != original, "the published summary never reached the agent"
         rendered = "\n".join(str(m.get("content") or "") for m in returned)
         assert "Summary" in rendered, rendered
+    finally:
+        e.shutdown()
+
+
+def test_a_condensation_that_cannot_converge_is_refused(tmp_path, monkeypatch):
+    """round-4 verify-2 #10: the single-receipt exemption was removed, but the aggregate
+    alternative was published without checking ITS size — 176 tokens of children became a
+    185-token parent."""
+    from hermes_lcm import escalation
+    from hermes_lcm.errors import SummaryUnavailableError
+    from hermes_lcm.tokens import count_tokens
+    monkeypatch.setattr(
+        escalation, "_call_llm_for_summary",
+        lambda *a, **k: "a merged summary that is almost as long as everything underneath it, "
+                        "with plenty of words in it\nExpand for details about: merged")
+    e = _engine(tmp_path, None, condensation_fanin=2, incremental_max_depth=2)
+    try:
+        e._session_id = "nogrow"
+        children = []
+        for index in range(2):
+            receipt = (
+                f"[LCM: {index + 2} repl(y/ies) to ignored host-injected message(s) about "
+                f"topic-{index} are sources of this node and were excluded from the summariser "
+                f"input; nothing is deleted, expand node {index} or lcm_grep for the text]"
+            )
+            body = f"c{index}"
+            children.append(e._dag.add_node_with_meta(SummaryNode(
+                session_id="nogrow", depth=0, summary=f"{body}\n{receipt}",
+                token_count=count_tokens(f"{body}\n{receipt}"), source_token_count=100,
+                source_ids=[index + 1], source_type="messages",
+                created_at=time.time() + index), level=1))
+        nodes = [e._dag.get_node(node_id) for node_id in children]
+        source_tokens = sum(node.token_count for node in nodes)
+
+        try:
+            e._condense_summary_nodes(nodes)
+        except SummaryUnavailableError as exc:
+            assert "converge" in str(exc), exc
+        else:
+            parent = next(n for n in e._dag.get_session_nodes("nogrow") if n.depth == 1)
+            assert parent.token_count < source_tokens, parent.summary
+    finally:
+        e.shutdown()
+
+
+def test_a_failed_later_group_keeps_the_published_count(tmp_path, monkeypatch):
+    """round-4 verify-2 #11: the published counter was assigned only after the whole loop
+    returned, so a later group's failure hid the parent the first group had already published —
+    the caller got the original context, compression_count 0 and a cooldown."""
+    from hermes_lcm import escalation
+    from hermes_lcm.errors import SummaryUnavailableError
+    e = _engine(tmp_path, None, condensation_fanin=2, incremental_max_depth=3)
+    try:
+        e._session_id = "partial"
+        base = time.time()
+        for index in range(4):
+            _leaf(e, 300, earliest=base + index, created=base + index)
+
+        calls = {"n": 0}
+
+        def fail_after_first(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] > 1:
+                raise SummaryUnavailableError("no route produced a summary")
+            return "merged\nExpand for details about: merged"
+
+        monkeypatch.setattr(escalation, "_call_llm_for_summary", fail_after_first)
+        try:
+            e._maybe_condense()
+        except SummaryUnavailableError:
+            pass
+        assert int(getattr(e, "_last_condensation_published", 0)) >= 1, (
+            "the published group was forgotten"
+        )
+        assert any(node.depth == 1 for node in e._dag.get_session_nodes("partial"))
     finally:
         e.shutdown()

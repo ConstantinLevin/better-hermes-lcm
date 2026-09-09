@@ -35,7 +35,7 @@ from .ingest_protection import (
     protect_messages_for_ingest_with_attachments,
 )
 from .search_query import (
-    terms_with_embedded_dropped_symbols,
+    required_terms_for_symbol_query,
     build_snippet,
     compute_search_candidate_cap,
     compute_directness_rank_bonus_upper_bound,
@@ -1901,7 +1901,7 @@ class MessageStore:
         where.append("(" + " OR ".join(like_clauses) + ")")
         # fork: betterlcm — see dag._search_like: a symbol-bearing term must match
         # (round-3 verify-2 #7); a standalone symbol stays a routing trigger.
-        required_terms = terms_with_embedded_dropped_symbols(terms)
+        required_terms = required_terms_for_symbol_query(terms)
         fetch_limit = compute_like_fallback_fetch_limit(limit, terms, phrases)
         base_args = list(args)
         normalized_sort = normalize_search_sort(sort)

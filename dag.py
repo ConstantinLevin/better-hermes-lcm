@@ -33,7 +33,7 @@ from .db_bootstrap import (
 _DELETE_SESSION_SCOPE_TABLE = "temp_lcm_delete_session_scope"
 _DELETE_SESSION_SCOPE_INSERT_CHUNK = 512
 from .search_query import (
-    terms_with_embedded_dropped_symbols,
+    required_terms_for_symbol_query,
     AGE_DECAY_RATE,
     compute_search_candidate_cap,
     compute_directness_rank_bonus_upper_bound,
@@ -948,7 +948,7 @@ class SummaryDAG:
         # MATCH. Scoring by "any term" turned "alpha∀ beta" into a search for either word, so a
         # row holding neither symbol-bearing term came back first and complete
         # (round-3 verify-2 #7). A standalone symbol (an emoji) stays a routing trigger.
-        required_terms = terms_with_embedded_dropped_symbols(terms)
+        required_terms = required_terms_for_symbol_query(terms)
         fetch_limit = compute_like_fallback_fetch_limit(limit, terms, phrases)
         base_args = list(args)
         collapse_risky_repeats = contains_risky_fts_ascii(query)

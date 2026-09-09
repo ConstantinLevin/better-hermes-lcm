@@ -261,3 +261,18 @@ def test_a_symbol_bearing_term_must_actually_match(tmp_path):
         assert "plugin-only fallback" in routed, routed
     finally:
         dag.close()
+
+
+def test_a_symbol_query_keeps_its_conjunction(tmp_path):
+    """round-4 verify-2 #12: requiring only the symbol-bearing term left its companions
+    optional, so "alpha∀ beta" still matched a row holding "alpha∀ solo"."""
+    dag = _dag(tmp_path)
+    try:
+        for text in ("alpha∀ beta", "alpha∀ solo", "gamma beta beta beta"):
+            dag.add_node(SummaryNode(session_id="s", depth=0, summary=text, token_count=3,
+                                     source_token_count=9, source_ids=[1],
+                                     source_type="messages", created_at=time.time()))
+        hits = [node.summary for node in dag.search("alpha∀ beta", session_id="s")]
+        assert hits == ["alpha∀ beta"], hits
+    finally:
+        dag.close()

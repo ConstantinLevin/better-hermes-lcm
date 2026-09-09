@@ -227,6 +227,30 @@ def requires_like_fallback(query: str, sanitized: str | None = None) -> bool:
     return contains_risky_fts_ascii(safe)
 
 
+def required_terms_for_symbol_query(terms: List[str]) -> List[str]:
+    """Terms that must ALL match once a symbol-bearing term is present.
+
+    fork: betterlcm — requiring only the symbol-bearing term left its companions optional, so
+    "alpha∀ beta" still matched a row holding "alpha∀ solo" (round-4 verify-2 #12). The index
+    would have applied a conjunction; the substring scan standing in for it must too. A
+    standalone symbol (an emoji) stays a routing trigger and is not required.
+    """
+    embedded = terms_with_embedded_dropped_symbols(terms)
+    if not embedded:
+        return []
+    required: List[str] = []
+    for term in terms or []:
+        text = str(term or "")
+        if not text:
+            continue
+        if contains_index_dropped_symbols(text) and not any(
+            character.isalnum() for character in text
+        ):
+            continue  # a standalone symbol: the routing trigger, not a required word
+        required.append(text)
+    return required
+
+
 def terms_with_embedded_dropped_symbols(terms: List[str]) -> List[str]:
     """Terms whose MEANING is a symbol the index deletes, e.g. ``flag∀`` or ``alpha∀``.
 
