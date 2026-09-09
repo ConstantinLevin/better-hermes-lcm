@@ -9,6 +9,7 @@ example the session-end timeout budget).
 from __future__ import annotations
 
 import errno
+import logging
 import os
 from pathlib import Path
 import sqlite3
@@ -16,6 +17,11 @@ import stat
 import uuid
 from contextlib import contextmanager
 from typing import Iterator, List
+
+# fork: betterlcm — this module logged through a name it never imported, so the one handler
+# that exists to keep a refusing connection from blocking the others raised NameError and left
+# the remaining connections at the temporary 5ms timeout (round-2 verify-3 #26).
+logger = logging.getLogger(__name__)
 
 
 _SQLITE_SIDECAR_SUFFIXES = ("-wal", "-shm", "-journal")

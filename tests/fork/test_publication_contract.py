@@ -171,3 +171,30 @@ def test_an_interrupted_publication_cannot_be_committed_by_a_later_one(tmp_path)
         assert dag.node_meta.read(good)["level"] == 1
     finally:
         dag.close()
+
+
+def test_a_refused_insert_leaves_no_open_transaction(tmp_path):
+    """round-2 verify-3 #3: the INSERT itself sat outside the rollback protection, so a
+    statement the database refused still left the transaction it had opened open — holding the
+    write lock, and letting the next unrelated commit publish whatever was pending in it."""
+    dag = SummaryDAG(str(tmp_path / "refused.db"))
+    try:
+        dag._conn.execute(
+            "CREATE TRIGGER refuse BEFORE INSERT ON summary_nodes "
+            "WHEN NEW.summary LIKE 'refused%' BEGIN SELECT RAISE(FAIL, 'no'); END"
+        )
+        with pytest.raises(sqlite3.IntegrityError):
+            dag.add_node_with_meta(_node(summary="refused one"), level=1)
+        assert dag._conn.in_transaction is False, "the refused insert held the transaction open"
+
+        with pytest.raises(sqlite3.IntegrityError):
+            dag.add_node(_node(summary="refused two"))
+        assert dag._conn.in_transaction is False
+
+        dag._conn.commit()  # an unrelated commit must publish nothing
+        assert dag.get_session_nodes("s") == []
+        good = dag.add_node_with_meta(_node(summary="the good one"), level=1)
+        assert [n.summary for n in dag.get_session_nodes("s")] == ["the good one"]
+        assert dag.node_meta.read(good)["level"] == 1
+    finally:
+        dag.close()

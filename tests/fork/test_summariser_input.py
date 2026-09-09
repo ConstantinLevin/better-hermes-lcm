@@ -69,6 +69,21 @@ def test_a_summary_cut_off_at_the_generation_limit_is_not_accepted(monkeypatch):
     _install("stop")
     assert escalation._call_llm_for_summary("summarize this", 200) == "Topic A: decided X."
 
+    # round-2 verify-3 #12: the RESPONSE can declare itself unfinished while the choice still
+    # says "stop" — that text is just as truncated, and was being published.
+    def _install_response(**response_fields):
+        module = ModuleType("agent.auxiliary_client")
+        module.call_llm = lambda **kwargs: SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content="Topic A: decided X."),
+                                     finish_reason="stop")],
+            **response_fields)
+        monkeypatch.setitem(sys.modules, "agent.auxiliary_client", module)
+
+    _install_response(status="incomplete", incomplete_details={"reason": "max_output_tokens"})
+    assert escalation._call_llm_for_summary("summarize this", 200) is None
+    _install_response(status="completed", incomplete_details=None)
+    assert escalation._call_llm_for_summary("summarize this", 200) == "Topic A: decided X."
+
 
 def test_an_acknowledgement_is_not_a_summary(monkeypatch):
     """Audit p05 ES06: acceptance tested only that the reply was SMALLER than the source, so
@@ -236,3 +251,14 @@ def test_every_injected_removal_leaves_a_trace_including_inside_tool_arguments()
     assert "CANCEL" not in self_closing
     assert "keep this" in self_closing and "and this" in self_closing
     assert "[LCM" in self_closing, self_closing
+
+
+def test_a_padded_data_uri_does_not_eat_the_word_after_it():
+    """round-2 verify-3 #12: "=" was part of the repeated payload class, so a padded data URI
+    followed immediately by prose swallowed the sentence after the padding — the summariser
+    read a media marker where a decision had been written."""
+    from hermes_lcm import extraction
+    text = "before data:image/png;base64," + "A" * 20 + "==hello world decision"
+    assert extraction._MEDIA_DATA_URI_RE.sub("<M>", text) == "before <M>hello world decision"
+    spaced = "before data:image/png;base64," + "A" * 20 + " hello world"
+    assert extraction._MEDIA_DATA_URI_RE.sub("<M>", spaced) == "before <M> hello world"

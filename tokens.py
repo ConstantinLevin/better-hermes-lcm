@@ -212,7 +212,10 @@ def set_token_cache_size(maxsize: int, *, owner: Any = None) -> None:
             except TypeError:  # pragma: no cover - not weak-referenceable
                 _token_cache_owner_refs[owner_id] = None
     if _token_cache_requests:
-        size = max([DEFAULT_TOKEN_CACHE_SIZE, *_token_cache_requests.values()])
+        # fork: betterlcm — the maximum of what the LIVE engines asked for. Flooring it at the
+        # default meant an explicit smaller override (a 64-entry cache on a memory-tight host)
+        # silently became 2048 (round-2 verify-3 #26); with no live request the default stands.
+        size = max(_token_cache_requests.values())
     if _count_tokens_cached.cache_info().maxsize == size:
         return
     _count_tokens_cached = lru_cache(maxsize=size)(_count_tokens_keyed)

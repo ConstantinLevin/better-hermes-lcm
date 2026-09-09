@@ -178,6 +178,24 @@ previous revision.
 | #11 | a correct ordered page was reported as a work-cap failure | `complete` / `more_available` / `work_capped` are separate facts in every search path |
 | #12 | `build_snippet` regex-scanned per term and re-folded the source after each miss | ASCII sources take a plain scan over one folded copy: 104ms → 8ms on 2.2M characters |
 
+## Fifth pass — round-2 verify-3 (the cheap, definite half)
+
+The round-2 verify-3 report ("remaining defects and definite optimizations") lists 27 defect
+groups and 6 optimizations, most of them architectural or in the default-off subsystems. These
+are the ones that were concrete, reachable in the default configuration and repairable locally;
+each has its own probe.
+
+| what the audit found | what the fork does now |
+|---|---|
+| `_temporary_sqlite_busy_timeout` logged through a name it never imported: one refusing connection raised `NameError` and left the others at the 5ms timeout | `sqlite_util` has its own logger; every changed connection is restored |
+| an explicit token-cache size below 2048 was floored back to 2048 | the size is the maximum of the LIVE owners' requests; the default applies only when there are none |
+| the node INSERT sat outside the rollback protection, so a refused statement left its transaction open for an unrelated commit to publish | insert, sidecar and commit are inside one `BaseException` guard in both `add_node` and `add_node_with_meta` |
+| `lcm_recent` counted its sections AFTER the display limit: 11 matches with `limit=10` read as "10 sections, not truncated" | the window's own count is taken first; `total_sections` is what the window holds |
+| a frontier computation that raised failed closed: an empty window reported `complete: true` | it raises `_RecentIncomplete`, so the answer says it could not be computed |
+| a response with `status="incomplete"` was accepted when the choice said `"stop"` | either signal refuses the text and escalates |
+| a padded data URI followed immediately by prose swallowed the words after the padding | the payload class stops at its `=` padding |
+| tool-call continuation restarted the finished body (also verify-2 #8 / O4) | body and calls keep independent EOF cursors |
+
 ## Still open — from the partitioned audits
 
 Fourteen audits ran: four aspect comparisons against lossless-claw, three cross-cutting

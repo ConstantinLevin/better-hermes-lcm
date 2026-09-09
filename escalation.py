@@ -271,15 +271,28 @@ def _call_llm_for_summary(prompt: str | list[dict[str, str]], max_tokens: int,
         # as proof of completion — some host paths fabricate it — but an explicit truncation
         # reason is trusted, and the chunk is left raw for another route or a smaller retry.
         finish_reason = str(getattr(choice, "finish_reason", "") or "").strip().lower()
+        # fork: betterlcm — the RESPONSE can also declare itself unfinished while the choice
+        # still says "stop": a probe with status="incomplete" and incomplete_details had its
+        # truncated summary accepted and published (round-2 verify-3 #12). Either signal is
+        # enough to refuse the text.
+        response_status = str(getattr(response, "status", "") or "").strip().lower()
+        incomplete_details = getattr(response, "incomplete_details", None)
+        unfinished_reason = ""
         if finish_reason in _TRUNCATED_FINISH_REASONS:
+            unfinished_reason = f"finish_reason={finish_reason}"
+        elif response_status == "incomplete" or incomplete_details:
+            unfinished_reason = (
+                f"status={response_status or 'incomplete'}"
+                + (f", incomplete_details={incomplete_details!r}"[:200] if incomplete_details else "")
+            )
+        if unfinished_reason:
             logger.warning(
-                "LCM summary rejected: the route stopped at its generation limit "
-                "(finish_reason=%s, model=%s)",
-                finish_reason,
+                "LCM summary rejected: the route stopped before finishing (%s, model=%s)",
+                unfinished_reason,
                 model or "<default>",
             )
             _LAST_ROUTE_ERROR.error = SummaryUnavailableError(
-                f"route returned an unfinished summary (finish_reason={finish_reason})"
+                f"route returned an unfinished summary ({unfinished_reason})"
             )
             return None
         content = choice.message.content

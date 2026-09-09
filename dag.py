@@ -261,28 +261,43 @@ class SummaryDAG:
     def add_node(self, node: SummaryNode) -> int:
         """Insert a summary node and return its node_id."""
         with self._db_lock:
-            cur = self._conn.execute(
-                """INSERT INTO summary_nodes
-                   (session_id, depth, summary, token_count, source_token_count,
-                    source_ids, source_type, created_at, earliest_at, latest_at, expand_hint)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    node.session_id,
-                    node.depth,
-                    node.summary,
-                    node.token_count,
-                    node.source_token_count,
-                    json.dumps(node.source_ids),
-                    node.source_type,
-                    node.created_at or time.time(),
-                    node.earliest_at,
-                    node.latest_at,
-                    node.expand_hint,
-                ),
-            )
-            self._conn.commit()
+            # fork: betterlcm — the INSERT is inside the protection too. A statement that fails
+            # (a schema trigger refusing the row, a cancellation) still leaves the transaction
+            # it opened OPEN, and the next unrelated commit on this connection published
+            # whatever was pending in it (round-2 verify-3 #3).
+            try:
+                cur = self._conn.execute(
+                    """INSERT INTO summary_nodes
+                       (session_id, depth, summary, token_count, source_token_count,
+                        source_ids, source_type, created_at, earliest_at, latest_at, expand_hint)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        node.session_id,
+                        node.depth,
+                        node.summary,
+                        node.token_count,
+                        node.source_token_count,
+                        json.dumps(node.source_ids),
+                        node.source_type,
+                        node.created_at or time.time(),
+                        node.earliest_at,
+                        node.latest_at,
+                        node.expand_hint,
+                    ),
+                )
+                self._conn.commit()
+            except BaseException:
+                self._rollback_failed_publication()
+                raise
             node.node_id = cur.lastrowid
             return node.node_id
+
+    def _rollback_failed_publication(self) -> None:
+        """fork: betterlcm — leave no pending statement for an unrelated commit to publish."""
+        try:
+            self._conn.rollback()
+        except Exception:  # pragma: no cover - a dead connection cannot roll back
+            logger.warning("LCM could not roll back a failed node publication", exc_info=True)
 
     def add_node_with_meta(self, node: SummaryNode, *, level: int,
                            summary: Optional[str] = None) -> int:
@@ -294,27 +309,30 @@ class SummaryDAG:
         (audit p05 CP03). Publication is one state transition or none.
         """
         with self._db_lock:
-            cur = self._conn.execute(
-                """INSERT INTO summary_nodes
-                   (session_id, depth, summary, token_count, source_token_count,
-                    source_ids, source_type, created_at, earliest_at, latest_at, expand_hint)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    node.session_id,
-                    node.depth,
-                    node.summary,
-                    node.token_count,
-                    node.source_token_count,
-                    json.dumps(node.source_ids),
-                    node.source_type,
-                    node.created_at or time.time(),
-                    node.earliest_at,
-                    node.latest_at,
-                    node.expand_hint,
-                ),
-            )
-            node_id = cur.lastrowid
             try:
+                # fork: the INSERT is inside the protection: a refused insert left the
+                # transaction it opened open, and the next unrelated commit published whatever
+                # was pending in it (round-2 verify-3 #3).
+                cur = self._conn.execute(
+                    """INSERT INTO summary_nodes
+                       (session_id, depth, summary, token_count, source_token_count,
+                        source_ids, source_type, created_at, earliest_at, latest_at, expand_hint)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        node.session_id,
+                        node.depth,
+                        node.summary,
+                        node.token_count,
+                        node.source_token_count,
+                        json.dumps(node.source_ids),
+                        node.source_type,
+                        node.created_at or time.time(),
+                        node.earliest_at,
+                        node.latest_at,
+                        node.expand_hint,
+                    ),
+                )
+                node_id = cur.lastrowid
                 self.node_meta.write_statement(
                     node_id, level=level,
                     summary=node.summary if summary is None else summary,
@@ -326,10 +344,7 @@ class SummaryDAG:
                 # effectively (verify-4 #4).
                 self._conn.commit()
             except BaseException:
-                try:
-                    self._conn.rollback()
-                except Exception:  # pragma: no cover - a dead connection cannot roll back
-                    logger.warning("LCM could not roll back a failed node publication", exc_info=True)
+                self._rollback_failed_publication()
                 raise
             node.node_id = node_id
             return node_id

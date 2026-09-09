@@ -29,8 +29,12 @@ logger = logging.getLogger(__name__)
 # erased the sentence), so prose vanished from the summariser input with only a media marker
 # left behind (audit p05 EX02). A line-wrapped payload now simply stops at the first newline:
 # the remainder stays in the text, which costs a little size and loses nothing.
+# fork: betterlcm — the payload stops AT its padding. With "=" inside the repeated class, a
+# padded URI followed immediately by prose ("…AAAA==hello") ate the word after the padding
+# (round-2 verify-3 #12); base64 admits no data character after "=", so anchoring the padding
+# at the end gives the word back.
 _MEDIA_DATA_URI_RE = re.compile(
-    r"data:(?:image|audio|video)/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=]{16,}",
+    r"data:(?:image|audio|video)/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/]{16,}={0,2}",
     re.IGNORECASE,
 )
 _MEDIA_ATTACHMENT_MARKER = "[Media attachment]"

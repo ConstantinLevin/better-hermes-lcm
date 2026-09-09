@@ -2341,8 +2341,14 @@ def _recent_leaf_sections(
     window: RecentPeriodWindow,
     requested_scope: str,
     limit: int,
-) -> list[dict[str, Any]]:
-    """Load fallback nodes without retaining their TEMP-staging snapshot."""
+) -> tuple[list[dict[str, Any]], int]:
+    """Load fallback nodes without retaining their TEMP-staging snapshot.
+
+    fork: betterlcm — returns ``(sections, total_matching)``. The display limit used to be
+    applied before the count was taken, so eleven matching sections with ``limit=10`` reported
+    ``total_sections=10`` and ``truncated=false`` — a window that reads as fully shown
+    (round-2 verify-3 #9).
+    """
     with engine._dag._db_lock:
         connection = engine._dag.connection
         if connection is None:
@@ -2356,7 +2362,7 @@ def _recent_leaf_sections(
                 window,
                 requested_scope,
                 limit,
-            )
+            )  # (sections, total_matching)
 
 
 def _recent_leaf_sections_staged(
@@ -2364,7 +2370,7 @@ def _recent_leaf_sections_staged(
     window: RecentPeriodWindow,
     requested_scope: str,
     limit: int,
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], int]:
     connection = engine._dag.connection
     if connection is None:
         raise _RecentIncomplete(  # fork: betterlcm — see above (verify-4 #13)
@@ -2418,7 +2424,7 @@ def _recent_leaf_sections_staged(
                     "narrow the period or use lcm_grep / lcm_load_session"
                 )
             if not id_rows:
-                return []
+                return [], 0
 
             connection.execute(
                 "CREATE TEMP TABLE IF NOT EXISTS lcm_recent_frontier_ids "
@@ -2490,15 +2496,21 @@ def _recent_leaf_sections_staged(
     # public budget twice (maintainer #389 C1). ``rows`` is already ordered
     # newest-first, and canonical_frontier preserves that order.
     try:
-        frontier_rows = [
+        selected = [
             by_id[node.node_id]
             for node in canonical_frontier(
                 candidates, source_lineage=source_lineage
             )
-        ][:limit]
-    except Exception:
-        logger.debug("LCM recent canonical frontier failed closed", exc_info=True)
-        return []
+        ]
+    except Exception as exc:
+        # fork: betterlcm — failing CLOSED here returned an empty, "complete" window over
+        # history that exists: the same false exhaustive negative the work cap already had
+        # to be taught not to give (round-2 verify-3 #9).
+        logger.warning("LCM recent canonical frontier failed: %s", exc, exc_info=True)
+        raise _RecentIncomplete(
+            f"the recent-window frontier could not be computed: {exc}"
+        ) from exc
+    total_matching = len(selected)
     return [
         {
             "kind": "leaf_summary",
@@ -2510,8 +2522,8 @@ def _recent_leaf_sections_staged(
             "content": str(row[2] or ""),
             "content_truncated": False,
         }
-        for row in frontier_rows
-    ]
+        for row in selected[:limit]
+    ], total_matching
 
 
 def _recent_rollup_sections(rollups: list[dict[str, object]]) -> list[dict[str, Any]]:
@@ -2533,9 +2545,13 @@ def _recent_rollup_sections(rollups: list[dict[str, object]]) -> list[dict[str, 
     return sections
 
 
-def _bounded_recent_json(response: dict[str, Any], sections: list[dict[str, Any]]) -> str:
+def _bounded_recent_json(response: dict[str, Any], sections: list[dict[str, Any]],
+                         *, total_matching: int | None = None) -> str:
     response["sections"] = []
-    response["total_sections"] = len(sections)
+    # fork: betterlcm — the number the WINDOW holds, counted before the display limit
+    response["total_sections"] = (
+        len(sections) if total_matching is None else int(total_matching)
+    )
     response["returned_sections"] = 0
     response["truncated"] = False
     provenance = response.setdefault("provenance", {})
@@ -2622,14 +2638,19 @@ def lcm_recent(args: Dict[str, Any], **kwargs) -> str:
     incomplete_reason = ""
     if fallback:
         try:
-            sections = _recent_leaf_sections(engine, window, requested_scope, limit)
+            sections, total_matching = _recent_leaf_sections(
+                engine, window, requested_scope, limit
+            )
         except _RecentIncomplete as exc:          # fork: betterlcm
-            sections, incomplete_reason = [], str(exc)
+            sections, total_matching, incomplete_reason = [], 0, str(exc)
         except Exception as exc:                  # fork: a read failure is not an empty window
             logger.warning("LCM recent fallback read failed: %s", exc)
-            sections, incomplete_reason = [], f"recent-history read failed: {exc}"
+            sections, total_matching = [], 0
+            incomplete_reason = f"recent-history read failed: {exc}"
     else:
-        sections = _recent_rollup_sections(rollups)[:limit]
+        all_sections = _recent_rollup_sections(rollups)
+        total_matching = len(all_sections)
+        sections = all_sections[:limit]
 
     response: dict[str, Any] = {
         "period": window.period,
@@ -2656,7 +2677,7 @@ def lcm_recent(args: Dict[str, Any], **kwargs) -> str:
         response["fallback_reason"] = fallback_reason
     if requested_limit > _LCM_RECENT_HARD_LIMIT_CAP:
         response["limit_clamped_from"] = requested_limit
-    return _bounded_recent_json(response, sections)
+    return _bounded_recent_json(response, sections, total_matching=total_matching)
 
 
 def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:

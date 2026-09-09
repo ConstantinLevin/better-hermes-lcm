@@ -323,7 +323,10 @@ def test_lcm_recent_limit_order_and_response_char_bound(recent_parts):
     result = json.loads(raw)
 
     assert len(raw) <= 20_000
-    assert result["total_sections"] == 2
+    # fork: betterlcm — total_sections is what the WINDOW holds (3), not what the display limit
+    # kept. Counting after the limit made "11 sections, limit 10" report 10 with
+    # truncated=false: a window that reads as fully shown (round-2 verify-3 #9).
+    assert result["total_sections"] == 3
     assert len(result["sections"]) <= 2
     assert result["sections"][0]["node_id"] == newest_id
     assert result["truncated"] is True
@@ -696,11 +699,14 @@ def test_recent_fallback_releases_snapshot_before_later_dag_write(recent_parts):
     assert connection is not None
     window = parse_recent_period("date:2026-07-15", now=NOW)
 
-    sections = tools_module._recent_leaf_sections(
+    # fork: betterlcm — the helper returns (sections, total_matching): the window's own count
+    # is taken BEFORE the display limit (round-2 verify-3 #9)
+    sections, total_matching = tools_module._recent_leaf_sections(
         engine, window, "conversation", 10
     )
 
     assert [section["node_id"] for section in sections] == [first_id]
+    assert total_matching == 1
     assert connection.in_transaction is False
     with sqlite3.connect(engine._dag.db_path) as independent:
         independent.execute(

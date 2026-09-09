@@ -778,7 +778,8 @@ def test_recent_reports_an_unscannable_window_instead_of_an_empty_one(tmp_path, 
         payload = json.loads(lcm_tools.lcm_recent({"period": "today"}, engine=e))
         assert payload["complete"] is False and "database is locked" in payload["incomplete_reason"]
 
-        monkeypatch.setattr(lcm_tools, "_recent_leaf_sections", lambda *a, **k: [])
+        # fork: the helper now returns (sections, total_matching)
+        monkeypatch.setattr(lcm_tools, "_recent_leaf_sections", lambda *a, **k: ([], 0))
         payload = json.loads(lcm_tools.lcm_recent({"period": "today"}, engine=e))
         assert payload["complete"] is True and "incomplete_reason" not in payload
     finally:
@@ -1135,5 +1136,39 @@ def test_a_finished_body_is_not_re_sent_on_every_tool_call_page(tmp_path):
         assert seen_second_source, "the later source never came back"
         assert body_chars <= len(body), f"the body was re-sent: {body_chars} chars of {len(body)}"
         assert pages <= 8, f"{pages} pages to walk 196 characters and one call"
+    finally:
+        e.shutdown()
+
+
+def test_recent_counts_the_window_before_the_display_limit(tmp_path, monkeypatch):
+    """round-2 verify-3 #9: eleven matching sections with limit=10 reported total_sections=10
+    and truncated=false — a window that had more in it read as fully shown. And a frontier
+    computation that raised failed CLOSED, answering with an empty, complete window."""
+    import json
+    from hermes_lcm import tools as lcm_tools
+    e = _engine(tmp_path, "recentcount.db", incremental_max_depth=0)
+    try:
+        e.on_session_start("rn", platform="cli", context_length=200_000)
+        e._config.temporal_rollups_enabled = False
+        now = time.time()
+        for index in range(11):
+            e._dag.add_node(SummaryNode(
+                session_id="rn", depth=0, summary=f"leaf {index}", token_count=3,
+                source_token_count=9, source_ids=[], source_type="messages",
+                created_at=now - index, earliest_at=now - index, latest_at=now - index))
+
+        payload = json.loads(lcm_tools.lcm_recent({"period": "today", "limit": 10}, engine=e))
+        assert payload["complete"] is True
+        assert payload["total_sections"] == 11, payload["total_sections"]
+        assert payload["returned_sections"] == 10
+        assert payload["truncated"] is True
+
+        def explode(*a, **k):
+            raise RuntimeError("frontier is broken")
+
+        monkeypatch.setattr(lcm_tools, "canonical_frontier", explode)
+        failed = json.loads(lcm_tools.lcm_recent({"period": "today", "limit": 10}, engine=e))
+        assert failed["complete"] is False, failed
+        assert "frontier" in failed["incomplete_reason"]
     finally:
         e.shutdown()
