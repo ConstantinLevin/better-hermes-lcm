@@ -568,7 +568,7 @@ class QueryViewStore:
             try:
                 yield
                 self._conn.execute("COMMIT")
-            except Exception:
+            except BaseException:  # fork: betterlcm — see round-2 verify-5 #5
                 self._conn.execute("ROLLBACK")
                 raise
 

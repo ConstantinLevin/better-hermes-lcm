@@ -122,3 +122,97 @@ def test_a_default_state_query_applies_the_validity_window(tmp_path):
     finally:
         assertions.close()
         messages.close()
+
+
+def test_a_cancelled_assertion_publication_cannot_commit_later(tmp_path):
+    """round-2 verify-5 #5: the transaction handlers caught Exception, not cancellation, so
+    interrupting publication before its assertion insert left the transaction open — and a
+    later real commit published a current extraction receipt with zero assertions."""
+    from hermes_lcm.assertion_store import AssertionCandidate, AssertionStore
+    from hermes_lcm.store import MessageStore
+
+    db_path = tmp_path / "cancel.db"
+    messages = MessageStore(db_path)
+    assertions = AssertionStore(db_path)
+    try:
+        content = "I am on the payments team."
+        store_id = messages.append("s", {"role": "user", "content": content}, source="cli")
+        messages.commit()
+        snapshot = assertions.snapshot_source(store_id)
+        quote = "on the payments team"
+        start = content.index(quote)
+        candidate = AssertionCandidate(
+            source_span_start=start, source_span_end=start + len(quote),
+            subject_key="user", predicate_key="team", object_value="payments",
+            value_text="payments", kind="fact", event_at=None,
+            valid_from=None, valid_to=None,
+        )
+
+        real_conn = assertions._conn
+        state = {"cancelled": False}
+
+        class CancellingConnection:
+            """A connection that is cancelled mid-transaction, as a host abort would."""
+
+            def execute(self, sql, *args, **kwargs):
+                if not state["cancelled"] and "INSERT INTO lcm_assertions" in str(sql):
+                    state["cancelled"] = True
+                    raise KeyboardInterrupt()
+                return real_conn.execute(sql, *args, **kwargs)
+
+            def __getattr__(self, name):
+                return getattr(real_conn, name)
+
+        assertions._conn = CancellingConnection()
+        try:
+            with pytest.raises(KeyboardInterrupt):
+                assertions.publish_source(snapshot, [candidate])
+        finally:
+            assertions._conn = real_conn
+
+        real_conn.commit()  # an unrelated commit must publish nothing
+        receipts = real_conn.execute(
+            "SELECT COUNT(*) FROM lcm_assertion_sources"
+        ).fetchone()[0]
+        stored = real_conn.execute("SELECT COUNT(*) FROM lcm_assertions").fetchone()[0]
+        assert (receipts, stored) == (0, 0), (receipts, stored)
+    finally:
+        assertions.close()
+        messages.close()
+
+
+def test_trajectory_ingestion_keeps_the_original_and_redacts_only_what_it_sends(tmp_path):
+    """round-2 verify-5 #4: trajectory ingestion redacted irreversibly BY DEFAULT, so two
+    ingests differing only in a secret produced the same digest and the second was reported
+    "already current" — both the values and the fact that they differed were gone."""
+    from hermes_lcm.trajectory_store import TrajectoryStore
+    import inspect
+
+    signature = inspect.signature(TrajectoryStore.__init__)
+    assert signature.parameters["protect_sensitive"].default is False
+
+
+def test_the_final_answer_verifier_refuses_added_claims(tmp_path):
+    """round-2 verify-5 #1: appending "The project was approved and deployed" to a valid
+    calculation returned "verified" — the checks were satisfied by prose that merely preserved
+    the numbers and entities, so a reader was told an unsupported claim had been checked."""
+    from hermes_lcm.reasoning import ComputationTrace, verify_final_answer
+
+    trace = ComputationTrace(
+        operation="difference",
+        result="$12",
+        result_value=12,
+        unit="usd",
+        citations=("lcm:1:0-5",),
+        entities=("Alice", "Bob"),
+        evidence_dates=(),
+        steps=(),
+        answer="Alice spent $12 more than Bob. [lcm:1:0-5]",
+    )
+    assert verify_final_answer(trace.answer, trace).status == "verified"
+    decision = verify_final_answer(
+        "Alice spent $12 more than Bob. The project was approved and deployed. [lcm:1:0-5]",
+        trace,
+    )
+    assert decision.status == "fallback", decision
+    assert "does not support" in decision.reason

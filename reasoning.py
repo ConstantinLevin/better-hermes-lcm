@@ -1573,4 +1573,25 @@ def verify_final_answer(candidate: Any, trace: ComputationTrace) -> Verification
         return VerificationDecision(
             "fallback", "candidate omits or changes a grounded entity"
         )
+    # fork: betterlcm — every SENTENCE must be about the computation. The checks above are
+    # satisfied by prose that merely preserves the numbers and entities, so appending "The
+    # project was approved and deployed" to a valid calculation was certified as verified
+    # (round-2 verify-5 #1): a reader was told an unsupported claim had been checked. A
+    # sentence carrying none of the grounded elements is not verifiable here, and the honest
+    # answer is to fall back rather than to certify it.
+    grounded_fragments = [
+        fragment for fragment in (trace.result, *trace.entities) if str(fragment or "").strip()
+    ]
+    for sentence in re.split(r"(?<=[.!?])\s+", without_citations):
+        stripped = sentence.strip()
+        if not stripped or not re.search(r"[A-Za-z0-9]", stripped):
+            continue
+        folded = stripped.casefold()
+        if any(str(fragment).casefold() in folded for fragment in grounded_fragments):
+            continue
+        return VerificationDecision(
+            "fallback",
+            "candidate adds a statement the computation does not support: "
+            f"{stripped[:120]!r}",
+        )
     return VerificationDecision("verified")

@@ -740,7 +740,8 @@ class AssertionStore:
                         {**row, "created_at": time.time()},
                     )
                 self._conn.execute("COMMIT")
-            except Exception:
+            except BaseException:  # fork: betterlcm — a cancellation left the transaction
+                # open and the next commit published a half-written record (round-2 verify-5 #5)
                 self._conn.execute("ROLLBACK")
                 raise
 
@@ -1061,7 +1062,8 @@ class AssertionStore:
                 changed = int(cursor.rowcount or 0)
                 self._conn.execute("COMMIT")
                 return changed
-            except Exception:
+            except BaseException:  # fork: betterlcm — a cancellation left the transaction
+                # open and the next commit published a half-written record (round-2 verify-5 #5)
                 self._conn.execute("ROLLBACK")
                 raise
 
@@ -1093,6 +1095,7 @@ class AssertionStore:
                 )
                 self._conn.execute("COMMIT")
                 return counts
-            except Exception:
+            except BaseException:  # fork: betterlcm — a cancellation left the transaction
+                # open and the next commit published a half-written record (round-2 verify-5 #5)
                 self._conn.execute("ROLLBACK")
                 raise
