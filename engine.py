@@ -1801,12 +1801,28 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                 for message in attempt_chunk
                 if id(message) in self._current_compress_store_ids_by_message_id
             ))
-            # fork: betterlcm — upstream's literals (2000 / 0.20 / 12000) now come from config
+            # fork: betterlcm — the budget is a RATIO of the source, with no ceiling.
+            #
+            # Upstream clamped it with `min(token_budget, 12000)`. That is a summary whose size
+            # stops growing while its source keeps growing: at 40k of source the ratio holds
+            # (8,000 tokens, 5:1), at 60k it is already pinned, and past that every additional
+            # source token gets ZERO additional summary — 21:1 over a 262k span, 58:1 over a
+            # 700k one. The node is then published as a complete index over material it never
+            # had room to describe, which is this fork's first rule broken by arithmetic. The
+            # prompt has always said "Exceed the target rather than omit an item"
+            # (escalation.py); the ceiling was telling the model the opposite.
+            #
+            # `leaf_summary_max_tokens` remains as an OPERATOR cap and now defaults to 0 = none.
+            # Setting it re-creates the degradation above, so it is deliberately not the default.
+            # The real bound on one summary is the chunk it covers, and that is bounded by
+            # `window_scaling.LEAF_CHUNK_TOKENS` — bound the input, never the description of it.
             token_budget = max(
                 int(self._config.leaf_summary_min_tokens),
                 int(source_tokens * float(self._config.leaf_summary_ratio)),
             )
-            token_budget = min(token_budget, int(self._config.leaf_summary_max_tokens))
+            operator_budget_cap = int(self._config.leaf_summary_max_tokens or 0)
+            if operator_budget_cap > 0:
+                token_budget = min(token_budget, operator_budget_cap)
 
             try:
                 timeout_seconds = self.effective_summary_timeout_ms / 1000  # fork: curved

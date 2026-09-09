@@ -9,29 +9,51 @@ from hermes_lcm.config import LCMConfig
 K = 1024
 W256, W1M = 262_144, 1_000_000
 
-UPSTREAM = {  # what every anchor must resolve to at 256k with default config
-    "context_threshold": 0.35, "leaf_chunk_tokens": W256, "leaf_pass_cap": 1,
-    "leaf_loop_max_seconds": 120.0, "summary_timeout_ms": 60_000, "expansion_timeout_ms": 120_000,
-    # fresh_tail_max_tokens: upstream's literal is 0 = "no cap". 0 is a sentinel, not a
-    # quantity, so the curve's low anchor is the low window itself — a cap that can never bind,
-    # which is the same behaviour, and which slides instead of jumping to 1 token just above
-    # the anchor. See docs/fork-design.md (audit A, W1).
-    "fresh_tail_count": 32, "fresh_tail_max_tokens": W256, "condense_budget_tokens": 0,
-    "sweep_target_tokens": 20_000, "incremental_max_depth": 3, "summary_concurrency": 1,
+# What the curve must resolve to at the LOW anchor.
+#
+# The old name for this was UPSTREAM, and it asserted that every value at 256k is upstream's.
+# That was the mistake this fork spent a long time shipping: upstream is the FLOOR ("never worse
+# than upstream"), never the target. A value is upstream's at 256k only when it is a genuine
+# tuning preference — a cost/latency/headroom tradeoff where upstream's choice is as good as any
+# other. Where a value decides how much is LOST or how coarse the index is, upstream's number is
+# not adopted at any window.
+LOW_ANCHOR_TUNING = {  # preferences: upstream's own values, because they are fine
+    "context_threshold": 0.35,          # when to compact: a real cost/verbatim tradeoff
+    "leaf_loop_max_seconds": 120.0, "summary_timeout_ms": 60_000,
+    "expansion_timeout_ms": 120_000,
+    "sweep_target_tokens": 20_000, "incremental_max_depth": 3,
     "summary_spend_max_calls": 24, "summary_circuit_breaker_failure_threshold": 2,
-    # serialize_message_max_chars: upstream's literal is 3000 (head 2000 + tail 800, unmarked).
-    # That is TRUNCATION, and this fork removes truncation at EVERY window — the curve carries
-    # tuning values, not loss. Both endpoints are 4 chars/token of their own anchor window, a cap
-    # that cannot bind in practice. See docs/fork-design.md (no-loss doctrine).
-    "l2_budget_ratio": 0.50, "serialize_message_max_chars": 4 * W256, "stub_threshold_tokens": 25_000,
+    "l2_budget_ratio": 0.50, "stub_threshold_tokens": 25_000,
     "expansion_context_tokens": 32_000, "expand_page_tokens": 4_000,
     "tool_response_char_scale": 1.0, "sqlite_cache_kib": 2_048, "token_cache_size": 2_048,
 }
+LOW_ANCHOR_NOT_UPSTREAM = {  # quality/loss: deliberately NOT upstream's number
+    # upstream: the whole backlog in one summariser call — one node standing for everything,
+    # which is a one-shot compaction. 4 % of the window at every anchor instead.
+    "leaf_chunk_tokens": round(W256 * 0.04),
+    # upstream: 1 pass per compaction, which cannot drain a chunked backlog.
+    "leaf_pass_cap": 16,
+    # upstream: stop the moment we are under the threshold — one chunk and done.
+    "drain_stop_fraction": 0.30,
+    # upstream: 32 messages and no token cap, so what stays verbatim depends on how long the
+    # messages happen to be. The same fraction of the window as at 1M instead.
+    "fresh_tail_count": 400, "fresh_tail_max_tokens": round(W256 * 0.15),
+    # upstream: no token gate, so condensation runs on a count rule and coarsens the frontier
+    # long before there is pressure to.
+    "condense_budget_tokens": round(W256 * 0.20),
+    "condense_group_cap": 4,
+    # upstream: serial, because upstream has one chunk. This fork chunks at every window.
+    "summary_concurrency": 6,
+    # upstream: 3000 chars per message (head 2000 + tail 800), unmarked. That is truncation.
+    "serialize_message_max_chars": 4 * W256,
+}
+LOW_ANCHOR = {**LOW_ANCHOR_TUNING, **LOW_ANCHOR_NOT_UPSTREAM}
 DESIGN_1M = {
     "context_threshold": 0.80, "drain_stop_fraction": 0.30, "leaf_chunk_tokens": 40_000,
     "leaf_pass_cap": 64, "leaf_loop_max_seconds": 200.0, "summary_timeout_ms": 200_000,
     "fresh_tail_count": 400, "fresh_tail_max_tokens": 150_000, "condense_budget_tokens": 200_000,
     "sweep_target_tokens": 200_000, "incremental_max_depth": 5, "summary_concurrency": 6,
+    "condense_group_cap": 16,
     "summary_spend_max_calls": 120, "summary_circuit_breaker_failure_threshold": 4,
     "l2_budget_ratio": 0.80, "serialize_message_max_chars": 4_000_000,
     "stub_threshold_tokens": 100_000, "expansion_context_tokens": 125_000,
@@ -55,29 +77,41 @@ def test_curve_t_is_clamped_and_linear():
     assert abs(ws.curve_t(mid) - 0.5) < 1e-6
 
 
-def test_at_256k_equals_upstream():
+def test_the_low_anchor_takes_upstreams_tuning_and_rejects_its_losses():
+    """Upstream is the floor, not the target.
+
+    Every value at 256k is upstream's own where the value is a preference — a cost, latency or
+    headroom tradeoff. Where it decides how much is lost, or how coarse the index is, upstream's
+    number is not adopted at any window. Splitting the two is the point of this test: a single
+    "equals upstream" assertion is what let a whole-backlog leaf chunk survive here for so long.
+    """
     r = ws.resolve_window_scaled(_cfg(), W256, env={})
-    for name, expected in UPSTREAM.items():
-        assert r[name].value == expected, (name, r[name])
+    for name, expected in LOW_ANCHOR.items():
+        assert r[name].value == pytest.approx(expected), (name, r[name])
         assert r[name].source.startswith("curve@t=0.00")
-    # drain stop at t=0 equals the threshold (stop once under)
-    assert r["drain_stop_fraction"].value == pytest.approx(0.35)
+
+    upstream_defaults = {f.name: f.default for f in dataclasses.fields(LCMConfig)}
+    for name in LOW_ANCHOR_NOT_UPSTREAM:
+        anchor = ws.ANCHORS_BY_NAME[name]
+        upstream_value = upstream_defaults.get(anchor.field)
+        if isinstance(upstream_value, (int, float)) and upstream_value:
+            assert r[name].value != upstream_value, (
+                f"{name} resolved to upstream's own value; it is a quality/loss setting and "
+                "must be decided on merit at every window"
+            )
 
 
-def test_no_window_is_upstream():
-    """With no window known, every setting is upstream's own default, verbatim."""
+def test_no_window_still_gets_the_low_anchor_quality_values():
+    """With no window known yet, tuning falls back to upstream's literals — but a value that
+    exists to prevent loss must not wait for a window to start protecting anything."""
     r = ws.resolve_window_scaled(_cfg(), 0, env={})
     defaults = {f.name: f.default for f in dataclasses.fields(LCMConfig)}
-    for name, expected in UPSTREAM.items():
-        if name == "leaf_chunk_tokens":
-            continue  # fraction lows have no meaning without a window
-        anchor = ws.ANCHORS_BY_NAME[name]
-        if anchor.low_is_fraction:
-            # sentinel field (e.g. fresh_tail_max_tokens = 0 "no cap"): the curve's low endpoint
-            # is a non-binding value, but with no window at all upstream's literal is used
-            expected = defaults[anchor.field]
+    for name, expected in LOW_ANCHOR_TUNING.items():
         assert r[name].value == expected, name
         assert r[name].source == "upstream(no window)"
+    for name in ("leaf_pass_cap", "condense_group_cap", "summary_concurrency"):
+        assert r[name].value == LOW_ANCHOR[name], name
+        assert r[name].value != defaults[ws.ANCHORS_BY_NAME[name].field]
 
 
 def test_at_1m_equals_design():
@@ -93,11 +127,16 @@ def test_between_anchors_is_strictly_between(W):
     t = ws.curve_t(W)
     assert 0.0 < t < 1.0
     assert 0.35 < r["context_threshold"].value < 0.80
-    assert 32 < r["fresh_tail_count"].value < 400
-    assert 1 <= r["summary_concurrency"].value <= 6
-    # monotone: chunk shrinks toward 40k, budget grows toward 0.2W
-    assert 40_000 < r["leaf_chunk_tokens"].value < W
-    assert 0 < r["condense_budget_tokens"].value < 0.20 * W
+    assert 3 <= r["incremental_max_depth"].value <= 5
+    assert 24 < r["summary_spend_max_calls"].value < 120
+    # FLAT anchors are the quality/loss ones: the same fraction at both ends, so they slide with
+    # the window but never with `t`. "Strictly between" does not apply to them, by design.
+    assert r["leaf_chunk_tokens"].value == round(W * 0.04)
+    assert r["fresh_tail_max_tokens"].value == round(W * 0.15)
+    assert r["condense_budget_tokens"].value == round(W * 0.20)
+    assert r["fresh_tail_count"].value == 400
+    assert r["summary_concurrency"].value == 6
+    assert r["drain_stop_fraction"].value == pytest.approx(0.30)
 
 
 def test_worked_values_at_512k():
@@ -106,13 +145,13 @@ def test_worked_values_at_512k():
     t = ws.curve_t(W)
     assert r["context_threshold"].value == pytest.approx(0.35 + t * 0.45)
     assert r["incremental_max_depth"].value in (3, 4)
-    assert r["summary_concurrency"].value in (2, 3)
-    # fixed endpoints: the whole backlog at W_low (262,144) sliding to 40,000 at W_high.
-    # Resolving both fractions against the *current* window used to make this non-monotonic
-    # (262k at 256k, 345k at 512k, 40k at 1M) — bigger summariser requests in the middle than
-    # at either end. See docs/fork-design.md (audit A, W3).
-    assert r["leaf_chunk_tokens"].value == int(round(W256 + t * (40_000 - W256)))
-    assert W256 > r["leaf_chunk_tokens"].value > 40_000
+    assert r["summary_concurrency"].value == 6  # flat: chunking runs at every window
+    # The chunk is the same FRACTION at both anchors, so it slides with the window and is
+    # never a value that only makes sense at one end. It used to interpolate from "the whole
+    # window" down to 40,000, which made a 256k session summarise its entire backlog into one
+    # node — a one-shot compaction with a DAG drawn around it.
+    assert r["leaf_chunk_tokens"].value == round(W * 0.04)
+    assert 40_000 > r["leaf_chunk_tokens"].value > round(W256 * 0.04)
 
 
 def test_explicit_env_override_wins_over_curve():
@@ -129,7 +168,7 @@ def test_tracked_config_source_wins_over_curve():
     # the drain stop has fixed anchors (0.35 -> 0.30) and is clamped to the resolved
     # threshold, so an explicit 0.5 threshold does not drag the stop above the curve
     r0 = ws.resolve_window_scaled(c, W256, env={})
-    assert r0["drain_stop_fraction"].value == pytest.approx(0.35)
+    assert r0["drain_stop_fraction"].value == pytest.approx(0.30)
 
 
 def test_fork_field_override_is_explicit_by_value():
@@ -170,7 +209,11 @@ def test_curve_is_monotone_across_the_whole_range():
               "leaf_loop_max_seconds", "summary_timeout_ms", "expansion_timeout_ms",
               "serialize_message_max_chars", "stub_threshold_tokens", "expansion_context_tokens",
               "expand_page_tokens", "tool_response_char_scale", "sqlite_cache_kib", "token_cache_size"}
-    falling = {"drain_stop_fraction", "leaf_chunk_tokens", "fresh_tail_max_tokens"}
+    # `fresh_tail_max_tokens`, `leaf_chunk_tokens` and `condense_budget_tokens` are FLAT
+    # fractions now — the same share of the window at both anchors — so they rise with the
+    # window, not with t. `drain_stop_fraction` is flat outright.
+    falling: set[str] = set()
+    rising |= {"leaf_chunk_tokens", "fresh_tail_max_tokens", "drain_stop_fraction"}
     previous = None
     for window in _WINDOWS:
         resolved = ws.resolve_window_scaled(_cfg(), window, env={})
@@ -184,13 +227,18 @@ def test_curve_is_monotone_across_the_whole_range():
 
 
 def test_no_setting_jumps_meaning_just_above_the_low_anchor():
-    """Just above 256k every value must still behave like upstream's, not like a 1-token limit."""
-    r = ws.resolve_window_scaled(_cfg(), W256 + 10, env={})
-    assert r["fresh_tail_max_tokens"].value > 100_000          # cannot bind a 32-message tail
-    assert r["leaf_chunk_tokens"].value > 100_000              # still "the whole backlog"
-    assert r["condense_budget_tokens"].value < 100             # gate is vacuous, not a drain target
-    assert r["leaf_pass_cap"].value == 1                       # still one pass, as upstream
-    assert r["summary_concurrency"].value == 1
+    """Nothing may change MEANING as the window crosses the low anchor.
+
+    The original failure this pins: a `0` sentinel ("no cap") interpolated into a 1-token cap
+    just above 256k. The rule is the same now that several anchors are flat — a value ten
+    tokens above the anchor must be indistinguishable from the value at it.
+    """
+    at = ws.resolve_window_scaled(_cfg(), W256, env={})
+    just_above = ws.resolve_window_scaled(_cfg(), W256 + 10, env={})
+    for name in ws.ANCHORS_BY_NAME:
+        low, high = at[name].value, just_above[name].value
+        if isinstance(low, (int, float)) and low:
+            assert abs(high - low) <= max(1.0, abs(low) * 0.001), (name, low, high)
 
 
 def test_every_anchor_is_exactly_linear_between_its_endpoints():
@@ -208,8 +256,6 @@ def test_every_anchor_is_exactly_linear_between_its_endpoints():
         resolved = ws.resolve_window_scaled(_cfg(), window, env={})
         for name, (lo, hi) in endpoints.items():
             anchor = ws.ANCHORS_BY_NAME[name]
-            if name == "fresh_tail_max_tokens":
-                lo = float(low)          # the reported 0 at the low anchor is "cannot bind"
             if name == "drain_stop_fraction":
                 continue                 # clamped to the resolved threshold; covered separately
             expected = lo + t * (hi - lo)
@@ -224,5 +270,7 @@ def test_drain_stop_is_linear_until_the_threshold_clamps_it():
     for window in (300_000, 512 * K, 900_000):
         t = ws.curve_t(window)
         r = ws.resolve_window_scaled(_cfg(), window, env={})
-        expected = min(0.35 + t * (0.30 - 0.35), r["context_threshold"].value)
+        # flat at 0.30 now: upstream's "stop the moment we are under the threshold" is only
+        # correct for a loop that takes one whole-backlog pass, and this fork chunks everywhere
+        expected = min(0.30, r["context_threshold"].value)
         assert r["drain_stop_fraction"].value == pytest.approx(expected)

@@ -89,12 +89,16 @@ def test_concurrency_6_dag_identical_to_concurrency_1(tmp_path, deterministic_su
         parallel.shutdown()
 
 
-def test_default_curve_gives_concurrency_6_at_1m_and_1_at_256k(tmp_path):
+def test_chunks_are_summarised_in_parallel_at_every_window(tmp_path):
+    """Upstream is serial because upstream has one chunk. This fork chunks at every window, so
+    pinning the low anchor to 1 made 256k do its chunks strictly one after another. Concurrency
+    is bounded by the number of pending chunks anyway, so it costs nothing where there is only
+    one chunk to do — and persistence stays sequential, so the published DAG is unchanged."""
     e = _engine(tmp_path, "curve")
     try:
         assert int(e.effective_summary_concurrency) == 6
         e._set_context_length(262_144, source="test")
-        assert int(e.effective_summary_concurrency) == 1
+        assert int(e.effective_summary_concurrency) == 6
     finally:
         e.shutdown()
 

@@ -37,17 +37,22 @@ def summariser_calls(monkeypatch):
     return calls
 
 
-def test_non_sweep_at_256k_is_one_whole_backlog_pass(tmp_path, summariser_calls):
+def test_the_leaf_chunk_is_bounded_at_every_window(tmp_path, summariser_calls):
+    """Chunking is what LCM IS. One summariser call per bounded chunk, at 256k exactly as at
+    1M — a leaf that stands for the whole backlog is a one-shot compaction wearing a DAG."""
     e = _engine(tmp_path, W256)
     try:
-        assert int(e.effective_leaf_pass_cap) == 1
-        assert int(e.effective_leaf_chunk_tokens) == W256
+        # the chunk is the same FRACTION of the window at both anchors, never the window itself
+        assert int(e.effective_leaf_chunk_tokens) == round(W256 * 0.04)
+        assert int(e.effective_leaf_pass_cap) > 1, "one pass per compaction cannot drain"
+        e._config.leaf_chunk_fraction = 0.0008  # ~200-token chunks so several passes are needed
+        e._resolve_window_scaled_settings()
         messages = _backlog(40) + _tail()
         e.compress(messages, current_tokens=e.threshold_tokens + 1)
-        nodes = e._dag.get_session_nodes(e._session_id)
-        assert len(nodes) == 1
-        assert len(nodes[0].source_ids) == 40
-        assert len(summariser_calls) == 1
+        leaves = [n for n in e._dag.get_session_nodes(e._session_id) if n.depth == 0]
+        assert len(leaves) > 1, "256k must chunk, not swallow the backlog"
+        covered = sorted(sid for n in leaves for sid in n.source_ids)
+        assert covered == sorted(set(covered)), "each row belongs to exactly one leaf"
     finally:
         e.shutdown()
 
@@ -67,8 +72,11 @@ def test_non_sweep_at_1m_drains_in_curved_chunks_to_stop_fraction(tmp_path, summ
         leaves = [n for n in e._dag.get_session_nodes(e._session_id) if n.depth == 0]
         # several chunk-sized leaves, oldest first, covering the whole backlog exactly once
         assert len(leaves) > 1
+        # the drain stops once the context is under the stop fraction, so it covers a
+        # CONTIGUOUS oldest prefix rather than necessarily all 40 — each row exactly once
         covered = sorted(sid for n in leaves for sid in n.source_ids)
-        assert len(covered) == 40 and covered == list(range(covered[0], covered[0] + 40))
+        assert covered == list(range(covered[0], covered[0] + len(covered)))
+        assert len(covered) == len(set(covered))
         for n in leaves:
             assert n.source_token_count <= 200 + 80  # one chunk (+ the message that overflows it)
         assert len(summariser_calls) >= len(leaves)  # condensation calls may follow
@@ -185,33 +193,21 @@ def test_rescue_fallback_never_splits_a_tool_group(tmp_path):
 
 # ── audit D4: the low anchor is upstream's BEHAVIOUR, not values that merely equal it ───────
 
-def test_oversized_history_at_the_low_anchor_still_goes_in_one_pass(tmp_path, summariser_calls):
-    """Upstream selects the entire eligible backlog when dynamic chunking is off. The fork
-    approximated that with a chunk of W, so a resumed or imported history LARGER than the
-    window was chunked instead — a different DAG from upstream's on exactly the histories most
-    likely to be imported."""
+def test_an_oversized_imported_history_is_chunked_not_swallowed(tmp_path, summariser_calls):
+    """A resumed or imported history far larger than the window is exactly the case where one
+    whole-backlog summary is most useless: one node standing for everything. It is chunked like
+    any other backlog, so each leaf covers a span a reader can expand."""
     e = _engine(tmp_path, W256)
     try:
-        # ~40 messages of ~9k tokens each: a backlog well past the 256k window
         messages = [{"role": "user", "content": f"turn-{i} " + ("word " * 9000)} for i in range(40)]
         messages += _tail()
         e.compress(messages, current_tokens=e.threshold_tokens + 1)
         leaves = [n for n in e._dag.get_session_nodes(e._session_id) if n.depth == 0]
-        assert len(leaves) == 1, "one whole-backlog pass, as upstream"
-        assert len(leaves[0].source_ids) == 40
-    finally:
-        e.shutdown()
-
-
-def test_the_forks_wall_clock_does_not_apply_at_the_low_anchor(tmp_path):
-    """Upstream's ordinary and dynamic-chunk paths had no wall clock — only its sweep did.
-    Imposing the fork's clock on them changed behaviour where the contract says the fork must
-    BE upstream."""
-    e = _engine(tmp_path, W256)
-    try:
-        assert e._fork_leaf_scheduling_active() is False
-        e._set_context_length(W256 + 1, source="test")
-        assert e._fork_leaf_scheduling_active() is True
+        assert len(leaves) > 1, "an oversized history must not become one node"
+        chunk = int(e.effective_leaf_chunk_tokens)
+        for node in leaves:
+            # one chunk, plus at most the single message that overflowed it
+            assert node.source_token_count <= chunk + 12_000, node.source_token_count
     finally:
         e.shutdown()
 

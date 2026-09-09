@@ -134,12 +134,12 @@ Every fork setting has a dataclass field, an env var and (for the weighted ones)
 |---|---|---|
 | `LCM_SCALE_LOW_WINDOW` | `262144` | `scale_low_window` — window where every weighted value equals upstream's |
 | `LCM_SCALE_HIGH_WINDOW` | `1000000` | `scale_high_window` — window where it equals the large-window design |
-| `LCM_DRAIN_STOP_FRACTION` | `0.0` | `drain_stop_fraction` (curve: threshold → 0.30 of W) |
-| `LCM_LEAF_CHUNK_FRACTION` | `0.0` | `leaf_chunk_fraction` (curve: 1.0 → 0.04 of W) |
-| `LCM_LEAF_PASS_CAP` | `0` | `leaf_pass_cap` (curve: 1 → 64) |
+| `LCM_DRAIN_STOP_FRACTION` | `0.0` | `drain_stop_fraction` (0.30 of W at every anchor; clamped to the resolved threshold) |
+| `LCM_LEAF_CHUNK_FRACTION` | `0.0` | `leaf_chunk_fraction` (**0.04 of W at every anchor** — the granularity of the index, not a window preference; ~25 leaves per window) |
+| `LCM_LEAF_PASS_CAP` | `0` | `leaf_pass_cap` (curve: 16 → 64; a wall-clock/spend safety limit, never what stops a drain) |
 | `LCM_LEAF_LOOP_MAX_SECONDS` | `0.0` | `leaf_loop_max_seconds` (curve: 120 → 200) |
-| `LCM_SUMMARY_BUDGET_FRACTION` | `0.0` | `summary_budget_fraction` (curve: 0 → 0.20 of W; condensation trigger) |
-| `LCM_SUMMARY_CONCURRENCY` | `0` | `summary_concurrency` (curve: 1 → 6) |
+| `LCM_SUMMARY_BUDGET_FRACTION` | `0.0` | `summary_budget_fraction` (0.20 of W at every anchor; condensation trigger) |
+| `LCM_SUMMARY_CONCURRENCY` | `0` | `summary_concurrency` (6 at every anchor; bounded by pending chunks, sequential persist) |
 | `LCM_SERIALIZE_MESSAGE_MAX_CHARS` | `0` | `serialize_message_max_chars` (curve: 4·W → 4·W — the whole window at both anchors, so it never binds; `0` means no cap at all. An explicit value is an operator cap and still cuts only through a sized `[LCM elided …]` marker. Tool-call arguments share this cap.) |
 | `LCM_EXPAND_PAGE_TOKENS` | `0` | `expand_page_tokens` (curve: 4000 → 32000) |
 | `LCM_TOOL_RESPONSE_CHAR_SCALE` | `0.0` | `tool_response_char_scale` (curve: 1 → 4) |

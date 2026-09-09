@@ -839,7 +839,11 @@ class LCMConfig:
     # Summary size rules (upstream literals, now configurable; defaults unchanged).
     leaf_summary_ratio: float = 0.20          # leaf budget = clamp(ratio*source, min, max)
     leaf_summary_min_tokens: int = 2000
-    leaf_summary_max_tokens: int = 12000
+    # fork: betterlcm — 0 = NO ceiling (upstream's literal was 12000). A summary whose size
+    # stops growing while its source keeps growing is published as a complete index over
+    # material it had no room to describe; the input is bounded by the leaf chunk instead.
+    # An operator may still set a ceiling here, at that cost.
+    leaf_summary_max_tokens: int = 0
     condensation_ratio: float = 0.40          # condensation budget = max(min, ratio*source)
     condensation_min_tokens: int = 1000
 

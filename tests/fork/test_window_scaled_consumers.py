@@ -24,7 +24,10 @@ def test_fresh_tail_uses_curved_caps(tmp_path):
     e._set_context_length(W256, source="test")
     b256 = e._fresh_tail_boundary(msgs)
     # at the low anchor the cap cannot bind and is reported as upstream's 0
-    assert b256.count == 32 and b256.token_limit == 0 and b256.token_limited is False
+    # fork: the protected tail is sized in TOKENS at every window (0.15*W), not by upstream's
+    # flat 32 messages — what 32 messages protect depends on how long they happen to be.
+    assert b256.token_limit == round(W256 * 0.15) and b256.token_limited is True
+    assert b256.count_limit == 400 and b256.count > 32
     e._set_context_length(W1M, source="test")
     b1m = e._fresh_tail_boundary(msgs)
     assert b1m.count_limit == 400 and b1m.token_limit == 150_000

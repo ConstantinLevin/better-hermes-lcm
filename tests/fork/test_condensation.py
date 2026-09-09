@@ -46,16 +46,23 @@ def mock_summariser(monkeypatch):
 
 
 @pytest.mark.parametrize("window", [None, W256])
-def test_condense_at_256k_uses_count_rule(tmp_path, mock_summariser, window):
+def test_condense_at_256k_waits_for_a_real_summary_pile(tmp_path, mock_summariser, window):
+    """Upstream has no token gate, so condensation runs on a COUNT rule: every fanin-th leaf,
+    whatever those leaves are worth. That coarsens the frontier long before there is any
+    pressure to. The gate is the same share of the window at every anchor."""
     e = _engine(tmp_path, window)
     try:
-        assert int(e.effective_condense_budget_tokens or 0) == 0
+        expected_gate = round(window * 0.20) if window else 0  # no window: nothing to take a share of
+        assert int(e.effective_condense_budget_tokens or 0) == expected_gate
         base = time.time()
         for i in range(4):
             _leaf(e, 10, earliest=base + i, created=base + i)
         e._maybe_condense()
         nodes = e._dag.get_session_nodes(e._session_id)
-        assert sorted(n.depth for n in nodes) == [0, 0, 0, 0, 1]
+        if window:
+            assert sorted(n.depth for n in nodes) == [0, 0, 0, 0], "40 tokens is not a pile"
+        else:
+            assert sorted(n.depth for n in nodes) == [0, 0, 0, 0, 1]  # no gate without a window
     finally:
         e.shutdown()
 
@@ -124,16 +131,20 @@ def test_condense_over_budget_is_gated_not_drained_and_keeps_up_with_production(
         e.shutdown()
 
 
-def test_condense_group_cap_is_one_at_the_low_anchor(tmp_path, mock_summariser):
-    """At 256k the cap is 1: exactly upstream's single pass of the depth loop."""
+def test_condense_group_cap_absorbs_one_compactions_worth_of_leaves(tmp_path, mock_summariser):
+    """The cap is `leaf_pass_cap / fanin` — enough groups to merge what one compaction can
+    publish. Upstream's 1 matched upstream's one-leaf-per-call rate; this fork chunks at every
+    window, so a cap of 1 would let leaves accumulate faster than they are merged."""
     e = _engine(tmp_path, W256)
     try:
-        assert int(e.effective_condense_group_cap) == 1
+        assert int(e.effective_condense_group_cap) == 4
+        e._config.summary_budget_fraction = 0.0000001  # let the count rule drive this test
+        e._resolve_window_scaled_settings()
         base = time.time()
         for i in range(12):
             _leaf(e, 10, earliest=base + i, created=base + i)
         e._maybe_condense()
-        assert len([n for n in e._dag.get_session_nodes(e._session_id) if n.depth == 1]) == 1
+        assert len([n for n in e._dag.get_session_nodes(e._session_id) if n.depth == 1]) == 3
     finally:
         e.shutdown()
 
@@ -184,13 +195,16 @@ def test_summary_size_rules_come_from_config(tmp_path, mock_summariser):
     )
     try:
         e.threshold_tokens = 1
-        e.compress([{"role": "user", "content": "word " * 300}, {"role": "user", "content": "tail"}])
+        e.compress([{"role": "user", "content": "word " * 300},
+                    {"role": "user", "content": "tail"}])
         # leaf: clamp(0.5*~300, 50, 80) = 80 -> summariser max_tokens = 2*80
         assert mock_summariser[0] == 160
         base = time.time()
         for i in range(4):
             _leaf(e, 100, earliest=base + i, created=base + i)
         mock_summariser.clear()
+        e._config.summary_budget_fraction = 0.0000001  # this test is about the size rules, not
+        e._resolve_window_scaled_settings()            # the condensation trigger gate
         e._maybe_condense()
         # condensation: max(30, 0.1*source) -> max_tokens = 2*budget; source is the summaries' text
         assert mock_summariser and mock_summariser[0] >= 60
@@ -248,13 +262,15 @@ def test_dynamic_chunking_selects_through_the_aligned_selector(tmp_path, monkeyp
 
 
 def test_the_low_anchor_condenses_one_group_at_every_eligible_depth(tmp_path, mock_summariser):
-    """verify-2 regression #7: the fork's per-call cap counted individual GROUPS, so at the
-    256k anchor (cap 1) only the first depth was condensed. Upstream's single pass traversed
-    every eligible depth, and the low anchor must reproduce upstream exactly."""
+    """verify-2 regression #7: the per-call cap counted individual GROUPS, so with a cap of 1
+    only the first depth was condensed and deeper eligible depths were left for later calls.
+    One pass must reach every eligible depth whatever the cap is."""
     e = _engine(tmp_path, W256, condensation_fanin=2, incremental_max_depth=3,
-                cache_friendly_condensation_enabled=False)
+                condense_group_cap=1, cache_friendly_condensation_enabled=False)
     try:
-        assert int(e.effective_condense_group_cap) == 1
+        assert int(e.effective_condense_group_cap) == 1  # explicit operator cap, the hard case
+        e._config.summary_budget_fraction = 0.0000001  # this test is about depth, not the gate
+        e._resolve_window_scaled_settings()
         base = time.time()
         for index in range(4):                      # d0 material: two groups of two
             _leaf(e, 100, earliest=base + index)

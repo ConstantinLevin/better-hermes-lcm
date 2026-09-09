@@ -34,6 +34,16 @@ THRESHOLD = object()
 # Sentinel for "same as config.leaf_chunk_tokens" (sweep target's low anchor: upstream falls back to it).
 LEAF_CHUNK = object()
 
+# fork: betterlcm — how much raw history one summariser call turns into one leaf node,
+# as a FRACTION of the window. The same fraction at both anchors, so it slides with the
+# window like every other weighted value instead of being a hardcoded token count.
+#
+# 0.04 gives 40,000 tokens at 1M, ~10,500 at 256k, ~5,000 at 128k: about 25 leaves per full
+# window at any size. A fixed token count would have been wrong in both directions — 40k is a
+# reasonable span of a 1M window and 31 % of a 128k one — and a value that is only correct at
+# one window is exactly the thing this table exists to avoid.
+LEAF_CHUNK_FRACTION = 0.04
+
 
 @dataclass(frozen=True)
 class Anchor:
@@ -65,39 +75,98 @@ WINDOW_SCALED_DEFAULTS: tuple[Anchor, ...] = (
     # result to the resolved threshold, so an operator who lowers the threshold below the curve
     # still gets a stop point that is reachable. (Was: the *curved* threshold as a moving low
     # anchor, which made the drain stop rise to 0.44 mid-range before falling.)
-    Anchor("drain_stop_fraction", "drain_stop_fraction", 0.35, 0.30, cast=float, unset=0.0),
-    # Leaf chunk size: upstream (non-dynamic) summarises the WHOLE backlog outside the tail in
-    # one node -> anchor 1.0*W; at 1M 40k chunks. Explicit dynamic_leaf_chunk_enabled keeps
-    # upstream's doubling behaviour instead (handled by the consumer).
-    Anchor("leaf_chunk_tokens", "leaf_chunk_fraction", 1.0, 0.04,
+    # fork: betterlcm — the low anchor was THRESHOLD ("stop the moment we are back under it"),
+    # which is upstream's rule for a loop that only ever takes one whole-backlog pass. With real
+    # chunking that rule stops the drain after the first chunk, leaving the rest of the backlog
+    # raw until the next turn crosses the threshold again — chunking on paper, one-shot in
+    # practice. Both endpoints are now a genuine drain target: compact until the raw backlog is
+    # under 0.30 of the window, then leave the rest verbatim.
+    Anchor("drain_stop_fraction", "drain_stop_fraction", 0.30, 0.30, cast=float, unset=0.0),
+    # ── Leaf chunking: NOT window-scaled, and that is the point ───────────────────────────────
+    #
+    # DO NOT "restore upstream's value" at the low anchor. This is the single most important
+    # comment in this file.
+    #
+    # Chunk size is the GRANULARITY OF THE INDEX, not a tuning preference. One leaf is one
+    # expandable unit: everything inside it is summarised together and comes back together.
+    # Upstream (non-dynamic) hands the WHOLE backlog outside the fresh tail to one summariser
+    # call, which produces exactly one summary of everything — that is a one-shot compaction,
+    # the thing LCM exists to replace. This fork was originally written with the low anchor at
+    # `1.0*W` "because that is upstream's behaviour", and a later commit added a gate to enforce
+    # it even for oversized histories. Both were wrong: good LCM *is* chunking, and a fork whose
+    # stated purpose is "no loss, no truncation" must not ship a degenerate index at its low
+    # anchor.
+    #
+    # Two independent reasons the size must stay bounded, both of which hold at every window:
+    #   1. Summarisation quality degrades with input length. A model given 500k tokens produces
+    #      a topic list; given 40k it can still name decisions, identifiers, paths and errors —
+    #      which is what makes a leaf an index into recoverable history rather than a gist.
+    #   2. Expansion granularity. `lcm_expand(node_id=N)` returns that leaf's sources. A leaf
+    #      over the whole backlog hands back hundreds of messages; a 40k leaf hands back a span
+    #      the reader actually wanted.
+    # Neither reason mentions the host's context window, so neither endpoint may either.
+    #
+    # It stays a FRACTION and slides with the window, like every other weighted value here —
+    # the same fraction at both anchors, so the index has the same relative resolution
+    # (~25 leaves per full window) whatever the model's window is. What changes with the window
+    # is WHEN to compact (threshold), HOW MANY chunks one compaction may take (leaf_pass_cap),
+    # how many are in flight (summary_concurrency) and HOW FAR to drain (drain_stop_fraction).
+    Anchor("leaf_chunk_tokens", "leaf_chunk_fraction", LEAF_CHUNK_FRACTION, LEAF_CHUNK_FRACTION,
            low_is_fraction=True, high_is_fraction=True, cast=int, unset=0.0),
-    Anchor("leaf_pass_cap", "leaf_pass_cap", 1, 64, cast=int, unset=0),
+    # Pass cap: a wall-clock/spend SAFETY limit, never the thing that stops a drain. It was 1 at
+    # the low anchor, which meant one chunk per compaction — so even with chunking switched on,
+    # a backlog could never drain. Both endpoints are now generous enough that the real guards
+    # (leaf_loop_max_seconds, the spend guard, drain_stop_fraction) are what actually stop the
+    # loop.
+    Anchor("leaf_pass_cap", "leaf_pass_cap", 16, 64, cast=int, unset=0),
     Anchor("leaf_loop_max_seconds", "leaf_loop_max_seconds", 120.0, 200.0, cast=float, unset=0.0),
     Anchor("summary_timeout_ms", "summary_timeout_ms", 60_000, 200_000, cast=int),
     Anchor("expansion_timeout_ms", "expansion_timeout_ms", 120_000, 200_000, cast=int),
-    Anchor("fresh_tail_count", "fresh_tail_count", 32, 400, cast=int),
-    # Fresh-tail token cap. Upstream's literal default is 0, but 0 is a SENTINEL meaning "no
-    # cap", not a quantity: interpolating from it made the cap 1 token just above 256k, which
-    # collapsed the protected tail from 32 messages to 1. The low anchor is therefore the
-    # window itself — a cap that can never bind, which is exactly what "disabled" means — and it
-    # slides down to 0.15*W_high at 1M.
-    Anchor("fresh_tail_max_tokens", "fresh_tail_max_tokens", 1.0, 0.15,
+    # ── The protected fresh tail: sized in TOKENS, at every window ────────────────────────────
+    # How much of the recent conversation is never compacted and stays verbatim. Upstream sizes
+    # it by message COUNT alone (32) with no token cap, so what it actually protects depends on
+    # how long the messages happen to be — 32 one-line turns protect a few hundred tokens of a
+    # 262,144-token window. The 1M design protects 0.15*W. Copying upstream's 32 at the low
+    # anchor meant a 256k session kept ~4 % of its window verbatim where a 1M session keeps 15 %,
+    # for no reason other than "that is upstream's number".
+    #
+    # The token fraction is therefore the same at both anchors and does the real work; the count
+    # is a generous upper bound so a flood of tiny messages cannot make the tail unboundedly
+    # long in MESSAGE terms. Selection takes the last `count` messages and then trims them to
+    # the token cap, so the count can never ADD a message the cap excluded.
+    Anchor("fresh_tail_count", "fresh_tail_count", 400, 400, cast=int),
+    Anchor("fresh_tail_max_tokens", "fresh_tail_max_tokens", 0.15, 0.15,
            low_is_fraction=True, high_is_fraction=True, cast=int),
-    # Condensation trigger budget: upstream has no token gate (0); at 1M condense only once
-    # the summary pile exceeds 0.20*W.
-    Anchor("condense_budget_tokens", "summary_budget_fraction", 0, 0.20,
-           high_is_fraction=True, cast=int, unset=0.0),
+    # ── When to condense leaves into a parent ────────────────────────────────────────────────
+    # Upstream has no token gate (0), so condensation runs purely on a COUNT rule: every Nth
+    # leaf, whatever those leaves are worth. That was tolerable while a compaction produced one
+    # whole-backlog leaf per call; with real chunking it merges a handful of small leaves almost
+    # immediately, making the rendered frontier coarser long before there is any pressure to
+    # make it coarser. The 1M design waits until the summary pile is worth 0.20*W. Same fraction
+    # at both anchors, so the DAG gains depth at the same relative point whatever the window is.
+    Anchor("condense_budget_tokens", "summary_budget_fraction", 0.20, 0.20,
+           low_is_fraction=True, high_is_fraction=True, cast=int, unset=0.0),
     # Sweep-flag condensation target: upstream falls back to leaf_chunk_tokens (20k).
     Anchor("sweep_target_tokens", "summary_prefix_target_tokens", LEAF_CHUNK, 0.20,
            high_is_fraction=True, cast=int, unset=0),
     Anchor("incremental_max_depth", "incremental_max_depth", 3, 5, cast=int),
-    Anchor("summary_concurrency", "summary_concurrency", 1, 6, cast=int, unset=0),
+    # Summarise the next chunks on workers while the current one is persisted
+    # (leaf_pipeline.LeafLookahead). Upstream is serial because upstream has one chunk; this
+    # fork chunks at every window, so pinning the low anchor to 1 meant 256k did its chunks
+    # strictly one after another for no reason. Concurrency is bounded by the number of pending
+    # chunks anyway, so the same value at both anchors costs nothing when there is only one
+    # chunk to do. Persistence stays sequential and chronological, so the published DAG is
+    # identical whatever this is set to.
+    Anchor("summary_concurrency", "summary_concurrency", 6, 6, cast=int, unset=0),
     # How many condensation groups one compress() may publish. Upstream does ONE pass of its
-    # depth loop per call, which matched its one-leaf-per-call production rate. The fork can
-    # publish up to `leaf_pass_cap` leaves per call at 1M, so keeping the upstream schedule let
-    # leaves accumulate faster than they were merged (audit D #3). 16 groups x fanin 4 = the
-    # 64-leaf cap. At the low anchor this is 1 = upstream exactly.
-    Anchor("condense_group_cap", "condense_group_cap", 1, 16, cast=int, unset=0),
+    # depth loop per call, which matched its one-leaf-per-call production rate. This fork can
+    # publish up to `leaf_pass_cap` leaves per call, so keeping the upstream schedule let leaves
+    # accumulate faster than they were merged (audit D #3). The rule is `leaf_pass_cap / fanin`
+    # — enough groups to absorb one compaction's worth of leaves — which is 16 groups x fanin 4
+    # at the 64-leaf cap, and 4 at the 16-leaf cap. The low anchor was 1 ("upstream exactly"),
+    # which is only correct for a fork that produces one leaf per call, and this one no longer
+    # does at any window.
+    Anchor("condense_group_cap", "condense_group_cap", 4, 16, cast=int, unset=0),
     Anchor("summary_spend_max_calls", "summary_spend_max_calls", 24, 120, cast=int),
     Anchor("summary_circuit_breaker_failure_threshold",
            "summary_circuit_breaker_failure_threshold", 2, 4, cast=int),

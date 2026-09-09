@@ -22,10 +22,12 @@ def engine(tmp_path, monkeypatch):
 
 def test_init_seeds_upstream_values_without_window(engine):
     assert engine.context_length == 0
-    assert engine.effective_fresh_tail_count == 32
+    assert engine.effective_fresh_tail_count == 400  # fork: the TOKEN cap governs the tail
     assert engine.effective_summary_timeout_ms == 60_000
     assert engine.effective_incremental_max_depth == 3
-    assert engine.effective_summary_concurrency == 1
+    # fork: chunking runs at every window, so its scheduling values are not upstream's serial
+    # ones even before a window is known
+    assert engine.effective_summary_concurrency == 6
     assert engine.context_threshold == pytest.approx(0.35)
 
 
@@ -44,14 +46,17 @@ def test_set_context_length_at_1m_resolves_design(engine):
     assert engine.effective_drain_stop_fraction == pytest.approx(0.30)
 
 
-def test_set_context_length_at_256k_is_upstream(engine):
+def test_set_context_length_at_256k_takes_tuning_from_upstream_and_nothing_else(engine):
     engine._set_context_length(W256, source="test")
-    assert engine.effective_fresh_tail_count == 32
-    assert engine.effective_fresh_tail_max_tokens == 0  # cap cannot bind at the low anchor
-    assert engine.effective_condense_budget_tokens == 0
-    assert engine.effective_leaf_chunk_tokens == W256
+    # tuning: upstream's own values, because they are reasonable tradeoffs
     assert engine.context_threshold == pytest.approx(0.35)
     assert engine.threshold_tokens == int(W256 * 0.35)
+    assert engine.effective_summary_timeout_ms == 60_000
+    # quality/loss: decided on merit, the same share of the window as at 1M
+    assert engine.effective_fresh_tail_count == 400
+    assert engine.effective_fresh_tail_max_tokens == round(W256 * 0.15)
+    assert engine.effective_condense_budget_tokens == round(W256 * 0.20)
+    assert engine.effective_leaf_chunk_tokens == round(W256 * 0.04)
 
 
 def test_cleared_context_length_resets_effective_values(engine):
@@ -59,7 +64,7 @@ def test_cleared_context_length_resets_effective_values(engine):
     assert engine.effective_fresh_tail_count == 400
     engine._set_context_length(0, source="test")
     assert engine.context_length == 0
-    assert engine.effective_fresh_tail_count == 32
+    assert engine.effective_fresh_tail_count == 400  # fork: the TOKEN cap governs the tail
     assert engine.effective_condense_budget_tokens == 0
     assert engine.threshold_tokens == 0
 
@@ -77,7 +82,7 @@ def test_configured_threshold_is_never_curved(tmp_path):
     # drain stop has fixed anchors and is clamped to the resolved threshold
     assert e.effective_drain_stop_fraction == pytest.approx(0.30)
     e._set_context_length(W256, source="test")
-    assert e.effective_drain_stop_fraction == pytest.approx(0.35)
+    assert e.effective_drain_stop_fraction == pytest.approx(0.30)  # fork: a real drain target
 
 
 def test_uses_capped_window(engine, monkeypatch):
@@ -87,11 +92,15 @@ def test_uses_capped_window(engine, monkeypatch):
     engine._set_context_length(W1M, source="test", model="x", provider="y")
     assert engine.context_length == W256
     assert engine.effective_context_length_cap == W256
-    assert engine.effective_fresh_tail_count == 32
+    assert engine.effective_fresh_tail_count == 400  # fork: the TOKEN cap governs the tail
 
 
 def test_protect_last_n_is_not_curved(engine):
+    """`protect_last_n` belongs to the BYPASS path (host-side trimming of ignored/stateless
+    sessions), not to the LCM fresh tail, so the curve must not touch it."""
     engine._set_context_length(W1M, source="test")
+    assert engine.protect_last_n == 32
+    engine._set_context_length(W256, source="test")
     assert engine.protect_last_n == 32
 
 

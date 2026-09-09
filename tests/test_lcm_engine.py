@@ -11540,7 +11540,9 @@ class TestEngineCompress:
             token_pairs.append((last_pressure_tokens, count_messages_tokens(candidate_raw)))
             return candidate_raw[:1]
 
-        def fake_summary(chunk, focus_topic=None):
+        # fork: betterlcm — the leaf loop now has a wall clock at EVERY window (it chunks at
+        # every window), so the deadline reaches the summariser here too.
+        def fake_summary(chunk, focus_topic=None, deadline=None):
             return chunk, count_messages_tokens(chunk), "Window summary.\nExpand for details about: current window", 1, 0
 
         monkeypatch.setattr(engine, "_working_leaf_chunk_tokens", record_working_leaf_chunk_tokens)
@@ -12012,7 +12014,11 @@ class TestEngineCompress:
         engine.compress(messages, current_tokens=900)
 
         depth1 = engine._dag.get_session_nodes("test-session", depth=1)
-        assert len(depth1) == 1
+        # fork: betterlcm — this test is about the SUPPRESSION being bypassed, not about how
+        # many groups one call may publish. Upstream condenses one group per call because it
+        # produces one leaf per call; this fork chunks at every window, so `condense_group_cap`
+        # absorbs one compaction's worth of leaves and more than one group may land here.
+        assert len(depth1) >= 1
         assert engine.get_status()["condensation_suppressed_reason"] == ""
 
     def test_cache_friendly_gating_allows_condensation_when_debt_reaches_two_groups(self, tmp_path, monkeypatch):

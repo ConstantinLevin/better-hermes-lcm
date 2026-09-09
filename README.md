@@ -183,6 +183,11 @@ The fork keeps upstream's architecture and changes two things:
 > completeness claims over work that was cut short — is removed at **every** window. A cut that
 > fires at 256k but not at 1M is a defect in this fork, not fidelity to upstream.
 
+> The bold rows are where the fork's 256k column differs from upstream. Upstream is the
+> **floor** — never worse than it — not the target. A value takes upstream's number at 256k only
+> when it is a genuine preference (a cost, latency or headroom tradeoff). Where it decides how
+> much is lost, or how coarse the index is, it is decided on merit at every window.
+
 **1. Every tuning value is a smooth function of the model's context window.**
 `t = clamp((W − 256k) / (1M − 256k), 0, 1)`; each setting is `upstream_value + t × (large_window_value − upstream_value)`.
 At 256k the resolved values *are* upstream's, so a fixture session produces the same DAG
@@ -199,10 +204,10 @@ at 1M** — that is the whole problem. The fork matches it at 256k for everythin
 | setting | upstream (any window) | fork @ 256k | fork @ 1M |
 |---|---|---|---|
 | compaction threshold (`LCM_CONTEXT_THRESHOLD` default) | 0.35 | 0.35 | 0.80 |
-| leaf chunk per summariser call | whole backlog in one pass | whole backlog in one pass | 40k tokens, up to 64 passes per compaction, draining to 30 % of the window |
-| summariser calls in flight | 1 | 1 | 6 (sequential persist, identical DAG) |
-| protected fresh tail | 32 messages | 32 messages | 400 messages / 150k tokens |
-| condensation trigger | every 4th leaf (count rule) | every 4th leaf | once the summary pile exceeds 200k tokens, oldest material first |
+| **leaf chunk per summariser call** | **the whole backlog in one pass — one node standing for everything** | **4 % of the window (~10,500 tokens), up to 16 passes per compaction** | **4 % of the window (40,000 tokens), up to 64 passes, draining to 30 % of the window** |
+| **summariser calls in flight** | **1 (upstream has one chunk)** | **6** | **6** — persistence stays sequential, so the published DAG is identical |
+| **protected fresh tail** | **32 messages, no token cap — what it protects depends on how long the messages are** | **15 % of the window (~39,000 tokens), max 400 messages** | **15 % of the window (150,000 tokens), max 400 messages** |
+| **condensation trigger** | **every 4th leaf, whatever those leaves are worth** | **once the summary pile exceeds 20 % of the window (~52,000 tokens), oldest first** | **once the pile exceeds 20 % of the window (200,000 tokens), oldest first** |
 | DAG depth cap | 3 | 3 | 5 |
 | summariser / expansion timeouts, leaf-loop wall clock | 60 s / 120 s / 120 s | same as upstream | 200 s / 200 s / 200 s |
 | spend guard / breaker | 24 calls, 2 failures | same as upstream | 120 calls, 4 failures |
@@ -216,8 +221,8 @@ at 1M** — that is the whole problem. The fork matches it at 256k for everythin
 | **host envelope fields (`is_error`, `exit_code`, reasoning, provider ids)** | **dropped at ingest** | **stored, rendered or named with a recovery route** | **same** |
 | **bounded / failed / capped work** | **can report `complete: true`** | **`complete: false` with the reason** | **same** |
 
-The bold rows are the ones where the fork's 256k column deliberately differs from upstream. They
-are loss, not tuning, so they are fixed at every window.
+Everything bold is loss or index quality, so it is fixed at every window. Everything unbolded is
+a preference, and there upstream's number is as good as any other.
 
 **2. No unmarked loss, at any window** (pure changes, identical everywhere):
 
@@ -578,10 +583,10 @@ Most installs only need `plugins.enabled` and `context.engine: lcm`.
 | Variable | Default | Use |
 |----------|---------|-----|
 | `LCM_CONTEXT_THRESHOLD` | `0.35` → curve → `0.80` at 1M | Fraction of the context window that triggers LCM compaction. Unset = window-weighted (fork); set = wins over the curve |
-| `LCM_FRESH_TAIL_COUNT` | `32` → `400` at 1M | Recent messages protected from compaction (a cap) |
-| `LCM_FRESH_TAIL_MAX_TOKENS` | `0` → `0.15·W` at 1M | Optional token cap for the protected fresh tail (`0` disables it); always retains the newest message and complete assistant/tool-result groups |
+| `LCM_FRESH_TAIL_COUNT` | `400` at every window | Upper bound on recent messages protected from compaction; the token cap below is what actually sizes the tail |
+| `LCM_FRESH_TAIL_MAX_TOKENS` | `0.15·W` at every window | Token cap for the protected fresh tail — what stays verbatim is the same share of the window at any size; always retains the newest message and complete assistant/tool-result groups |
 | `LCM_INCREMENTAL_MAX_DEPTH` | `3` → `5` at 1M | Max DAG condensation depth (`-1` = unlimited, `0` = leaf only); enables hierarchical summarization |
-| `LCM_LEAF_CHUNK_TOKENS` | `20000` | Raw-backlog floor before leaf compaction; with dynamic chunking enabled, the base chunk target. The fork's curved chunk size (`LCM_LEAF_CHUNK_FRACTION`, whole backlog at 256k → 4 % of the window at 1M) applies on top |
+| `LCM_LEAF_CHUNK_TOKENS` | `20000` | Raw-backlog floor before leaf compaction (lowered to one chunk when the chunk is smaller); with dynamic chunking enabled, the base chunk target. The chunk size itself is `LCM_LEAF_CHUNK_FRACTION` — 4 % of the window at every anchor |
 | `LCM_DYNAMIC_LEAF_CHUNK_ENABLED` | `false` | Upstream's doubling chunk policy; enabling it keeps upstream's serial behaviour instead of the fork's curved chunking |
 | `LCM_DYNAMIC_LEAF_CHUNK_MAX` | `40000` | Upper bound for dynamic leaf chunk targets |
 | `LCM_THRESHOLD_FULL_SWEEP_ENABLED` | `false` | At threshold, opt into one synchronous bounded sweep that drains chunked raw history before publishing one new active context (upstream's serial path; the fork's curved drain/pass cap/concurrency apply to the default path) |

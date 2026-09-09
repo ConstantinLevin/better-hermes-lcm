@@ -101,7 +101,7 @@ index quality. At 256k with default config the DAG must be identical to upstream
 |---|---|---|---|
 | `context_threshold` default | 0.35 | 0.80 | `lcm.context_threshold` / `compression.threshold` / env still win |
 | non-sweep drain stop (fraction of W, wire units) | = threshold (stop once under) | 0.30 | only the `estimated < threshold` comparison in the non-sweep loop changes; sweep flag untouched |
-| leaf chunk size (fraction of W) | 1.0 (= whole backlog in one node) | 0.04 (=40k) | explicit `dynamic_leaf_chunk_enabled=true` keeps upstream 20k->40k doubling as an override |
+| leaf chunk size (fraction of W) | **0.04** | **0.04** | NOT window-scaled: chunk size is the granularity of the index, not a preference. The original design had 1.0 here ("the whole backlog in one node, as upstream"), which made a 256k session produce one summary of everything — a one-shot compaction, the thing LCM replaces. Explicit `dynamic_leaf_chunk_enabled=true` still keeps upstream's 20k->40k doubling as an override |
 | leaf pass cap per `compress()` | 1 | 64 | |
 | leaf-loop time budget (s) | 120 (sweep only today; non-sweep unbounded) | 200 | applies to both paths |
 | `summary_timeout_ms` | 60000 (`config.py:600`) | 200000 | this box overrides 120000 via env |
@@ -126,9 +126,10 @@ preflight gate (`turn_context.py:288-298` skips the anchored estimate when
 `len(messages) <= protect_first_n + protect_last_n + 1`) and feeds host-native compression of
 bypassed sessions (`bypass.py:159,205,402`); curving it would widen the host's blind spot.
 
-Worked values at 512k (t=0.34): threshold 0.50, drain stop 0.43, chunk 0.67*W (still whole
-backlog), passes 22, tail 157 msgs / 61k, condense when `count>=4 and frontier>21k`,
-depth 4, concurrency 3, guard 57, breaker 3, L2 0.60, serialize cap 2,048,000 chars (never binds).
+Worked values at 512k (t=0.34): threshold 0.50, drain stop 0.30 (153,600), chunk 20,480
+(4 % of W), passes 32, tail 400 msgs / 76,800 tokens, condense once the summary pile passes
+102,400, groups per call 8, depth 4, concurrency 6, guard 57, breaker 3, L2 0.60, serialize cap
+2,048,000 chars (never binds).
 
 ## Pure optimizations (every window)
 

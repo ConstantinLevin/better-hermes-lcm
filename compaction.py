@@ -457,17 +457,6 @@ class CompactionMixin:
             self._leaf_lookahead = None
             lookahead.close()
 
-    def _fork_leaf_scheduling_active(self) -> bool:
-        """fork: betterlcm — True once the curve has actually left the low anchor.
-
-        At or below ``scale_low_window`` every resolved value is upstream's, so the fork must
-        also behave like upstream: one whole-backlog pass, no wall clock of its own. The fork's
-        chunking, pass cap and clock only apply above it.
-        """
-        window = int(getattr(self, "context_length", 0) or 0)
-        low = int(getattr(self._config, "scale_low_window", 0) or 262_144)
-        return window > low
-
     def _non_sweep_drain_stop_tokens(self) -> int:
         """fork: betterlcm — where the non-sweep loop stops draining (wire units).
 
@@ -672,12 +661,11 @@ class CompactionMixin:
         leaf_loop_max_seconds = float(self.effective_leaf_loop_max_seconds or _THRESHOLD_FULL_SWEEP_MAX_SECONDS)
         sweep_max_passes = max(1, int(getattr(self._config, "sweep_max_passes", 0) or _THRESHOLD_FULL_SWEEP_MAX_PASSES))
         sweep_deadline = time.monotonic() + leaf_loop_max_seconds
-        # fork: betterlcm — the wall clock belongs to the FORK's multi-pass scheduling. The
-        # sweep keeps its own (upstream had one there); upstream's ordinary and dynamic-chunk
-        # paths had none, so imposing one on them changed behaviour at the low anchor where the
-        # contract says the fork must be upstream (audit D #4).
-        leaf_deadline = sweep_deadline if (threshold_full_sweep_active
-                                           or self._fork_leaf_scheduling_active()) else None
+        # fork: betterlcm — the multi-pass leaf loop runs at EVERY window, so it needs its wall
+        # clock at every window. This used to be armed only above the low anchor, back when the
+        # fork deliberately behaved like upstream there (one whole-backlog pass, no clock).
+        # Chunking is now on everywhere, so an unbounded loop would be a real hazard at 256k too.
+        leaf_deadline = sweep_deadline
         # fork: curved. Explicit summary_prefix_target_tokens wins; otherwise the curve, whose low
         # anchor is leaf_chunk_tokens exactly like upstream's fallback.
         sweep_target_tokens = max(1, int(self.effective_sweep_target_tokens))
@@ -914,25 +902,57 @@ class CompactionMixin:
                         candidate_raw, working_leaf_chunk_tokens
                     )
             else:
-                if raw_tokens_outside_tail < self._config.leaf_chunk_tokens and not force_overflow:
+                # fork: betterlcm — the floor is ONE CHUNK, not upstream's fixed 20,000 tokens.
+                # `leaf_chunk_tokens` in config is upstream's "do not bother compacting a
+                # backlog smaller than this"; it is an absolute token count in a design where
+                # the chunk itself slides with the window, so it disagreed with the chunk in
+                # both directions — larger than a whole chunk at 256k (wait for two chunks
+                # before taking one) and half a chunk at 1M (publish a half-sized leaf). The
+                # honest floor is "there is at least one chunk's worth to take", which is
+                # scale-free and makes every leaf except the last a full chunk.
+                # `min`, not a replacement: an operator who lowers `leaf_chunk_tokens` is asking
+                # for compaction to start earlier and must keep that control. The chunk only
+                # LOWERS the floor, so a full chunk is never refused for being under it.
+                configured_floor = int(self._config.leaf_chunk_tokens or 0)
+                effective_chunk = int(self.effective_leaf_chunk_tokens or 0)
+                compaction_floor = (
+                    min(configured_floor, effective_chunk)
+                    if configured_floor and effective_chunk
+                    else (configured_floor or effective_chunk)
+                )
+                if raw_tokens_outside_tail < compaction_floor and not force_overflow:
                     if not (deferred_maintenance_active and critical_budget_pressure):
                         noop_reason = (
-                            "raw backlog outside fresh tail is below leaf chunk threshold"
+                            "raw backlog outside fresh tail is below one leaf chunk"
                         )
                         break
-                # fork: betterlcm — curved chunk: the whole backlog at 256k (upstream), 0.04*W
-                # at 1M; chunk boundaries never split an assistant/tool group.
-                curved_chunk_tokens = int(self.effective_leaf_chunk_tokens or 0)
+                # fork: betterlcm — CHUNKING IS THE PRODUCT. DO NOT reintroduce a branch that
+                # takes the whole backlog "because that is what upstream does at this window".
+                #
+                # A leaf must cover a bounded span at EVERY window: one summariser call over one
+                # chunk, so the summary can still name what is inside it and `lcm_expand` on that
+                # leaf returns a span the reader wanted. Handing the entire backlog to one call
+                # produces a single summary of everything — a one-shot compaction, which is the
+                # thing this plugin exists to replace, and which no marker can repair because
+                # nothing was cut: the detail was simply never written down.
+                #
+                # This branch used to read `or not self._fork_leaf_scheduling_active()`, which
+                # disabled chunking at and below the low anchor. The chunk size itself was also
+                # `1.0 * W` there. Both are gone: the size is a quality constant
+                # (`window_scaling.LEAF_CHUNK_TOKENS`), identical at both anchors.
+                #
+                # `force_overflow` is the ONE remaining whole-backlog case and it is not an
+                # exception to the above: it is the emergency path where the active context is
+                # already over the hard limit and the turn cannot proceed until the backlog
+                # moves, so a coarse index now beats no turn at all. Chunk boundaries never split
+                # an assistant tool call from its results.
+                chunk_tokens = int(self.effective_leaf_chunk_tokens or 0)
                 if (force_overflow
-                        or curved_chunk_tokens <= 0
-                        or not self._fork_leaf_scheduling_active()   # fork: at the low anchor,
-                        or raw_tokens_outside_tail <= curved_chunk_tokens):
-                    # "the entire eligible backlog" is upstream's BEHAVIOUR, not a size; a
-                    # resumed or imported history larger than the window must still go in one
-                    # pass there, rather than being chunked by a value that merely equals W.
+                        or chunk_tokens <= 0
+                        or raw_tokens_outside_tail <= chunk_tokens):
                     to_compact = candidate_raw
                 else:
-                    to_compact = self._select_oldest_leaf_chunk_aligned(candidate_raw, curved_chunk_tokens)
+                    to_compact = self._select_oldest_leaf_chunk_aligned(candidate_raw, chunk_tokens)
                     # fork: betterlcm — with concurrency > 1, summarise the NEXT chunks on
                     # workers while this one is persisted (leaf_pipeline.LeafLookahead).
                     if (
@@ -942,7 +962,7 @@ class CompactionMixin:
                     ):
                         self._leaf_lookahead = self._start_leaf_lookahead(
                             candidate_raw,
-                            curved_chunk_tokens,
+                            chunk_tokens,
                             dependent_reply_message_ids=dependent_reply_message_ids,
                             focus_topic=focus_topic,
                             deadline=leaf_deadline,
