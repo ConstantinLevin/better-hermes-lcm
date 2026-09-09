@@ -262,3 +262,32 @@ def test_a_padded_data_uri_does_not_eat_the_word_after_it():
     assert extraction._MEDIA_DATA_URI_RE.sub("<M>", text) == "before <M>hello world decision"
     spaced = "before data:image/png;base64," + "A" * 20 + " hello world"
     assert extraction._MEDIA_DATA_URI_RE.sub("<M>", spaced) == "before <M> hello world"
+
+
+def test_an_elision_cannot_swallow_an_earlier_receipt(tmp_path):
+    """round-2 verify-4 #13: sanitisation removes an injected block and leaves its receipt in
+    the middle of the text; the serialisation cap then cut that line out and reported only the
+    characters IT removed, so the earlier removal vanished from the accounting entirely."""
+    from hermes_lcm import marked_loss
+    from hermes_lcm.config import LCMConfig
+    from hermes_lcm.engine import LCMEngine
+
+    receipt = marked_loss.injected_context_marker(14_000)
+    text = "head " * 100 + "\n" + receipt + "\n" + "tail " * 100
+    elided = marked_loss.elide_text(text, 300, original_chars=20_031)
+    assert receipt in elided, elided
+    assert "20031 chars before the removals" in elided
+
+    cfg = LCMConfig(database_path=str(tmp_path / "elide.db"))
+    e = LCMEngine(config=cfg, hermes_home=str(tmp_path))
+    try:
+        e.on_session_start("el", platform="cli", context_length=262_144)
+        e._config.serialize_message_max_chars = 300
+        e._resolve_window_scaled_settings()
+        injected = ("<active_memory>" + ("m" * 14_000) + "</active_memory>")
+        serialized = e._serialize_messages([
+            {"role": "user", "content": "start " * 200 + injected + " end " * 200},
+        ])
+        assert "chars of injected context removed" in serialized, serialized[:400]
+    finally:
+        e.shutdown()

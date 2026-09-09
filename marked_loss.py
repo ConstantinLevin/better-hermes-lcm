@@ -80,18 +80,42 @@ def is_bypass_omission_marker(message: Any) -> bool:
 _WS_RE = re.compile(r"\s+")
 
 
-def elide_text(text: str, cap: int) -> str:
-    """Keep head + tail of ``text`` under ``cap`` chars with a marked, sized elision."""
+def elide_text(text: str, cap: int, *, original_chars: int | None = None) -> str:
+    """Keep head + tail of ``text`` under ``cap`` chars with a marked, sized elision.
+
+    fork: betterlcm — an elision must not swallow an EARLIER receipt. Sanitisation runs first
+    and leaves its own "[LCM: N chars of injected context removed]" line in the middle of the
+    text; the elision then cut that line out and reported only the characters IT removed, so a
+    20,031-character message became a 6,065-character one whose accounting said 5,785
+    (round-2 verify-4 #13). Marker lines from the elided middle are carried through, and
+    ``original_chars`` (the size before sanitisation) is reported when it is known.
+    """
     if cap <= 0 or len(text) <= cap:
         return text
     head = max(1, round(cap * _HEAD_RATIO))
     tail = max(0, round(cap * _TAIL_RATIO))
     removed = len(text) - head - tail
+    kept_head = text[:head]
+    kept_tail = text[-tail:] if tail else ""
+    before_sanitising = ""
+    if original_chars is not None and int(original_chars) > len(text):
+        before_sanitising = (
+            f"; this message held {int(original_chars)} chars before the removals recorded below"
+        )
     marker = (
-        f"\n{TRUNCATED_LITERAL} [LCM elided {removed} of {len(text)} chars before summarising; "
-        "the full message is in the raw store — lcm_expand this node]\n"
+        f"\n{TRUNCATED_LITERAL} [LCM elided {removed} of {len(text)} chars before summarising"
+        f"{before_sanitising}; the full message is in the raw store — lcm_expand this node]\n"
     )
-    return text[:head] + marker + (text[-tail:] if tail else "")
+    carried: List[str] = []
+    for fragment in marker_fragments(text[head:len(text) - tail]):
+        if fragment in carried or fragment in kept_head or fragment in kept_tail:
+            continue
+        carried.append(fragment)
+    if carried:
+        shown = carried[:20]
+        more = f"\n[LCM: +{len(carried) - 20} further receipt(s) in the elided span]" if len(carried) > 20 else ""
+        marker += "\n".join(shown) + more + "\n"
+    return kept_head + marker + kept_tail
 
 
 def elide_args(args: str, cap: int) -> str:
@@ -270,6 +294,23 @@ _MARKER_LINE_PREFIXES = (
 )
 
 
+# A marker is often INLINE, not on a line of its own: sanitisation replaces an injected block
+# in the middle of a sentence. Preserving whole lines alone therefore missed exactly the
+# receipts that mattered (round-2 verify-4 #13).
+_MARKER_FRAGMENT_RE = re.compile(r"\[(?:LCM|Context omitted:)[^\n]*")
+_MARKER_FRAGMENT_MAX_CHARS = 300
+
+
+def marker_fragments(text: str) -> List[str]:
+    """Every marker this module wrote that occurs in ``text``, in order, de-duplicated."""
+    found: List[str] = []
+    for match in _MARKER_FRAGMENT_RE.finditer(str(text or "")):
+        fragment = match.group(0).strip()[:_MARKER_FRAGMENT_MAX_CHARS].rstrip()
+        if fragment and fragment not in found:
+            found.append(fragment)
+    return found
+
+
 def is_marker_line(line: str) -> bool:
     """True for a line this module wrote to record a removal or an unsummarised span."""
     stripped = str(line or "").strip()
@@ -291,6 +332,21 @@ def inherited_receipts(summaries: Iterable[str]) -> List[str]:
             if is_marker_line(stripped) and stripped not in seen:
                 seen.append(stripped)
     return seen
+
+
+MINIMAL_ASSEMBLY_OMISSION_MARKER = "[LCM: content omitted from this prefix — lcm_status]"
+
+
+def minimal_assembly_omission_marker() -> str:
+    """The smallest receipt that still says something is missing.
+
+    fork: betterlcm — when neither the full nor the one-line receipt fits the summary budget,
+    the receipt used to be dropped and recorded only in status: the prefix then omitted content
+    silently, which is precisely the failure the receipt exists to prevent (round-2 verify-4
+    #17). This form is ~12 tokens and is emitted even when it puts the prefix marginally over
+    its budget; the counts and ids stay in ``lcm_status``.
+    """
+    return MINIMAL_ASSEMBLY_OMISSION_MARKER
 
 
 def aggregated_inherited_receipt_marker(receipts: List[str], node_ids: List[int]) -> str:

@@ -4525,6 +4525,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         carries_omission_receipt = (
             marked_loss.COMPACT_ASSEMBLY_OMISSION_PREFIX in content
             or marked_loss.ASSEMBLY_OMISSION_MARKER_HEADER in content
+            or marked_loss.MINIMAL_ASSEMBLY_OMISSION_MARKER in content
         )
         if "[Expand for details:" not in content and not carries_omission_receipt:
             return False
@@ -4556,6 +4557,8 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         # (round-2 verify-4 #2). Assembly always emits the receipt last.
         if (last_line.startswith(marked_loss.COMPACT_ASSEMBLY_OMISSION_PREFIX)
                 and last_line.endswith("]")):
+            return True
+        if last_line == marked_loss.MINIMAL_ASSEMBLY_OMISSION_MARKER:
             return True
         for index, line in enumerate(lines):
             if line.strip() != marked_loss.ASSEMBLY_OMISSION_MARKER_HEADER:
@@ -5445,11 +5448,15 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                         sanitize_pre_compaction_content(content)
                     )
                 else:
+                    raw_chars = len(str(content or ""))
                     content = sanitize_pre_compaction_content(content)
-                    content = marked_loss.elide_text(content, serialize_cap)  # fork: marked
+                    content = marked_loss.elide_text(  # fork: marked
+                        content, serialize_cap, original_chars=raw_chars
+                    )
                 parts.append(f"[TOOL RESULT {tool_id}]: {content}")
                 continue
 
+            raw_chars = len(str(content or ""))
             content = sanitize_pre_compaction_content(content)
 
             if role == "assistant":
@@ -5467,7 +5474,9 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                     if not serialized_tool_calls:
                         continue
                     content = ""
-                content = marked_loss.elide_text(content, serialize_cap)  # fork: marked
+                content = marked_loss.elide_text(  # fork: marked
+                    content, serialize_cap, original_chars=raw_chars
+                )
                 if serialized_tool_calls:
                     tc_parts = []
                     for tc, is_matched in serialized_tool_calls:
@@ -5487,7 +5496,9 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                 parts.append(f"[ASSISTANT]: {content}")
                 continue
 
-            content = marked_loss.elide_text(content, serialize_cap)  # fork: marked
+            content = marked_loss.elide_text(  # fork: marked
+                content, serialize_cap, original_chars=raw_chars
+            )
             parts.append(f"[{role.upper()}]: {content}")
 
         return "\n\n".join(parts)
@@ -6694,17 +6705,35 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                         selected_parts[-1] = compact_marker
                         omission_marker = compact_marker
                     else:
-                        # Rendered content outranks the receipt at this point — an empty prefix
-                        # that only says "something is missing" helps nobody — but the omission
-                        # is recorded where the operator and the agent can still see it.
-                        selected_parts = selected_parts[:-1]
+                        # fork: betterlcm — rendered content outranks the DETAILED receipt (an
+                        # empty prefix that only says "something is missing" helps nobody), but
+                        # something must still say that something is missing: dropping the
+                        # receipt entirely left a prefix that omitted content in silence
+                        # (round-2 verify-4 #17). The minimal form is ~12 tokens and is emitted
+                        # even when it puts the prefix marginally over budget; the counts and
+                        # ids stay in lcm_status.
+                        minimal_marker = marked_loss.minimal_assembly_omission_marker()
                         self._last_assembly_omission_note = omission_marker
-                        logger.warning(
-                            "LCM assembly omission marker did not fit the summary budget; "
-                            "recorded in status instead: %s",
-                            omission_marker,
-                        )
-                        omission_marker = ""
+                        if _fits(selected_parts[:-1] + [minimal_marker]):
+                            selected_parts[-1] = minimal_marker
+                            omission_marker = minimal_marker
+                            logger.warning(
+                                "LCM assembly omission marker did not fit the summary budget; "
+                                "emitting the minimal receipt and keeping the detail in "
+                                "status: %s",
+                                self._last_assembly_omission_note,
+                            )
+                        else:
+                            # A budget this small cannot hold twelve tokens of receipt on top
+                            # of the content the reader needs. The omission stays in status,
+                            # and the caller sees an assembly it must treat as incomplete.
+                            selected_parts = selected_parts[:-1]
+                            omission_marker = ""
+                            logger.warning(
+                                "LCM assembly omission marker did not fit even in its minimal "
+                                "form; recorded in status instead: %s",
+                                self._last_assembly_omission_note,
+                            )
         if summary_parts or omission_marker:
             if selected_parts:
                 combined = "\n\n---\n\n".join(selected_parts)

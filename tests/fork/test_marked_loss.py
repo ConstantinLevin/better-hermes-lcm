@@ -1291,3 +1291,28 @@ def test_raw_row_expansion_renders_the_row_s_tool_calls(tmp_path):
             assert rest["tool_calls"], "the continuation returned no tool calls"
     finally:
         e.shutdown()
+
+
+def test_a_budget_too_small_for_the_receipt_still_says_something_is_missing(tmp_path):
+    """round-2 verify-4 #17: when neither the full nor the one-line receipt fitted, the receipt
+    was dropped and kept only in _last_assembly_omission_note — the prefix then omitted content
+    in silence, which is the one thing the receipt exists to prevent."""
+    from hermes_lcm import marked_loss
+    e = _engine(tmp_path, "tinybudget.db", incremental_max_depth=0)
+    try:
+        e.on_session_start("tb", platform="cli", context_length=200_000)
+        base = time.time()
+        for index in range(3):
+            _add(e, "tb", 0, f"summary {index} " + "s" * 400, base + index)
+        for cap in (40, 60, 120, 240):
+            assembled = e._assemble_context(
+                None, [{"role": "user", "content": "last"}], assembly_cap_override=cap)
+            rendered = "\n".join(str(m.get("content") or "") for m in assembled)
+            says_something = (
+                marked_loss.MINIMAL_ASSEMBLY_OMISSION_MARKER in rendered
+                or marked_loss.COMPACT_ASSEMBLY_OMISSION_PREFIX in rendered
+                or marked_loss.ASSEMBLY_OMISSION_MARKER_HEADER in rendered
+            )
+            assert says_something, (cap, rendered)
+    finally:
+        e.shutdown()
