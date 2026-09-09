@@ -5,6 +5,8 @@ and let the complete output expire: unrecoverable loss on the default setup (aud
 import hashlib
 import os
 
+import sqlite3
+
 import pytest
 
 from hermes_lcm import escalation, ingest_protection
@@ -189,3 +191,82 @@ def test_a_truncated_payload_file_is_not_a_successful_empty_result(tmp_path):
         _json.dumps({"content": "abc", "content_chars": 3}), encoding="utf-8")
     good = load_externalized_payload("good.json", config=cfg, hermes_home=str(home))
     assert good.get("corrupt") is not True and good["content"] == "abc"
+
+
+def test_a_recovery_row_does_not_shift_the_replay_replacements(tmp_path, monkeypatch):
+    """round-3 verify-2 #1: the extra recovered-body row was appended INLINE to a list the
+    caller pairs positionally with its own messages, so every later replacement moved one
+    position — an externalized document's placeholder landed on the live user request."""
+    from hermes_lcm import ingest_protection
+    from hermes_lcm.config import LCMConfig
+    from hermes_lcm.engine import LCMEngine
+
+    home = tmp_path / "hermes-home"
+    directory = _spillover(tmp_path)
+    content = "FULL RECOVERED BODY " + ("body " * 3000)
+    target = directory / "tool_result_call77.txt"
+    target.write_text(content, encoding="utf-8")
+    monkeypatch.setattr(ingest_protection, "maybe_externalize_payload", lambda *a, **k: None)
+
+    cfg = LCMConfig(database_path=str(home / "lcm.db"))
+    engine = LCMEngine(config=cfg, hermes_home=str(home))
+    try:
+        engine.on_session_start("shift", platform="cli", context_length=200_000)
+        messages = [
+            {"role": "assistant", "content": "reading", "tool_calls": [
+                {"id": "call77", "type": "function",
+                 "function": {"name": "read_file", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "call77", "content": _marker(target, content)},
+            {"role": "user", "content": "a document: " + ("d" * 200)},
+            {"role": "user", "content": "LATEST REQUEST: cancel deployment"},
+        ]
+        replay = engine._ingest_messages(messages)
+        assert len(replay) == len(messages)
+        assert "LATEST REQUEST: cancel deployment" in str(replay[-1].get("content") or ""), replay[-1]
+        rows = engine._store.get_session_messages("shift")
+        assert any(str(row.get("content") or "").startswith("[LCM recovered host output")
+                   for row in rows), "the recovered bytes were not archived"
+        assert any("cancel deployment" in str(row.get("content") or "") for row in rows)
+    finally:
+        engine.shutdown()
+
+
+def test_a_failed_attachment_insert_leaves_no_committable_marker(tmp_path, monkeypatch):
+    """round-3 verify-2 #2: the marker row and its attached body were inserted separately with
+    no rollback boundary, so a failed attachment left a committable marker-only transaction and
+    the next unrelated append published the marker without the recovered body."""
+    from hermes_lcm import store as lcm_store_module
+    from hermes_lcm.store import MessageStore
+
+    store = MessageStore(str(tmp_path / "attach.db"))
+    try:
+        def with_attachment(messages, *_args, **_kwargs):
+            protected = [dict(message) for message in messages]
+            attachments = {}
+            for index, message in enumerate(protected):
+                if str(message.get("content") or "").startswith("MARKER"):
+                    attachments[index] = [{
+                        "role": "tool", "tool_call_id": "c1",
+                        "content": "[LCM recovered host output for tool_call_id=c1]\nBODY",
+                    }]
+            return protected, attachments
+
+        monkeypatch.setattr(
+            lcm_store_module, "protect_messages_for_ingest_with_attachments", with_attachment
+        )
+        store._conn.execute(
+            "CREATE TRIGGER refuse_attachment BEFORE INSERT ON messages "
+            "WHEN NEW.content LIKE '[LCM recovered host output%' "
+            "BEGIN SELECT RAISE(FAIL, 'no'); END"
+        )
+        store.commit()
+        with pytest.raises(sqlite3.IntegrityError):
+            store.append("s", {"role": "tool", "tool_call_id": "c1",
+                               "content": "MARKER for the recovered output"}, source="cli")
+        assert store._conn.in_transaction is False
+        store.append("s", {"role": "user", "content": "an unrelated later message"}, source="cli")
+        store.commit()
+        contents = [str(row.get("content") or "") for row in store.get_session_messages("s")]
+        assert contents == ["an unrelated later message"], contents
+    finally:
+        store.close()

@@ -69,6 +69,7 @@ from .ingest_protection import (
     extract_ingest_externalized_refs,
     protect_inline_payloads_in_text,
     protect_messages_for_ingest,
+    protect_messages_for_ingest_with_attachments,
     quarantine_suspicious_assistant_messages,
     recover_hermes_persisted_output_with_file_stat,
     redact_sensitive_text,
@@ -5175,7 +5176,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
             self._clear_foreground_rebind_candidate_if_bound_session_confirmed()
             return self._remember_active_replay_messages(messages, active_replay_messages)
 
-        protected_messages = protect_messages_for_ingest(
+        protected_messages, protection_attachments = protect_messages_for_ingest_with_attachments(
             [msg for _idx, msg in messages_to_store_with_index],
             session_id=self._session_id,
             config=self._config,
@@ -5210,10 +5211,20 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                     )
                 active_replay_messages[absolute_idx] = stubbed_message
 
-        estimates = [count_message_tokens(m) for m in protected_messages]
+        # fork: betterlcm — recovered-body archive rows are STORED after the row they belong
+        # to, but they never enter ``protected_messages``, which is paired positionally with
+        # the active messages: an inline extra row shifted every later replacement onto the
+        # wrong message and a placeholder landed on the live request (round-3 verify-2 #1).
+        rows_to_store = list(protected_messages)
+        if protection_attachments:
+            rows_to_store = []
+            for index, protected_msg in enumerate(protected_messages):
+                rows_to_store.append(protected_msg)
+                rows_to_store.extend(protection_attachments.get(index, []))
+        estimates = [count_message_tokens(m) for m in rows_to_store]
         self._store._append_protected_batch(
             self._session_id,
-            protected_messages,
+            rows_to_store,
             estimates,
             source=self._session_platform,
             conversation_id=self._conversation_id,

@@ -1657,23 +1657,47 @@ def protect_messages_for_ingest(
     hermes_home: str = "",
     session_id: str = "",
 ) -> List[Dict[str, Any]]:
+    """One protected message per input message, in the same positions.
+
+    fork: betterlcm — this list is paired POSITIONALLY with the caller's own messages (the
+    active-replay path does exactly that), so it must never grow. An earlier version appended
+    recovered-body archive rows inline here, which shifted every later replacement onto the
+    wrong message — a placeholder landed on the live request (round-3 verify-2 #1). Use
+    :func:`protect_messages_for_ingest_with_attachments` when the extra archive rows are wanted.
+    """
+    protected, _attachments = protect_messages_for_ingest_with_attachments(
+        messages, config, hermes_home=hermes_home, session_id=session_id
+    )
+    return protected
+
+
+def protect_messages_for_ingest_with_attachments(
+    messages: List[Dict[str, Any]],
+    config,
+    hermes_home: str = "",
+    session_id: str = "",
+) -> "tuple[List[Dict[str, Any]], dict[int, List[Dict[str, Any]]]]":
+    """``(protected, attachments)`` — attachments keyed by the INPUT position they belong to.
+
+    fork: betterlcm — when the durable copy of a recovered host output could not be written,
+    the recovered bytes ride along as an extra archive row. The marker row keeps its replay
+    identity (so reconciliation and leaf publication still work) and the complete output is
+    still in the store when the host deletes its expiring file (verify-4 #18). The extra rows
+    are returned SEPARATELY so a positional caller is unaffected (round-3 verify-2 #1).
+    """
     protected: List[Dict[str, Any]] = []
-    for message in messages:
+    attachments: dict[int, List[Dict[str, Any]]] = {}
+    for index, message in enumerate(messages):
         result = protect_message_for_ingest(
             message,
             config=config,
             hermes_home=hermes_home,
             session_id=session_id,
         )
-        # fork: betterlcm — when the durable copy could not be written, the recovered bytes
-        # ride along as an EXTRA archive row. The marker row keeps its replay identity (so
-        # reconciliation and leaf publication still work) and the complete output is still in
-        # the store when the host deletes its expiring file (verify-4 #18, corrected after the
-        # round-2 regression report).
         body = result.pop(_RECOVERED_BODY_KEY, None)
         protected.append(result)
         if body:
-            protected.append({
+            attachments.setdefault(index, []).append({
                 "role": "tool",
                 "tool_call_id": str(result.get("tool_call_id") or ""),
                 "content": (
@@ -1682,7 +1706,7 @@ def protect_messages_for_ingest(
                     + body
                 ),
             })
-    return protected
+    return protected, attachments
 
 
 def _append_unique_refs(target: list[str], refs: list[str]) -> None:

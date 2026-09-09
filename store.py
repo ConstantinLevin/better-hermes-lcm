@@ -30,7 +30,10 @@ from .db_bootstrap import (
     run_versioned_migrations,
 )
 from .config import LCMConfig
-from .ingest_protection import RECOVERED_BODY_PREFIX, protect_messages_for_ingest
+from .ingest_protection import (
+    RECOVERED_BODY_PREFIX,
+    protect_messages_for_ingest_with_attachments,
+)
 from .search_query import (
     build_snippet,
     compute_search_candidate_cap,
@@ -526,14 +529,14 @@ class MessageStore:
         # durable copy could not be written rides along as an extra archive row, and the single
         # -message path used to drop that row's bytes on the floor: the same input lost content
         # through append() that it kept through append_batch() (round-2 verify-4 #1).
-        protected = protect_messages_for_ingest(
+        protected, attachments = protect_messages_for_ingest_with_attachments(
             [msg],
             config=self._ingest_protection_config,
             hermes_home=self._hermes_home,
             session_id=session_id,
         )
         msg = protected[0]
-        attached_rows = protected[1:]
+        attached_rows = attachments.get(0, [])
         ingested_at = time.time()
 
         def _insert(row: Dict[str, Any], estimate: int) -> int:
@@ -567,10 +570,21 @@ class MessageStore:
             return cur.lastrowid
 
         with self._write_lock:
-            store_id = _insert(msg, token_estimate)
-            for attached in attached_rows:
-                _insert(attached, 0)
-            self._conn.commit()
+            # fork: betterlcm — the marker row, its attached archive rows and the commit are ONE
+            # transaction. Splitting the insert introduced a window where a failed attachment
+            # left a committable marker-only transaction, and the next unrelated append
+            # published the marker without the recovered body (round-3 verify-2 #2).
+            try:
+                store_id = _insert(msg, token_estimate)
+                for attached in attached_rows:
+                    _insert(attached, 0)
+                self._conn.commit()
+            except BaseException:
+                try:
+                    self._conn.rollback()
+                except Exception:  # pragma: no cover - a dead connection cannot roll back
+                    logger.warning("LCM could not roll back a failed append", exc_info=True)
+                raise
             return store_id
 
     def append_batch(self, session_id: str,
@@ -579,12 +593,25 @@ class MessageStore:
                      source: str = "",
                      conversation_id: str = "") -> List[int]:
         """Persist multiple messages in one transaction. Returns store_ids."""
-        protected_messages = protect_messages_for_ingest(
+        protected_messages, attachments = protect_messages_for_ingest_with_attachments(
             messages,
             config=self._ingest_protection_config,
             hermes_home=self._hermes_home,
             session_id=session_id,
         )
+        if attachments:
+            # fork: betterlcm — the archive rows follow the row they belong to (round-3 #1)
+            expanded: List[Dict[str, Any]] = []
+            expanded_estimates: List[int] = []
+            estimates = list(token_estimates or [])
+            for index, protected_msg in enumerate(protected_messages):
+                expanded.append(protected_msg)
+                expanded_estimates.append(estimates[index] if index < len(estimates) else 0)
+                for attached in attachments.get(index, []):
+                    expanded.append(attached)
+                    expanded_estimates.append(0)
+            protected_messages = expanded
+            token_estimates = expanded_estimates
         return self._append_protected_batch(
             session_id,
             protected_messages,

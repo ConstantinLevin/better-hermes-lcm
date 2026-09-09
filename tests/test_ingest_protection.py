@@ -117,7 +117,9 @@ def test_engine_ingest_does_not_reprotect_messages_in_store(tmp_path, monkeypatc
     def fail_if_store_protects_again(*_args, **_kwargs):
         raise AssertionError("engine ingest already protected this batch")
 
-    monkeypatch.setattr(lcm_store_module, "protect_messages_for_ingest", fail_if_store_protects_again)
+    # fork: betterlcm — the store protects through the attachment-aware entry point
+    monkeypatch.setattr(lcm_store_module, "protect_messages_for_ingest_with_attachments",
+                        fail_if_store_protects_again)
 
     engine._ingest_messages([{"role": "user", "content": "hello"}])
 
@@ -129,11 +131,13 @@ def test_store_append_batch_still_protects_direct_callers(tmp_path, monkeypatch)
     engine = _engine(tmp_path)
     calls = []
 
-    def mark_protected(messages, **_kwargs):
+    def mark_protected(messages, *_args, **_kwargs):
         calls.append(len(messages))
-        return [dict(message, content="protected by store") for message in messages]
+        # fork: betterlcm — (protected, attachments-by-input-position)
+        return [dict(message, content="protected by store") for message in messages], {}
 
-    monkeypatch.setattr(lcm_store_module, "protect_messages_for_ingest", mark_protected)
+    monkeypatch.setattr(lcm_store_module, "protect_messages_for_ingest_with_attachments",
+                        mark_protected)
 
     ids = engine._store.append_batch("direct-session", [{"role": "user", "content": "raw"}], [1])
 
