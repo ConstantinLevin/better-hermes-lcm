@@ -388,6 +388,9 @@ sync, lossless-claw watch) · **F** outstanding verification (strict superiority
 | B4 | `audit D` medium: 256k structural equivalence still fails on oversized/imported histories and on the dynamic-chunk path; whole sidecar index blocks escape retrieval budgets. |
 | B5 | CI on the `betterlcm` branch; the host-integration lane must fail, not skip, when the host import fails (T2.5). |
 | B6 | Docs/skill/defaults generated from `ENV_FIELD_SPECS` + anchors so they cannot drift from the curve (T2.4). |
+| B7 | **Make `docs/fork-touchpoints.md` executable (catches M2).** Today it is prose: a human has to notice that upstream renamed the function our hook lived in, because the hook's own unit test still passes while the hook is never reached. Turn the table into a manifest (`docs/fork-touchpoints.yaml` or a dict beside it) naming, per entry, the module, the symbol, and a reachability assertion; then one `tests/fork/test_touchpoints.py` that imports each symbol, fails if it is gone, and — for hooks whose whole point is that they RUN — exercises the real call path and fails if the fork behaviour is absent. Every existing entry needs one; this is the single highest-value piece of merge insurance the fork does not have. |
+| B8 | **Anchor-vs-upstream-default check (catches M6).** Every `window_scaling.py` low endpoint claims to *be* upstream's value at 256k, and the README and FORK.md repeat that claim. Nothing enforces it. Add a test that resolves the curve at 262,144 and asserts each non-fraction anchor equals the corresponding upstream `LCMConfig` dataclass default at the pinned `.upstream-base` — so the day upstream moves a default, the fork's central claim fails loudly instead of quietly becoming false. (`tests/fork/test_window_scaling.py::test_at_256k_equals_upstream` hardcodes the numbers today; it should read them from upstream.) |
+| B9 | **Fork-invariant probe set for merges (supports M7/M8).** The e2e anchors prove no-loss end to end but say nothing about the cross-module contracts the fork *reads* rather than owns: the serialised-message shape, the externalized-placeholder string, replay identity in `reconcile`, tool dispatch, the store row projection, and the migration/classifier interaction between the fork's schema additions and upstream's. Collect one probe per contract so a merge can re-verify them in minutes, and run a merge once against a COPY of a real `lcm.db` rather than only fresh test databases. |
 
 ### C. Ported-capability decisions (audit E, still unmade)
 
@@ -406,30 +409,55 @@ dated record, so the next maintainer can see when the fork was last brought leve
 Trigger: any new commit on `stephenschoettler/hermes-lcm` past `.upstream-base`
 (currently `8d1b1e6`).
 
-This is **not** a blind `git merge`. Merge conflicts here are the least of it: upstream can
-change behaviour in a file the fork never touched, and a clean automatic merge can silently
-undo a fork guarantee. The order is analysis first, merge second:
+**Textual conflicts are the easy part and the least of it.** `git` reports a conflict only when
+two edits touch the same lines. This fork's real exposure is everything git merges *cleanly*:
+upstream changing something in a place we already changed, in a different hunk, in a caller, or
+in an assumption. That is the standing hazard of maintaining a substantial fork, and it is
+invisible to both `git` and a green test suite — our suite tests OUR behaviour, so it stays
+green while upstream's new behaviour goes unexercised.
 
-1. `git fetch upstream` and read the diff `.upstream-base..upstream/main` in full — the runtime
-   diff, the surrounding upstream code, and every changed test. Write what changed and why.
-2. For each upstream hunk, classify it against `docs/fork-touchpoints.md`:
-   *(a)* touches a file the fork only hooks → keep ours, re-apply the hook on top of theirs;
-   *(b)* upstream fixed something the fork also fixed → reconcile deliberately, keep whichever
-   is stronger, and say so; *(c)* upstream changed behaviour the fork depends on → decide
-   explicitly, never by merge default; *(d)* new upstream feature → decide whether it is
-   coherent with the no-loss doctrine before taking it, and whether it needs a curve anchor in
-   `window_scaling.py` rather than a fixed 256k-shaped constant.
-3. **Ask of every upstream change: does it (re)introduce loss?** New truncation, a new silent
+**The failure modes, each with the only thing that actually catches it:**
+
+| # | how a clean merge breaks the fork | what catches it |
+|---|---|---|
+| M1 | **Semantic conflict, no textual conflict.** Upstream edits a different hunk of a function the fork also edited. Both edits apply; the *combination* is wrong (an upstream early-return placed before our marker; a reordering that makes our guard run after the thing it guards). | Review per FUNCTION, not per hunk: for every symbol named in `docs/fork-touchpoints.md`, read the merged body end to end and re-derive what it now does. A three-way diff of the hunks is not enough. |
+| M2 | **The hook silently detaches.** Upstream renames, moves, splits or stops calling the function our hook lives in. Our fork code still exists, still passes its unit test, and never runs. | Every fork hook needs a test that fails when the hook stops being **reached** — not one that only checks the helper's output. This is work item **B7** and does not exist yet. |
+| M3 | **Upstream fixes the same bug differently.** Now there are two mechanisms for one problem: two markers on one cut, an elision applied twice, a receipt counted twice, or two competing guards that disagree at the edges. | For every upstream fix, ask "did we already fix this?" before taking it. Keep exactly one mechanism, delete the other, and say in the ledger which survived and why. |
+| M4 | **Upstream reintroduces loss somewhere new.** A brand-new code path that truncates, drops, or claims completeness over bounded work. No test of ours covers code that did not exist yesterday. | The doctrine question asked of every added path, plus a scan of the merged tree for the vocabulary of loss (`[:N]`, `[-N:]`, `...`, `truncat`, `limit=`, `break` in a collection loop, `except: pass`, `complete.*True`) in anything upstream added. |
+| M5 | **Our fix becomes obsolete or actively wrong.** Upstream restructures the thing we worked around; our patch is now dead weight, or worse, fights the new structure. | The touchpoints table has a "keep ours / re-apply / reconcile" column for exactly this. Removing a fork patch is a legitimate merge outcome; record it. |
+| M6 | **Upstream changes a default the curve mirrors.** Every `window_scaling.py` low endpoint claims to BE upstream's value at 256k. If upstream moves a default and the anchor does not, the fork's central claim quietly becomes false. | A test that reads upstream's dataclass defaults at the pinned base and asserts each anchor's low endpoint still equals them. Work item **B8**; does not exist yet. |
+| M7 | **A contract we depend on inverts.** Upstream changes the shape of something our code consumes but does not own — the serialised message format, the externalized-placeholder string, replay identity, the tool-schema dispatch path, a store row's projection. Our code keeps parsing the old shape and silently matches nothing. | Enumerate the cross-module contracts the fork reads rather than owns and re-verify each one by probe after the merge. The reconcile/replay-identity path is the sharpest of these. |
+| M8 | **Schema and migration divergence.** Upstream adds a column, index or migration next to the fork's own (`envelope_extra`, `host_message_id`, `lcm_node_meta`, `betterlcm_node_meta_v1`). Migration order, classifier logic and downgrade behaviour all interact. | Run a merge against a COPY of a real `lcm.db`, not only fresh test databases, and check both directions (fork build reading an upstream DB and back). |
+| M9 | **Test drift in both directions.** Upstream adds tests asserting behaviour we deliberately removed (should fail — good, that is the signal), or edits a test we had re-pointed, and the merge silently restores upstream's assertion. | Every re-pointed or removed upstream test is listed in `docs/fork-touchpoints.md`; after a merge, re-check that list line by line rather than trusting a green run. |
+| M10 | **Divergence debt.** Each merge that says "keep ours" without reconciling widens the gap until the next merge is unreviewable. | Merge early and often. A merge deferred until upstream has moved 500 commits is not a merge, it is a rewrite. |
+
+**Procedure — analysis first, merge second:**
+
+1. `git fetch upstream`; read `.upstream-base..upstream/main` in full — runtime diff, the
+   surrounding upstream code, and every changed test. Write down what changed and why.
+2. Compute the **intersection**: which upstream-changed symbols also appear in
+   `docs/fork-touchpoints.md`. That set is the M1/M3/M5 risk surface and gets read function by
+   function, in the merged tree, after merging — not as hunks.
+3. Classify every upstream hunk: *(a)* file the fork only hooks → keep ours, re-apply the hook
+   on top of theirs; *(b)* upstream fixed something we also fixed → reconcile, keep one
+   mechanism (M3); *(c)* behaviour the fork depends on → decide explicitly, never by merge
+   default (M7); *(d)* new feature → is it coherent with the no-loss doctrine, and does it need
+   a curve anchor rather than a fixed 256k-shaped constant?
+4. **Ask of every upstream change: does it (re)introduce loss?** New truncation, a new silent
    drop, a new completeness claim over bounded work. If yes, take the feature and remove the
-   loss, exactly as the fork already did for the L3 fallback and the 3000-char cut.
-4. `bash scripts/test.sh` green; upstream tests that pin removed behaviour get re-pointed and
-   listed in `docs/fork-touchpoints.md` (never deleted silently).
-5. Both e2e anchors clean against the DEPLOYED plugin
-   (`scripts/e2e_no_loss.py 262144 400` and `... 1000000 3000`).
-6. Redeploy the clone, re-pin the revision, update `.upstream-base`, and record the merge in
-   this ledger as a new pass.
-7. Then run **V1** below: an upstream merge is exactly when strict superiority can silently
-   break.
+   loss, exactly as the fork already did for the L3 fallback and the 3000-char cut (M4).
+5. Walk the whole touchpoints table line by line and confirm each entry is still true of the
+   merged tree: the hook exists, it is still reached, and its reason still applies (M2, M5, M9).
+6. `bash scripts/test.sh` green. Upstream tests that pin removed behaviour get re-pointed and
+   listed in the touchpoints file — never deleted silently.
+7. Both e2e anchors clean against the DEPLOYED plugin
+   (`scripts/e2e_no_loss.py 262144 400` and `... 1000000 3000`). These are the executable form
+   of the fork's invariants: 0 unreachable rows, 0 missing facts, 0 facts never offered to the
+   summariser. A merge that cannot produce those numbers is not finished.
+8. Redeploy the clone, re-pin the revision, update `.upstream-base`, record the merge in this
+   ledger as a new pass — including every "keep ours", every reconciliation and every fork
+   patch deleted as obsolete.
+9. Re-run **V1**: an upstream merge is exactly when strict superiority can silently break.
 
 **R2 — lossless-claw released or moved: evaluate and port what is better.**
 Trigger: any commit or release of lossless-claw newer than the one already analysed —

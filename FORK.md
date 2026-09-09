@@ -55,11 +55,18 @@ retrieval tools → operator, backup and maintenance.
 
 ## How to upgrade from upstream (for the next maintainer)
 
-> **Analyse first, merge second.** A clean automatic merge can silently undo a fork guarantee:
-> upstream can change behaviour in a file the fork never touched, and `git` has no opinion about
-> whether a hunk reintroduces truncation. Read the whole diff, classify every hunk against
-> `docs/fork-touchpoints.md`, and ask of each one *does this (re)introduce loss?* before taking
-> it. The full procedure is standing task **R1** in [`docs/TASKS.md`](docs/TASKS.md).
+> **Analyse first, merge second — and expect the damage to be where git reports nothing.**
+> A textual conflict is the easy case: git stops and asks. The hazard of a substantial fork is
+> everything that merges *cleanly* while upstream changed something in a place we had already
+> changed — a different hunk of a function we also edited, a caller, a renamed host function our
+> hook no longer attaches to, an upstream fix that duplicates ours, a default the curve claims
+> to mirror. None of that conflicts, and none of it turns the suite red: our tests exercise OUR
+> behaviour, so they pass while upstream's new behaviour goes unexercised. Read the whole diff,
+> compute which upstream-changed symbols appear in `docs/fork-touchpoints.md` and re-read those
+> functions **in the merged tree, whole**, walk the touchpoints table line by line, and ask of
+> every change *does this (re)introduce loss?* The ten failure modes and the full procedure are
+> standing task **R1** in [`docs/TASKS.md`](docs/TASKS.md); merge early and often, because a
+> merge deferred until upstream has moved hundreds of commits is a rewrite, not a merge.
 
 ```
 git fetch upstream

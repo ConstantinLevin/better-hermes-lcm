@@ -3,6 +3,16 @@
 Format: `file` — what the hook does — why — how to re-apply on a conflict.
 (Maintained by hand; every fork commit that touches an upstream file updates this list.)
 
+> **This file is the merge risk surface.** On an upstream merge, the set of upstream-changed
+> symbols that also appear below is what can break *without a textual conflict* — a hook whose
+> host function upstream renamed and no longer calls, an upstream fix that duplicates one of
+> ours, a fork patch upstream's restructuring made obsolete. After merging, walk this table line
+> by line against the merged tree: does the hook still exist, is it still **reached**, and does
+> its reason still apply? A green suite does not answer that — our tests exercise our behaviour,
+> so they stay green while a detached hook quietly stops running. The failure modes and the full
+> procedure are R1/M1–M10 in [`docs/TASKS.md`](TASKS.md); making this table executable so a
+> detached hook fails a test is open work item **B7**.
+
 | file | hook | why | on conflict |
 |---|---|---|---|
 | `config.py` | 14 new dataclass fields (block before `from_env`) + 14 `_EnvFieldSpec` entries (tail of `ENV_FIELD_SPECS`) | window-weighted tuning overrides; defaults are "unset" sentinels so upstream behaviour is unchanged | pure additions at the tails — keep ours; if upstream added fields in the same spot, keep both |
