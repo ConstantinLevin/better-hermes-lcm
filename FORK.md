@@ -1,7 +1,7 @@
-# betterlcm — fork of stephenschoettler/hermes-lcm
+# better-hermeslcm — fork of stephenschoettler/hermes-lcm
 
 Base: upstream commit recorded in `.upstream-base` (`git log -1 $(cat .upstream-base)`).
-Branch `betterlcm` carries every fork change; remote `upstream` tracks the original.
+Branch `better-hermeslcm` carries every fork change; remote `upstream` tracks the original.
 
 ## Why this fork exists
 Make a 1,000,000-token context window work well under a strict no-loss rule, without
@@ -71,13 +71,13 @@ retrieval tools → operator, backup and maintenance.
 ```
 git fetch upstream
 git diff $(cat .upstream-base)..upstream/main   # READ THIS, all of it, before merging
-git merge upstream/main          # or rebase betterlcm onto upstream/main
+git merge upstream/main          # or rebase better-hermeslcm onto upstream/main
 scripts/test.sh                  # must be green
 ```
 Then redeploy: `~/.hermes/plugins/hermes-lcm` is a clone of this repo (remote `fork`), pinned in
 `~/.hermes/plugins/.install-metadata.json` so `hermes plugins update` refuses to touch it.
 ```
-git -C ~/.hermes/plugins/hermes-lcm pull fork betterlcm
+git -C ~/.hermes/plugins/hermes-lcm pull fork better-hermeslcm
 python3 - <<'PY'   # re-pin the deployed revision
 import json, subprocess, pathlib
 p = pathlib.Path.home()/".hermes/plugins/.install-metadata.json"; d = json.loads(p.read_text())

@@ -1,4 +1,4 @@
-# betterlcm — open tasks (proposed; nothing here is started without a go)
+# better-hermeslcm — task ledger and open work
 
 Status legend: `proposed` · `agreed` · `in progress` · `done (commit)` · `rejected (why)`.
 Each task carries an acceptance criterion; a task is not done until that holds and the full
@@ -386,7 +386,7 @@ sync, lossless-claw watch) · **F** outstanding verification (strict superiority
 | B2 | `p06`: Hermes' current spillover directory is not recognised; the always-on ingest guard can canonicalise surrounding JSON. |
 | B3 | `p11`: the suite tests rows far more thoroughly than usable provenance — it does not establish that a stored summary is complete or functions as an index. (A1/A2 subsume most of this.) |
 | B4 | `audit D` medium: 256k structural equivalence still fails on oversized/imported histories and on the dynamic-chunk path; whole sidecar index blocks escape retrieval budgets. |
-| B5 | CI on the `betterlcm` branch; the host-integration lane must fail, not skip, when the host import fails (T2.5). |
+| B5 | CI on the `better-hermeslcm` branch; the host-integration lane must fail, not skip, when the host import fails (T2.5). |
 | B6 | Docs/skill/defaults generated from `ENV_FIELD_SPECS` + anchors so they cannot drift from the curve (T2.4). |
 | B7 | **Make `docs/fork-touchpoints.md` executable (catches M2).** Today it is prose: a human has to notice that upstream renamed the function our hook lived in, because the hook's own unit test still passes while the hook is never reached. Turn the table into a manifest (`docs/fork-touchpoints.yaml` or a dict beside it) naming, per entry, the module, the symbol, and a reachability assertion; then one `tests/fork/test_touchpoints.py` that imports each symbol, fails if it is gone, and — for hooks whose whole point is that they RUN — exercises the real call path and fails if the fork behaviour is absent. Every existing entry needs one; this is the single highest-value piece of merge insurance the fork does not have. |
 | B8 | **Anchor-vs-upstream-default check (catches M6).** Every `window_scaling.py` low endpoint claims to *be* upstream's value at 256k, and the README and FORK.md repeat that claim. Nothing enforces it. Add a test that resolves the curve at 262,144 and asserts each non-fraction anchor equals the corresponding upstream `LCMConfig` dataclass default at the pinned `.upstream-base` — so the day upstream moves a default, the fork's central claim fails loudly instead of quietly becoming false. (`tests/fork/test_window_scaling.py::test_at_256k_equals_upstream` hardcodes the numbers today; it should read them from upstream.) |
@@ -576,7 +576,7 @@ partition reports are not yet individually triaged.
 | T2.2 | B11 `describe(node_id)` returns own summary + index block, paged | known node readable without expansion | proposed |
 | T2.3 | B3 sanitiser: keep inline literal tags, strip trailing standalone reasoning | claw's fixtures pass | proposed |
 | T2.4 | A5 + B22 docs/skill/defaults synchronised from `ENV_FIELD_SPECS` + anchors; operator guide's 1M advice replaced | checker passes; no "0.35 at 1M" text | proposed |
-| T2.5 | A6 CI on `betterlcm`; host-integration lane fails (not skips) on host import failure | workflow runs on the fork branch | proposed |
+| T2.5 | A6 CI on `better-hermeslcm`; host-integration lane fails (not skips) on host import failure | workflow runs on the fork branch | proposed |
 | T2.6 | B21 transcript GC: exact-original equality before any rewrite | sanitised-only match ⇒ no rewrite | proposed |
 
 ## Phase 3 — engine/summariser quality

@@ -2,22 +2,36 @@
   <img src="docs/banner.png" alt="HERMES-LCM" width="800">
 </p>
 
-[![CI](https://github.com/stephenschoettler/hermes-lcm/actions/workflows/ci.yml/badge.svg)](https://github.com/stephenschoettler/hermes-lcm/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/stephenschoettler/hermes-lcm)](https://github.com/stephenschoettler/hermes-lcm/releases)
-[![Python 3.11-3.14](https://img.shields.io/badge/Python-3.11--3.14-3776AB?logo=python&logoColor=white)](https://github.com/stephenschoettler/hermes-lcm/actions/workflows/ci.yml)
+[![Python 3.11-3.14](https://img.shields.io/badge/Python-3.11--3.14-3776AB?logo=python&logoColor=white)](pyproject.toml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-**Lossless Context Management plugin for [Hermes Agent](https://github.com/NousResearch/hermes-agent).**
+# better-hermeslcm
 
-> Bounded context, unbounded memory. Nothing is ever lost.
+**A fork of [stephenschoettler/hermes-lcm](https://github.com/stephenschoettler/hermes-lcm)** —
+the Lossless Context Management plugin for
+[Hermes Agent](https://github.com/NousResearch/hermes-agent) — that actually keeps the promise
+in its name, and works at a 1M-token context window.
 
-> **This is `betterlcm`, a maintained fork of
-> [stephenschoettler/hermes-lcm](https://github.com/stephenschoettler/hermes-lcm)** built for
-> one strict rule — *no loss, at any context window* — and for large (1M-token) windows without
-> degrading ~256k behaviour. Everything the fork changes is listed in [What the fork changes](#what-the-fork-changes),
-> the maintenance contract in [`FORK.md`](FORK.md), the design in
-> [`docs/fork-design.md`](docs/fork-design.md) and every touched upstream line in
-> [`docs/fork-touchpoints.md`](docs/fork-touchpoints.md).
+Upstream says *"Bounded context, unbounded memory. Nothing is ever lost."* It is a good design
+and mostly delivers. But it truncates in five places, drops host fields at the door, reports
+bounded work as complete, and is sized in fixed token constants tuned for ~128k–272k windows —
+so at 1M it compacts at a third of the window, into a single summariser call, behind a 32-message
+tail. This fork fixes all of that. **[What upstream does badly](#what-upstream-does-badly)** is
+the honest list; **[What the fork changes](#what-the-fork-changes)** is what was done about it.
+
+Three goals, in priority order:
+
+1. **Opinionated hatred of loss and truncation.** Nothing that reaches the plugin becomes
+   unreachable; anything removed leaves a marker saying what went and how to get it back;
+   bounded, capped, failed or timed-out work is never reported as complete. This overrides
+   convenience, elegance and upstream fidelity.
+2. **Work at large context windows** (up to 1M) without degrading small ones — every tuning
+   value is a smooth weighted interpolation between a 256k and a 1M anchor, never a band switch.
+3. **Take what [lossless-claw](https://github.com/martian-engineering/lossless-claw) does
+   better**, with *strictly superior to upstream* as the bar.
+
+Working on this? Read [`CLAUDE.md`](CLAUDE.md) first, then [`FORK.md`](FORK.md) (maintenance
+contract) and [`docs/TASKS.md`](docs/TASKS.md) → "WHAT IS LEFT TO DO".
 
 `hermes-lcm` replaces one-shot active-context compression with a SQLite-backed,
 DAG-based context engine. It keeps the live prompt bounded, preserves raw
@@ -32,6 +46,7 @@ OpenClaw. For an interactive visualization of the LCM idea, see
 ## Table of contents
 
 - [What it does](#what-it-does)
+- [What upstream does badly](#what-upstream-does-badly)
 - [What the fork changes](#what-the-fork-changes)
 - [LCM vs built-in compression](#lcm-vs-built-in-compression)
 - [Quick start](#quick-start)
@@ -113,10 +128,54 @@ fully-local providers). See the
 why, and [Agent configuration profiles](docs/agent-config-profiles.md) for
 copy-paste setups per agent type.
 
+## What upstream does badly
+
+None of this is a swipe at upstream — it is a good design, and this fork keeps its architecture
+almost entirely. But a fork needs a reason, so here is the honest list.
+
+**1. It is not built for a 1M-token window.** Every size is a fixed token constant chosen for
+~128k–272k. Point it at a 1M model and the constants do not scale with it:
+
+- compaction fires at `0.35 × window` — **350,000 tokens**, leaving two thirds of a 1M window
+  unused while the agent pays summariser latency it did not need to pay;
+- the leaf chunk is the **whole backlog in one summariser call**, so that first compaction is a
+  single request over hundreds of thousands of tokens — slow, expensive, and prone to the
+  output-limit failure below;
+- the protected fresh tail stays at **32 messages** — on a 1M window, a rounding error;
+- condensation triggers on a **count rule** (every 4th leaf) rather than on how much summary
+  actually accumulated, and the DAG depth cap stays at 3;
+- one summariser call in flight, a 60 s timeout and a 24-call spend guard, sized for a backlog
+  an order of magnitude smaller.
+
+**2. "Nothing is ever lost" is not upheld when things go wrong.** Upstream's last-resort path
+when every summariser route fails is **deterministic truncation** — it writes a chopped
+"summary" and moves on. That is precisely the moment the guarantee is supposed to matter.
+
+**3. It truncates before the summariser ever sees the text.** Every message over 3,000 chars is
+cut to head 2,000 + tail 800, and tool-call arguments over 500 chars to 400 — **unmarked**, so
+neither the summariser nor the reader can tell that a command, a stack trace or a decision was
+sliced in half. With externalization disabled or its directory unwritable, oversized tool output
+is cut inline too.
+
+**4. The raw store is a projection, not an archive.** Only the columns the schema knows about
+survive ingest. Everything else the host sent — `reasoning_content`, `is_error`, `exit_code`,
+provider ids, tool metadata — is dropped at the door, so a failed step reads exactly like a
+successful one. An edited message overwrites rather than supersedes.
+
+**5. Bounded work is reported as complete.** A search that hit a work cap, an expansion that
+could not read a source row or a recorded child node, a corrupt externalized payload, a field
+left unread by a page budget — all of these could still come back as `complete: true` or as an
+empty result that reads like "there is nothing here". An index that lies about its own coverage
+is worse than no index.
+
+**6. Removals inside the active context leave no trace.** Internal reasoning (`<think>` blocks,
+reasoning parts) is stripped from every replayed assistant turn with nothing in its place;
+assistant tool calls whose result is not in the same chunk are dropped from the summariser's
+input; whole turns judged "acknowledgement-shaped" disappear by wording alone.
+
 ## What the fork changes
 
-Upstream hermes-lcm sizes everything in absolute tokens tuned for ~128k–272k windows, and
-falls back to silent truncation when the summariser fails. The fork changes two things:
+The fork keeps upstream's architecture and changes two things:
 
 > **The 256k anchor carries upstream's TUNING VALUES, never upstream's loss.** Everything that
 > is a *preference* (thresholds, chunk sizes, timeouts, concurrency) resolves to upstream's own
@@ -133,18 +192,32 @@ slide.
 Anchors live in one table, [`window_scaling.py`](window_scaling.py); explicit env/config values
 always win over the curve; `lcm_status → window_scaling` shows every resolved value and its source.
 
-| setting | at 256k (upstream) | at 1M |
-|---|---|---|
-| compaction threshold (`LCM_CONTEXT_THRESHOLD` default) | 0.35 | 0.80 |
-| leaf chunk per summariser call | whole backlog in one pass | 40k tokens, up to 64 passes per compaction, draining to 30 % of the window |
-| summariser calls in flight | 1 | 6 (sequential persist, identical DAG) |
-| protected fresh tail | 32 messages | 400 messages / 150k tokens |
-| condensation trigger | every 4th leaf (count rule) | only once the summary pile exceeds 200k tokens, oldest material first |
-| DAG depth cap | 3 | 5 |
-| summariser / expansion timeouts, leaf-loop wall clock | 60 s / 120 s / 120 s | 200 s / 200 s / 200 s |
-| spend guard / breaker | 24 calls, 2 failures | 120 calls, 4 failures |
-| pre-summariser per-message cap | whole window (4 chars/token ≈ 1,048,576) — **not** upstream's 3000 | whole window (4,000,000) |
-| `lcm_expand` page, tool response caps, SQLite/token caches | 4k tokens, ×1, 2 MiB / 2048 | 32k tokens, ×4, 64 MiB / 8192 |
+Read the table with the middle column in mind: **upstream's value is the same number at 256k and
+at 1M** — that is the whole problem. The fork matches it at 256k for everything that is a
+*preference*, and differs there for everything that is *loss*.
+
+| setting | upstream (any window) | fork @ 256k | fork @ 1M |
+|---|---|---|---|
+| compaction threshold (`LCM_CONTEXT_THRESHOLD` default) | 0.35 | 0.35 | 0.80 |
+| leaf chunk per summariser call | whole backlog in one pass | whole backlog in one pass | 40k tokens, up to 64 passes per compaction, draining to 30 % of the window |
+| summariser calls in flight | 1 | 1 | 6 (sequential persist, identical DAG) |
+| protected fresh tail | 32 messages | 32 messages | 400 messages / 150k tokens |
+| condensation trigger | every 4th leaf (count rule) | every 4th leaf | once the summary pile exceeds 200k tokens, oldest material first |
+| DAG depth cap | 3 | 3 | 5 |
+| summariser / expansion timeouts, leaf-loop wall clock | 60 s / 120 s / 120 s | same as upstream | 200 s / 200 s / 200 s |
+| spend guard / breaker | 24 calls, 2 failures | same as upstream | 120 calls, 4 failures |
+| `lcm_expand` page, tool response caps, SQLite/token caches | 4k tokens, ×1, 2 MiB / 2048 | same as upstream | 32k tokens, ×4, 64 MiB / 8192 |
+| **pre-summariser per-message cap** | **3000 chars (head 2000 + tail 800), unmarked** | **none — the cap is the whole window** | **none** |
+| **tool-call argument cap** | **500 chars → 400, unmarked** | **none — shares the message cap** | **none** |
+| **inline fallback when externalization is off/unwritable** | **cut to 3000 chars** | **body stays whole** | **body stays whole** |
+| **every summariser route failed** | **deterministic truncation (L3): a chopped summary is published** | **raw context kept, host-visible cooldown armed, turn continues** | **same** |
+| **internal reasoning stripped from a replayed turn** | **removed silently** | **the turn carries its own receipt** | **same** |
+| **tool call with no result in this chunk** | **dropped from summariser input** | **serialised and marked** | **same** |
+| **host envelope fields (`is_error`, `exit_code`, reasoning, provider ids)** | **dropped at ingest** | **stored, rendered or named with a recovery route** | **same** |
+| **bounded / failed / capped work** | **can report `complete: true`** | **`complete: false` with the reason** | **same** |
+
+The bold rows are the ones where the fork's 256k column deliberately differs from upstream. They
+are loss, not tuning, so they are fixed at every window.
 
 **2. No unmarked loss, at any window** (pure changes, identical everywhere):
 
@@ -252,23 +325,26 @@ that the host's resolved environment is free of known vulnerabilities.
 
 ### Install the plugin
 
-Canonical install path: clone the plugin as a general user plugin. For the fork, clone the
-fork repository (branch `betterlcm`) and pin it so `hermes plugins update` cannot replace it
-with upstream:
+Clone the plugin as a general user plugin, then **pin it** so `hermes plugins update` cannot
+replace it with upstream:
 
 ```bash
-git clone -b betterlcm <fork repository> ~/.hermes/plugins/hermes-lcm
+git clone -b better-hermeslcm https://github.com/ConstantinLevin/better-hermeslcm \
+  ~/.hermes/plugins/hermes-lcm
 # pin: ~/.hermes/plugins/.install-metadata.json ->
-#   {"hermes-lcm": {"pinned": true, "revision": "<git rev-parse HEAD>", "source": "<fork repository>"}}
+#   {"hermes-lcm": {"pinned": true, "revision": "<git rev-parse HEAD>",
+#                   "source": "https://github.com/ConstantinLevin/better-hermeslcm"}}
 ```
 
-Upstream's canonical install is the same command against
+The directory must stay named `hermes-lcm` — that is the plugin id Hermes loads. Pinning is not
+optional: without it an update silently swaps this fork for upstream and every guarantee above
+goes with it. Upstream's own install is the same command against
 `https://github.com/stephenschoettler/hermes-lcm`.
 
 For a profile-specific install:
 
 ```bash
-git clone https://github.com/stephenschoettler/hermes-lcm \
+git clone -b better-hermeslcm https://github.com/ConstantinLevin/better-hermeslcm \
   ~/.hermes/profiles/myprofile/plugins/hermes-lcm
 ```
 
@@ -927,7 +1003,7 @@ exposes retrieval tools that can drill back into exact stored sources.
 - [Contributing guide](CONTRIBUTING.md)
 - [Code of conduct](CODE_OF_CONDUCT.md)
 - [Security policy](SECURITY.md)
-- [Releases](https://github.com/stephenschoettler/hermes-lcm/releases)
+- [Upstream releases](https://github.com/stephenschoettler/hermes-lcm/releases) (this fork tracks them; see [`FORK.md`](FORK.md))
 
 ## Development
 
@@ -994,19 +1070,10 @@ priority. New features should be scoped, backwards-compatible, and tested.
 See [CONTRIBUTING.md](CONTRIBUTING.md) for branch, validation, and PR guidance.
 See [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for project conduct expectations
 and [SECURITY.md](SECURITY.md) for vulnerability reporting.
-See the [releases page](https://github.com/stephenschoettler/hermes-lcm/releases)
-for changelogs.
+Upstream's [releases page](https://github.com/stephenschoettler/hermes-lcm/releases) carries
+the base project's changelog; this fork's history is its commit log and the pass ledger in
+[`docs/TASKS.md`](docs/TASKS.md).
 
 ## License
 
 [MIT](LICENSE)
-
-## Star history
-
-<a href="https://www.star-history.com/?repos=stephenschoettler%2Fhermes-lcm&type=timeline&legend=top-left">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=stephenschoettler/hermes-lcm&type=timeline&theme=dark&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=stephenschoettler/hermes-lcm&type=timeline&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=stephenschoettler/hermes-lcm&type=timeline&legend=top-left" />
- </picture>
-</a>

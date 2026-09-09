@@ -1,6 +1,6 @@
-# betterlcm — what this is, and how to work on it
+# better-hermeslcm — what this is, and how to work on it
 
-**This repository is `betterlcm`, a fork of [`stephenschoettler/hermes-lcm`](https://github.com/stephenschoettler/hermes-lcm)** (the LCM context-engine plugin for Hermes Agent — Python, SQLite-backed message store plus a summary DAG). Upstream base commit is in `.upstream-base`. The fork branch is `betterlcm`.
+**This repository is `better-hermeslcm`, a fork of [`stephenschoettler/hermes-lcm`](https://github.com/stephenschoettler/hermes-lcm)** (the LCM context-engine plugin for Hermes Agent — Python, SQLite-backed message store plus a summary DAG). Upstream base commit is in `.upstream-base`. The fork branch is `better-hermeslcm`.
 
 Read this before touching anything. Then read [`FORK.md`](FORK.md) (the maintenance contract) and [`docs/TASKS.md`](docs/TASKS.md) → **"WHAT IS LEFT TO DO"** (the authoritative work list and the standing tasks).
 
@@ -26,6 +26,8 @@ Thresholds, chunk sizes, timeouts, concurrency, budgets: at 256k these resolve t
 ## Architecture: where the fork's code lives
 
 Fork logic goes in **new modules** so upstream merges stay reviewable; upstream files get small, marked `# fork: betterlcm` hooks.
+
+> **Naming:** the project, the repository and the branch are **better-hermeslcm**. Two identifiers deliberately keep the older `betterlcm` spelling and must NOT be renamed: the in-code marker `# fork: betterlcm` (it is the grep token every audit report and every line of `docs/fork-touchpoints.md` cites) and the migration row `betterlcm_node_meta_v1` (it exists in live databases). Grep for `# fork: betterlcm` to find every fork hook.
 
 Fork modules: `window_scaling.py` (the anchor table and curve), `window_scaled_mixin.py` (`effective_*` resolution), `marked_loss.py` (**every marker the fork emits**), `host_cooldown.py`, `leaf_pipeline.py`, `node_meta.py`, `coverage_doctor.py`, `errors.py`.
 
@@ -66,7 +68,7 @@ Both anchors must report **0 unreachable rows, 0 missing facts, 0 facts never of
 ## The working loop
 
 1. Fix a batch → full suite green → commit.
-2. Redeploy: `~/.hermes/plugins/hermes-lcm` is a clone of this repo (remote `fork`); `git fetch fork betterlcm && git reset --hard FETCH_HEAD`.
+2. Redeploy: `~/.hermes/plugins/hermes-lcm` is a clone of this repo (remote `fork`); `git fetch fork better-hermeslcm && git reset --hard FETCH_HEAD`.
 3. Re-pin the deployed revision in `~/.hermes/plugins/.install-metadata.json` (it is pinned so `hermes plugins update` refuses to replace it).
 4. Re-run **both** e2e anchors against the deployed plugin.
 5. Record the pass in `docs/TASKS.md`.
