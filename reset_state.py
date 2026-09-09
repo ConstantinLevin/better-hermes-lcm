@@ -39,6 +39,10 @@ class ResetStateMixin:
 
     def _reset_compaction_progress(self) -> None:
         """Reset process-local compaction markers for a fresh/unproven session."""
+        # fork: betterlcm — every reset retires the publication fence, so a summary that was
+        # already being generated cannot be published into the session that replaced it
+        # (round-2 verify-4 #3 / RS02).
+        self._publication_generation = int(getattr(self, "_publication_generation", 0)) + 1
         self._last_compacted_store_id = 0
         self._ingest_cursor = 0
         self._ingest_cursor_needs_reconcile = False

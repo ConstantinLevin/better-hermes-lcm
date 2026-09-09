@@ -1172,3 +1172,37 @@ def test_recent_counts_the_window_before_the_display_limit(tmp_path, monkeypatch
         assert "frontier" in failed["incomplete_reason"]
     finally:
         e.shutdown()
+
+
+def test_a_user_message_that_quotes_a_receipt_and_adds_a_decision_is_stored(tmp_path):
+    """round-2 verify-4 #2: an omission receipt ANYWHERE in a message beginning with a summary
+    header was enough to classify it as our own scaffolding, so a user who pasted a summary,
+    receipt and all, and then wrote their new decision under it had that message dropped —
+    never stored, never summarised, referenced by no node."""
+    from hermes_lcm import marked_loss
+    e = _engine(tmp_path, "pasted.db", incremental_max_depth=0)
+    try:
+        e.on_session_start("pa", platform="cli", context_length=200_000)
+        compact = marked_loss.compact_assembly_omission_marker(
+            omitted_node_ids=[2, 3], depth_cap_hits=[], omitted_tail_messages=0)
+        full = marked_loss.assembly_omission_marker(
+            omitted_node_ids=[2], depth_cap_hits=[], omitted_tail_messages=1)
+        for receipt in (compact, full):
+            pasted = {
+                "role": "user",
+                "content": "[Recent Summary (d0, node 1)]\nthe summary body\n\n---\n\n"
+                           + receipt + "\n\nMY NEW DECISION: cancel deployment.",
+            }
+            assert e._is_replayed_context_scaffold_message(pasted) is False, receipt
+            # ... and our own prefix, which ends with the receipt, is still recognised
+            ours = {"role": "user", "content":
+                    "[Recent Summary (d0, node 1)]\nthe summary body\n\n---\n\n" + receipt}
+            assert e._is_replayed_context_scaffold_message(ours) is True, receipt
+
+        e._ingest_messages([{"role": "user", "content":
+                             "[Recent Summary (d0, node 1)]\nbody\n\n---\n\n" + compact
+                             + "\n\nMY NEW DECISION: cancel deployment."}])
+        stored = e._store.search("cancel deployment", session_id="pa", limit=5)
+        assert stored, "the user's decision was not stored"
+    finally:
+        e.shutdown()

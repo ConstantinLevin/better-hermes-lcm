@@ -7,7 +7,7 @@ import os
 
 import pytest
 
-from hermes_lcm import ingest_protection
+from hermes_lcm import escalation, ingest_protection
 
 
 def _marker(path, content, preview_chars=120):
@@ -136,9 +136,28 @@ def test_recovered_bytes_are_kept_even_when_the_durable_copy_cannot_be_written(t
         # the marker row keeps its own content, so replay identity still matches the host's
         # message and source mapping (hence leaf publication) still works
         assert any("<persisted-output>" in str(row.get("content") or "") for row in rows)
-        assert any(str(row.get("content") or "").startswith("[LCM recovered host output")
-                   for row in rows)
+        archive_rows = [row for row in rows
+                        if str(row.get("content") or "").startswith("[LCM recovered host output")]
+        assert archive_rows
 
-
+        # round-2 verify-4 #1: the archive row belonged to no summary node, so the bytes were
+        # stored and yet stranded outside the graph, and the leaf covering the marker read as
+        # if expansion were impossible. It is a source of the leaf now, with its own receipt.
+        engine.threshold_tokens = 1
+        engine._config.fresh_tail_count = 1
+        engine._config.leaf_chunk_tokens = 10
+        engine._config.leaf_chunk_fraction = 0.0
+        engine._resolve_window_scaled_settings()
+        monkeypatch.setattr(
+            escalation, "_call_llm_for_summary",
+            lambda *a, **k: "the rollout was reverted\nExpand for details about: rollout")
+        engine.compress(active_messages + [{"role": "user", "content": "and now?"}],
+                        current_tokens=500_000)
+        nodes = engine._dag.get_session_nodes("pf")
+        assert nodes, "no leaf was published"
+        covered = {int(value) for node in nodes for value in node.source_ids}
+        archive_ids = {int(row["store_id"]) for row in archive_rows}
+        assert archive_ids <= covered, (archive_ids, covered)
+        assert any("recovered host-output archive row" in node.summary for node in nodes)
     finally:
         engine.shutdown()

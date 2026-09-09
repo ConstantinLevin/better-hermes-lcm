@@ -962,6 +962,9 @@ class CompactionMixin:
                 break
 
             selected_raw_chunk = to_compact
+            # fork: betterlcm — the identity this leaf is being built FOR, captured before any
+            # summariser work (round-2 verify-4 #3 / RS02)
+            leaf_fence = self._publication_fence()
             summary_input_chunk = [
                 message for message in selected_raw_chunk if id(message) not in dependent_reply_message_ids
             ]
@@ -1114,11 +1117,31 @@ class CompactionMixin:
             # out of the summary TEXT and are named in a marker instead, so the extra sources
             # can never read as content the summariser claimed to cover.
             summarised_source_ids = set(source_store_ids)  # built once, not per source id
-            published_source_ids = sorted(summarised_source_ids | set(consumed_store_ids))
+            # fork: betterlcm — an archive row holding the bytes of a recovered host output
+            # sits next to the marker row it belongs to and is in no active-context message, so
+            # it mapped to no node and the summary covering its marker read as unexpandable
+            # (round-2 verify-4 #1). It is a source of this leaf, named in its own receipt.
+            recovered_body_ids = self._store.attached_recovered_body_ids(
+                self._session_id,
+                [
+                    str(message.get("tool_call_id") or "")
+                    for message in source_lookup_chunk
+                    if str(message.get("role") or "") == "tool"
+                ],
+                exclude_ids=consumed_store_ids,
+            )
+            published_source_ids = sorted(
+                summarised_source_ids | set(consumed_store_ids) | set(recovered_body_ids)
+            )
             excluded_source_ids = [
                 store_id for store_id in published_source_ids
                 if store_id not in summarised_source_ids
+                and store_id not in set(recovered_body_ids)
             ]
+            if recovered_body_ids:
+                summary_text = summary_text.rstrip() + "\n" + marked_loss.recovered_body_rows_marker(
+                    recovered_body_ids
+                )
             if excluded_source_ids:
                 summary_text = summary_text.rstrip() + "\n" + marked_loss.excluded_reply_marker(
                     excluded_source_ids
@@ -1130,8 +1153,18 @@ class CompactionMixin:
             earliest_at, latest_at = self._store.get_time_bounds(published_source_ids)
             summary_tokens = count_tokens(summary_text)
 
+            try:
+                self._check_publication_fence(leaf_fence, what="leaf summary")
+            except SummaryUnavailableError as exc:
+                # the session was rebound while this chunk was being summarised: publishing it
+                # now would attribute the old session's content to the new one and advance a
+                # frontier that belongs to neither. Keep the raw messages instead.
+                self._last_leaf_summary_error = str(exc)
+                logger.warning("LCM discarding a stale leaf summary: %s", exc)
+                break
+
             node = SummaryNode(
-                session_id=self._session_id,
+                session_id=leaf_fence[0],
                 depth=0,
                 summary=summary_text,
                 token_count=summary_tokens,

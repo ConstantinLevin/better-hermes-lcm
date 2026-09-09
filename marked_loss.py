@@ -267,6 +267,24 @@ def aggregated_inherited_receipt_marker(receipts: List[str], node_ids: List[int]
     )
 
 
+def recovered_body_rows_marker(store_ids: List[int]) -> str:
+    """Name the archive rows holding bytes a host truncation marker stands for.
+
+    fork: betterlcm — when the durable copy of a recovered host output cannot be written, the
+    bytes are stored as an extra archive row next to the marker row. Those rows belonged to no
+    node, so the leaf covering the marker left the real content outside the graph and read as
+    if expansion were impossible (round-2 verify-4 #1). They are sources of the leaf now, and
+    this line says where the bytes are.
+    """
+    ids = ", ".join(str(store_id) for store_id in store_ids[:40])
+    more = f" (+{len(store_ids) - 40} more)" if len(store_ids) > 40 else ""
+    return (
+        f"{RECEIPT_LINE_PREFIX} {len(store_ids)} recovered host-output archive row(s) are "
+        f"sources of this node and are NOT summarised above — the complete bytes are in the "
+        f"store: lcm_expand(store_id={ids}{more})]"
+    )
+
+
 def compact_assembly_omission_marker(
     *,
     omitted_node_ids: List[int],

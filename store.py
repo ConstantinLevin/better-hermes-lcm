@@ -30,7 +30,7 @@ from .db_bootstrap import (
     run_versioned_migrations,
 )
 from .config import LCMConfig
-from .ingest_protection import protect_message_for_ingest, protect_messages_for_ingest
+from .ingest_protection import RECOVERED_BODY_PREFIX, protect_messages_for_ingest
 from .search_query import (
     build_snippet,
     compute_search_candidate_cap,
@@ -465,18 +465,23 @@ class MessageStore:
                token_estimate: int = 0, source: str = "",
                conversation_id: str = "") -> int:
         """Persist a message and return its store_id."""
-        msg = protect_message_for_ingest(
-            msg,
+        # fork: betterlcm — protect through the LIST entry point. Recovered host output whose
+        # durable copy could not be written rides along as an extra archive row, and the single
+        # -message path used to drop that row's bytes on the floor: the same input lost content
+        # through append() that it kept through append_batch() (round-2 verify-4 #1).
+        protected = protect_messages_for_ingest(
+            [msg],
             config=self._ingest_protection_config,
             hermes_home=self._hermes_home,
             session_id=session_id,
         )
-        tool_calls = msg.get("tool_calls")
-        tc_json = json.dumps(tool_calls) if tool_calls else None
-        observed_at = _normalize_observed_at(msg.get("timestamp"))
+        msg = protected[0]
+        attached_rows = protected[1:]
         ingested_at = time.time()
 
-        with self._write_lock:
+        def _insert(row: Dict[str, Any], estimate: int) -> int:
+            tool_calls = row.get("tool_calls")
+            observed_at = _normalize_observed_at(row.get("timestamp"))
             cur = self._conn.execute(
                 """INSERT INTO messages
                    (session_id, source, conversation_id, role, content, tool_call_id, tool_calls,
@@ -487,21 +492,27 @@ class MessageStore:
                     session_id,
                     _normalize_source_value(source),
                     _normalize_conversation_id_value(conversation_id),
-                    msg.get("role", "unknown"),
-                    _normalize_content_value(msg.get("content")),
-                    msg.get("tool_call_id"),
-                    tc_json,
-                    msg.get("tool_name"),
+                    row.get("role", "unknown"),
+                    _normalize_content_value(row.get("content")),
+                    row.get("tool_call_id"),
+                    json.dumps(tool_calls) if tool_calls else None,
+                    row.get("tool_name"),
                     ingested_at,
-                    token_estimate,
+                    estimate,
                     0,
                     ingested_at,
                     observed_at,
                     "host_message_timestamp" if observed_at is not None else None,
                 ),
             )
-            self._conn.commit()
             return cur.lastrowid
+
+        with self._write_lock:
+            store_id = _insert(msg, token_estimate)
+            for attached in attached_rows:
+                _insert(attached, 0)
+            self._conn.commit()
+            return store_id
 
     def append_batch(self, session_id: str,
                      messages: List[Dict[str, Any]],
@@ -1327,6 +1338,35 @@ class MessageStore:
         serialized = json.dumps(record, sort_keys=True)
         key = self._compaction_telemetry_key(conversation_id)
         self.write_metadata_json([key], serialized, skip_unchanged=True)
+
+    def attached_recovered_body_ids(self, session_id: str, tool_call_ids: List[str],
+                                    *, exclude_ids: List[int] | None = None) -> List[int]:
+        """fork: betterlcm — archive rows carrying recovered bytes for these tool calls.
+
+        When a host truncation marker's durable copy cannot be written, the recovered bytes are
+        stored as an EXTRA row next to the marker row, tagged with the same ``tool_call_id``.
+        That row belonged to no summary node, so the leaf that covered the marker left the
+        actual bytes outside the graph and its receipt read as if expansion were impossible
+        (round-2 verify-4 #1). The marker row itself frequently maps to nothing (the host owns
+        the file), so the call id — not row adjacency — is what connects them.
+        """
+        wanted = sorted({str(value) for value in tool_call_ids if value})
+        if not wanted:
+            return []
+        excluded = {int(value) for value in (exclude_ids or [])}
+        found: List[int] = []
+        batch = _SQLITE_MAX_BOUND_VARIABLES - 2
+        for start in range(0, len(wanted), batch):
+            chunk = wanted[start:start + batch]
+            placeholders = ",".join("?" * len(chunk))
+            rows = self._conn.execute(
+                f"""SELECT store_id FROM messages
+                    WHERE session_id = ? AND tool_call_id IN ({placeholders})
+                      AND content LIKE ?""",
+                [session_id, *chunk, f"{RECOVERED_BODY_PREFIX}%"],
+            ).fetchall()
+            found.extend(int(row[0]) for row in rows)
+        return sorted(set(found) - excluded)
 
     # -- Search -------------------------------------------------------------
 

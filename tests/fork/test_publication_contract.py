@@ -7,6 +7,7 @@ import time
 import pytest
 
 from hermes_lcm.config import LCMConfig
+from hermes_lcm.errors import SummaryUnavailableError
 from hermes_lcm.dag import SummaryDAG, SummaryNode
 from hermes_lcm.engine import LCMEngine
 
@@ -198,3 +199,40 @@ def test_a_refused_insert_leaves_no_open_transaction(tmp_path):
         assert dag.node_meta.read(good)["level"] == 1
     finally:
         dag.close()
+
+
+def test_a_session_change_during_summarisation_does_not_publish_under_the_new_session(tmp_path):
+    """round-2 verify-4 #3 (RS02): publication read self._session_id AFTER the summariser
+    returned, so changing sessions inside the model call published the OLD session's content as
+    a node in the NEW one — wrong provenance, and a frontier advanced over rows nothing covers."""
+    from hermes_lcm import escalation
+    cfg = LCMConfig(database_path=str(tmp_path / "fence.db"), condensation_fanin=2,
+                    incremental_max_depth=2)
+    e = LCMEngine(config=cfg, hermes_home=str(tmp_path))
+    try:
+        e.on_session_start("s", platform="cli", context_length=200_000)
+        children = [
+            e._dag.add_node_with_meta(SummaryNode(
+                session_id="s", depth=0, summary=f"child {index} decided X",
+                token_count=40, source_token_count=100, source_ids=[index + 1],
+                source_type="messages", created_at=time.time() + index), level=1)
+            for index in range(2)
+        ]
+        nodes = [e._dag.get_node(node_id) for node_id in children]
+
+        def rebind(*args, **kwargs):
+            e.on_session_start("new_session", platform="cli", context_length=200_000)
+            return "merged\nExpand for details about: merged"
+
+        original = escalation._call_llm_for_summary
+        escalation._call_llm_for_summary = rebind
+        try:
+            with pytest.raises(SummaryUnavailableError):
+                e._condense_summary_nodes(nodes)
+        finally:
+            escalation._call_llm_for_summary = original
+
+        assert e._dag.get_session_nodes("new_session") == [], "stale work was published"
+        assert all(node.depth == 0 for node in e._dag.get_session_nodes("s"))
+    finally:
+        e.shutdown()

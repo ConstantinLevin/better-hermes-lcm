@@ -2009,6 +2009,27 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
             return published
         return frontier
 
+    # fork: betterlcm — publication fence (round-2 verify-4 #3 / RS02).
+    #
+    # A summariser call takes seconds; ``on_session_start`` and reset can rebind the engine
+    # while it runs. Publication read ``self._session_id`` AFTER the call returned, so a probe
+    # that changed sessions inside the summariser published the OLD session's content as a node
+    # in the NEW session — wrong provenance, and the old session's frontier advanced over rows
+    # nothing covers. The fence is captured before the work starts and validated before the
+    # node is written; stale work is discarded (the raw messages stay in context) instead of
+    # being published under an identity it does not belong to.
+    def _publication_fence(self) -> tuple[str, int]:
+        return (str(self._session_id or ""), int(getattr(self, "_publication_generation", 0)))
+
+    def _check_publication_fence(self, fence: tuple[str, int], *, what: str) -> None:
+        current = self._publication_fence()
+        if fence != current:
+            raise SummaryUnavailableError(
+                f"the session changed while this {what} was being generated "
+                f"({fence[0]}#{fence[1]} -> {current[0]}#{current[1]}); the work is discarded "
+                "rather than published under the new session"
+            )
+
     def _persist_frontier_marker(self) -> None:
         if not self._session_id or not self._conversation_id:
             return
@@ -4506,15 +4527,27 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         ):
             return False
         trailing = content.rstrip()
-        if carries_omission_receipt:
-            return True
+        lines = trailing.split("\n")
         # The trailer is the whole last line. Matching it with `[^\]]*` broke on an expand hint
         # that contains a bracket of its own ("Expand for details about: items[0]"), and the
         # prefix was then re-ingested and stored as raw conversation.
-        last_line = trailing.rsplit("\n", 1)[-1].strip()
+        last_line = lines[-1].strip()
         if last_line.startswith("[Expand for details:") and last_line.endswith("]"):
             return True
-        return marked_loss.ASSEMBLY_OMISSION_MARKER_HEADER in trailing
+        # fork: betterlcm — the receipt must END the message. Accepting it ANYWHERE meant a user
+        # message that pasted a summary header and receipt and then added "MY NEW DECISION:
+        # cancel deployment" was classified as our own scaffolding and never stored
+        # (round-2 verify-4 #2). Assembly always emits the receipt last.
+        if (last_line.startswith(marked_loss.COMPACT_ASSEMBLY_OMISSION_PREFIX)
+                and last_line.endswith("]")):
+            return True
+        for index, line in enumerate(lines):
+            if line.strip() != marked_loss.ASSEMBLY_OMISSION_MARKER_HEADER:
+                continue
+            # the full marker is its header followed only by its own "- " bullet lines
+            rest = [item.strip() for item in lines[index + 1:] if item.strip()]
+            return all(item.startswith("- ") for item in rest)
+        return False
 
     def _restore_ingest_payload_placeholders_in_value(self, value: Any, *, session_id: str) -> Any:
         if isinstance(value, dict):
@@ -5979,6 +6012,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         if any(node.depth != depth for node in nodes):
             raise ValueError("condensation requires same-depth summary nodes")
         combined_text = "\n\n---\n\n".join(node.summary for node in nodes)
+        fence = self._publication_fence()  # fork: betterlcm — see _check_publication_fence
         source_tokens = sum(node.token_count for node in nodes)
         token_budget = max(  # fork: betterlcm — upstream's literals (1000 / 0.40) from config
             int(self._config.condensation_min_tokens),
@@ -6017,6 +6051,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
             },
             deadline=deadline,  # fork: one end time for L1+L2+fallbacks (p05 CP05)
         )
+        self._check_publication_fence(fence, what="condensation")
         earliest_at, latest_at = self._dag.get_source_time_window(
             [node.node_id for node in nodes]
         )
@@ -6041,7 +6076,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                 )
         summary_tokens = count_tokens(summary_text)
         condensed_node = SummaryNode(
-            session_id=self._session_id,
+            session_id=fence[0],  # fork: the session this work was started for
             depth=depth + 1,
             summary=summary_text,
             token_count=summary_tokens,
