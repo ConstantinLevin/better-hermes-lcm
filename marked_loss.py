@@ -298,14 +298,19 @@ _MARKER_LINE_PREFIXES = (
 # in the middle of a sentence. Preserving whole lines alone therefore missed exactly the
 # receipts that mattered (round-2 verify-4 #13).
 _MARKER_FRAGMENT_RE = re.compile(r"\[(?:LCM|Context omitted:)[^\n]*")
-_MARKER_FRAGMENT_MAX_CHARS = 300
 
 
 def marker_fragments(text: str) -> List[str]:
-    """Every marker this module wrote that occurs in ``text``, in order, de-duplicated."""
+    """Every marker this module wrote that occurs in ``text``, in order, de-duplicated.
+
+    fork: betterlcm — the fragment is NOT shortened. A 300-character cut removed the recovery
+    clause from an 800-character receipt, so the surviving text said something was missing
+    without saying how to get it (round-3 verify-4 #10). A receipt that is worth carrying is
+    worth carrying whole.
+    """
     found: List[str] = []
     for match in _MARKER_FRAGMENT_RE.finditer(str(text or "")):
-        fragment = match.group(0).strip()[:_MARKER_FRAGMENT_MAX_CHARS].rstrip()
+        fragment = match.group(0).strip()
         if fragment and fragment not in found:
             found.append(fragment)
     return found
@@ -329,8 +334,17 @@ def inherited_receipts(summaries: Iterable[str]) -> List[str]:
     for summary in summaries:
         for line in str(summary or "").splitlines():
             stripped = line.strip()
-            if is_marker_line(stripped) and stripped not in seen:
-                seen.append(stripped)
+            if is_marker_line(stripped):
+                if stripped not in seen:
+                    seen.append(stripped)
+                continue
+            # fork: betterlcm — a receipt can sit AFTER visible text on the same line (a
+            # sanitiser replaces an injected block mid-sentence). Whole-line matching ignored
+            # those, so the loss they record ended at the condensation boundary after all
+            # (round-3 verify-4 #10).
+            for fragment in marker_fragments(stripped):
+                if fragment not in seen:
+                    seen.append(fragment)
     return seen
 
 
@@ -347,6 +361,25 @@ def minimal_assembly_omission_marker() -> str:
     its budget; the counts and ids stay in ``lcm_status``.
     """
     return MINIMAL_ASSEMBLY_OMISSION_MARKER
+
+
+LEADING_TURNS_DROPPED_PREFIX = "[LCM: leading turn(s) not replayable at the start of a request"
+
+
+def leading_turns_dropped_marker(dropped: int, roles: List[str]) -> str:
+    """Name assistant/tool turns dropped because a request cannot START with them.
+
+    fork: betterlcm — a conversation replayed to a provider may not open with an assistant or
+    tool message, so the leading ones were dropped silently; an assistant turn holding a
+    decision simply vanished from the agent's own view of its history (round-3 verify-4 #7).
+    The rows are untouched in the store.
+    """
+    role_text = ", ".join(roles[:8]) or "?"
+    return (
+        f"{LEADING_TURNS_DROPPED_PREFIX}: {dropped} turn(s) ({role_text}) were removed from "
+        "the start of this replay because a provider request cannot begin with them; the "
+        "stored rows are unchanged — lcm_recent / lcm_expand]"
+    )
 
 
 def aggregated_inherited_receipt_marker(receipts: List[str], node_ids: List[int]) -> str:

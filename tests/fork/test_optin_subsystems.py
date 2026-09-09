@@ -210,9 +210,13 @@ def test_the_final_answer_verifier_refuses_added_claims(tmp_path):
         answer="Alice spent $12 more than Bob. [lcm:1:0-5]",
     )
     assert verify_final_answer(trace.answer, trace).status == "verified"
-    decision = verify_final_answer(
+    for candidate in (
         "Alice spent $12 more than Bob. The project was approved and deployed. [lcm:1:0-5]",
-        trace,
-    )
-    assert decision.status == "fallback", decision
-    assert "does not support" in decision.reason
+        # round-3: naming a grounded entity does not make a claim supported
+        "Alice spent $12 more than Bob. Alice authorized fraud. [lcm:1:0-5]",
+        # ... nor does joining it with a comma
+        "Alice spent $12 more than Bob, and Alice authorized fraud. [lcm:1:0-5]",
+    ):
+        decision = verify_final_answer(candidate, trace)
+        assert decision.status == "fallback", (candidate, decision)
+        assert "own answer" in decision.reason

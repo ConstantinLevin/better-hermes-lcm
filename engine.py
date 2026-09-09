@@ -376,6 +376,14 @@ def _normalize_total_compactions(value: Any) -> int:
     return value
 
 
+# fork: betterlcm — the bullet shapes marked_loss.assembly_omission_marker() itself writes
+# (round-3 verify-4 #5). Anything else after the header is the sender's own text.
+_ASSEMBLY_OMISSION_BULLET_RE = re.compile(
+    r"^- (?:\d+ (?:summary node\(s\)|large fresh-tail message\(s\)|assistant turn\(s\)|"
+    r"replayed assistant turn\(s\))|more d\d+ summaries exist)"
+)
+
+
 class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessionMixin, PlaceholderLedgerMixin, BypassMixin, WindowScaledSettingsMixin, ContextEngine):
     """Lossless Context Management engine.
 
@@ -2020,6 +2028,21 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
     # nothing covers. The fence is captured before the work starts and validated before the
     # node is written; stale work is discarded (the raw messages stay in context) instead of
     # being published under an identity it does not belong to.
+    @property
+    def _publication_lock(self) -> threading.RLock:
+        """fork: betterlcm — held across validate → publish → advance → assemble.
+
+        Checking the fence and then publishing is not enough: a rebind that lands between the
+        check and the insert published the old session's work and advanced the NEW session's
+        frontier over it (round-3 verify-2 #3). Session start and reset take the same lock, so
+        a rebind either happens entirely before the publication or waits for it.
+        """
+        lock = getattr(self, "_publication_lock_object", None)
+        if lock is None:
+            lock = threading.RLock()
+            self._publication_lock_object = lock
+        return lock
+
     def _publication_fence(self) -> tuple[str, int]:
         return (str(self._session_id or ""), int(getattr(self, "_publication_generation", 0)))
 
@@ -2816,6 +2839,12 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         self._log_session_filter_diagnostics()
 
     def on_session_start(self, session_id: str, **kwargs) -> None:
+        # fork: betterlcm — a rebind waits for any publication in flight, and a publication in
+        # flight waits for a rebind that started first (round-3 verify-2 #3 / verify-4 #1).
+        with self._publication_lock:
+            return self._on_session_start_locked(session_id, **kwargs)
+
+    def _on_session_start_locked(self, session_id: str, **kwargs) -> None:
         if "hermes_home" in kwargs:
             self._rebind_storage_for_home(str(kwargs.get("hermes_home") or ""))
 
@@ -3767,6 +3796,10 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
             raise
 
     def on_session_reset(self) -> None:
+        with self._publication_lock:  # fork: betterlcm — see on_session_start
+            return self._on_session_reset_locked()
+
+    def _on_session_reset_locked(self) -> None:
         if self._host_fallback_compressor is not None:
             compressor = self._host_fallback_compressor
             on_session_reset = getattr(compressor, "on_session_reset", None)
@@ -4599,6 +4632,13 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
             )
         if content.lstrip().startswith(_PRESERVED_OBJECTIVE_CONTEXT_PREFIX):
             return True
+        # fork: betterlcm — assembly can emit the minimal receipt ALONE, when not even one
+        # summary fits. Recognition still demanded a summary header first, so that receipt was
+        # ingested and fed back to the summariser as raw conversation (round-3 verify-2 #9).
+        if content.strip() == marked_loss.MINIMAL_ASSEMBLY_OMISSION_MARKER:
+            return True
+        if content.strip().startswith(marked_loss.LEADING_TURNS_DROPPED_PREFIX):
+            return True  # fork: betterlcm — round-3 verify-4 #7
         # fork: betterlcm — every shape assembly can emit must round-trip through this
         # recognition, or the generated prefix is ingested and stored as raw conversation
         # (round-2 verify-2 #5). A prefix whose parts all had to be given up carries only the
@@ -4644,9 +4684,13 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         for index, line in enumerate(lines):
             if line.strip() != marked_loss.ASSEMBLY_OMISSION_MARKER_HEADER:
                 continue
-            # the full marker is its header followed only by its own "- " bullet lines
+            # fork: betterlcm — the full marker is its header followed only by ITS OWN bullet
+            # lines. Accepting any "- " line let a user's own "- MY NEW DECISION: cancel"
+            # pass as generated scaffolding and be dropped (round-3 verify-4 #5).
             rest = [item.strip() for item in lines[index + 1:] if item.strip()]
-            return all(item.startswith("- ") for item in rest)
+            return bool(rest) and all(
+                _ASSEMBLY_OMISSION_BULLET_RE.match(item) for item in rest
+            )
         return False
 
     def _restore_ingest_payload_placeholders_in_value(self, value: Any, *, session_id: str) -> Any:
@@ -6212,7 +6256,17 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
             },
             deadline=deadline,  # fork: one end time for L1+L2+fallbacks (p05 CP05)
         )
-        self._check_publication_fence(fence, what="condensation")
+        # fork: betterlcm — the fence is validated and the node written under ONE lock, so a
+        # rebind cannot land between the check and the insert (round-3 verify-2 #3).
+        with self._publication_lock:
+            self._check_publication_fence(fence, what="condensation")
+            return self._publish_condensed_node(
+                nodes, fence, summary_text, level, depth, source_tokens, focus_topic
+            )
+
+    def _publish_condensed_node(self, nodes, fence, summary_text, level, depth,
+                                source_tokens, focus_topic) -> tuple[int, int, int]:
+        """fork: betterlcm — the write half of ``_condense_summary_nodes``, under the fence."""
         earliest_at, latest_at = self._dag.get_source_time_window(
             [node.node_id for node in nodes]
         )
@@ -6223,18 +6277,21 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         inherited = marked_loss.inherited_receipts(node.summary for node in nodes)
         missing = [line for line in inherited if line not in summary_text]
         if missing:
+            # fork: betterlcm — the PUBLISHED text is what has to converge, receipts included.
+            # Copying distinct receipts verbatim made the "condensed" parent larger than its
+            # sources (round-2 verify-2 #9), and the single-receipt exemption let one large
+            # receipt do the same (round-3 verify-3): 530 source tokens became a 664-token
+            # parent. Verbatim while it still converges; otherwise one aggregate line naming
+            # the children that hold the receipts verbatim, which stay reachable from this
+            # node's source_ids.
             verbatim = summary_text.rstrip() + "\n" + "\n".join(missing)
-            if len(missing) == 1 or count_tokens(verbatim) < source_tokens:
+            aggregate = summary_text.rstrip() + "\n" + marked_loss.aggregated_inherited_receipt_marker(
+                missing, [node.node_id for node in nodes]
+            )
+            if count_tokens(verbatim) < source_tokens:
                 summary_text = verbatim
             else:
-                # fork: betterlcm — copying four children's distinct receipts verbatim made the
-                # "condensed" parent larger than its sources and raised the pressure this call
-                # exists to reduce (round-2 verify-2 #9). The children keep the full receipts
-                # and stay reachable from this node's source_ids, so the parent carries a
-                # receipt naming how many there are and where to read them.
-                summary_text = summary_text.rstrip() + "\n" + marked_loss.aggregated_inherited_receipt_marker(
-                    missing, [node.node_id for node in nodes]
-                )
+                summary_text = aggregate
         summary_tokens = count_tokens(summary_text)
         condensed_node = SummaryNode(
             session_id=fence[0],  # fork: the session this work was started for
@@ -6882,8 +6939,24 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         # then ensure provider-valid tool-call/result sequencing.
         result = self._sanitize_active_context_messages(result)
         if leading_msg is None:
+            # fork: betterlcm — a provider request cannot BEGIN with an assistant or tool
+            # message, so the leading ones are dropped; dropping them in silence removed a
+            # decision from the agent's own view of its history (round-3 verify-4 #7). The rows
+            # are untouched and the removal is named.
+            dropped_leading: list[Dict[str, Any]] = []
             while result and result[0].get("role") in {"assistant", "tool"}:
+                dropped_leading.append(result[0])
                 result = result[1:]
+            if dropped_leading:
+                receipt = marked_loss.leading_turns_dropped_marker(
+                    len(dropped_leading),
+                    [str(message.get("role") or "?") for message in dropped_leading],
+                )
+                self._last_assembly_omission_note = (
+                    (self._last_assembly_omission_note + "\n" if self._last_assembly_omission_note else "")
+                    + receipt
+                )
+                result = [{"role": "user", "content": receipt}] + result
         if (
             assembly_cap is not None
             and anchor_part is not None

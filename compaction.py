@@ -1153,35 +1153,41 @@ class CompactionMixin:
             earliest_at, latest_at = self._store.get_time_bounds(published_source_ids)
             summary_tokens = count_tokens(summary_text)
 
-            try:
-                self._check_publication_fence(leaf_fence, what="leaf summary")
-            except SummaryUnavailableError as exc:
-                # the session was rebound while this chunk was being summarised: publishing it
-                # now would attribute the old session's content to the new one and advance a
-                # frontier that belongs to neither. Keep the raw messages instead.
-                self._last_leaf_summary_error = str(exc)
-                logger.warning("LCM discarding a stale leaf summary: %s", exc)
-                break
+            # fork: betterlcm — validation, the node write and the frontier advance happen
+            # under ONE lock. Checking the fence and then publishing left a window in which a
+            # rebind published the old session's work and advanced the NEW session's frontier
+            # over it (round-3 verify-2 #3 / verify-4 #1). on_session_start and reset take the
+            # same lock, so a rebind either happens entirely before this block or waits.
+            with self._publication_lock:
+                try:
+                    self._check_publication_fence(leaf_fence, what="leaf summary")
+                except SummaryUnavailableError as exc:
+                    # the session was rebound while this chunk was being summarised: publishing
+                    # it now would attribute the old session's content to the new one and
+                    # advance a frontier that belongs to neither. Keep the raw messages.
+                    self._last_leaf_summary_error = str(exc)
+                    logger.warning("LCM discarding a stale leaf summary: %s", exc)
+                    break
 
-            node = SummaryNode(
-                session_id=leaf_fence[0],
-                depth=0,
-                summary=summary_text,
-                token_count=summary_tokens,
-                source_token_count=source_tokens,
-                source_ids=published_source_ids,
-                source_type="messages",
-                created_at=time.time(),
-                earliest_at=earliest_at,
-                latest_at=latest_at,
-                expand_hint=self._extract_expand_hint(summary_text),
-            )
-            # fork: betterlcm — node + sidecar in one transaction (audit p05 CP03)
-            self._dag.add_node_with_meta(node, level=int(_level), summary=summary_text)
-            self._invalidate_rollups_for_published_node(node)
-            self._maybe_gc_compacted_tool_results(compacted_chunk, source_store_ids)
-            self._last_compacted_store_id = max(consumed_store_ids) if consumed_store_ids else 0
-            self._persist_frontier_marker()
+                node = SummaryNode(
+                    session_id=leaf_fence[0],
+                    depth=0,
+                    summary=summary_text,
+                    token_count=summary_tokens,
+                    source_token_count=source_tokens,
+                    source_ids=published_source_ids,
+                    source_type="messages",
+                    created_at=time.time(),
+                    earliest_at=earliest_at,
+                    latest_at=latest_at,
+                    expand_hint=self._extract_expand_hint(summary_text),
+                )
+                # fork: betterlcm — node + sidecar in one transaction (audit p05 CP03)
+                self._dag.add_node_with_meta(node, level=int(_level), summary=summary_text)
+                self._invalidate_rollups_for_published_node(node)
+                self._maybe_gc_compacted_tool_results(compacted_chunk, source_store_ids)
+                self._last_compacted_store_id = max(consumed_store_ids) if consumed_store_ids else 0
+                self._persist_frontier_marker()
 
             pressure_consumed_chunk = pressure_messages[
                 leading_anchor_count:leading_anchor_count + selected_raw_len

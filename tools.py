@@ -1461,6 +1461,7 @@ def _expand_message_sources(
     next_source_offset: int | None = source_offset
     next_content_offset = content_offset
     next_tool_calls_offset = 0
+    corrupt_payload_refs: list[dict[str, Any]] = []  # fork: betterlcm (round-3 verify-3)
     has_more = source_offset < total_sources
 
     for relative_index, store_id in enumerate(source_ids):
@@ -1496,6 +1497,14 @@ def _expand_message_sources(
             )
             if ref_payload is not None and ref_payload.get("kind") != "ingest_payload":
                 externalized = ref_payload
+            if ref_payload is not None and ref_payload.get("corrupt"):
+                # fork: betterlcm — the loader detects a truncated/half-written payload; an
+                # expansion that dropped the flag answered with empty content and
+                # has_more=false, i.e. a successful-looking empty result (round-3 verify-3).
+                corrupt_payload_refs.append({
+                    "ref": ref,
+                    "reason": str(ref_payload.get("corrupt_reason") or "payload is corrupt"),
+                })
         if hydrate_externalized_content and externalized is not None:
             content = externalized.get("content", "")
             content_source = "externalized_payload"
@@ -1641,8 +1650,18 @@ def _expand_message_sources(
         pagination["incomplete_reason"] = (
             f"{len(missing_source_ids)} source row(s) referenced by this node could not be read"
         )
+    elif corrupt_payload_refs:
+        # fork: betterlcm — a corrupt externalized payload is not an empty one (round-3 verify-3)
+        pagination["complete"] = False
+        pagination["corrupt_payloads"] = corrupt_payload_refs
+        pagination["incomplete_reason"] = (
+            f"{len(corrupt_payload_refs)} externalized payload(s) referenced here are corrupt "
+            "or truncated; their bytes are not recoverable from this call"
+        )
     else:
         pagination["complete"] = True
+    if corrupt_payload_refs and "corrupt_payloads" not in pagination:
+        pagination["corrupt_payloads"] = corrupt_payload_refs
     return messages, pagination
 
 
@@ -5892,6 +5911,7 @@ def lcm_expand(args: Dict[str, Any], **kwargs) -> str:
     source_limit = _parse_positive_int(source_limit_arg, 0) if source_limit_arg is not None else None
     content_offset = _parse_non_negative_int(args.get("content_offset", 0), 0)
     tool_calls_offset = _parse_non_negative_int(args.get("tool_calls_offset", 0), 0)  # fork
+    envelope_offset = _parse_non_negative_int(args.get("envelope_offset", 0), 0)  # fork
     raw_include_exact_ref = args.get("include_exact_ref", False)
     if not isinstance(raw_include_exact_ref, bool):
         return json.dumps({"error": "include_exact_ref must be a boolean"})
@@ -5903,6 +5923,20 @@ def lcm_expand(args: Dict[str, Any], **kwargs) -> str:
         payload = _get_externalized_payload(engine, externalized_ref)
         if payload is None:
             return json.dumps({"error": f"Externalized payload {externalized_ref} not found in current session"})
+        if payload.get("corrupt"):
+            # fork: betterlcm — the loader detected a truncated/half-written artifact; returning
+            # its (empty or short) content with has_more=false answered a broken payload as a
+            # successful empty one (round-3 verify-3).
+            return json.dumps({
+                "externalized_ref": externalized_ref,
+                "error": (
+                    "this externalized payload is corrupt or truncated: "
+                    + str(payload.get("corrupt_reason") or "")
+                ),
+                "corrupt": True,
+                "complete": False,
+                "content_chars": len(str(payload.get("content") or "")),
+            })
         content = payload.get("content", "")
         sliced = _slice_content_for_response(content, max_tokens, content_offset)
         return json.dumps(
@@ -5957,9 +5991,34 @@ def lcm_expand(args: Dict[str, Any], **kwargs) -> str:
         }
         # fork: betterlcm — the host fields the columns do not project (name, reasoning
         # metadata, error flags, provider ids) are stored; an expansion that omitted them
-        # returned a different message from the one the host sent (round-2 verify-4 #4).
+        # returned a different message from the one the host sent (round-2 verify-4 #4). They
+        # are CHARGED to the same budget and paged with their own cursor: returning a
+        # 200,000-character reasoning field whole turned a 50-token request into 50,000
+        # (round-3 verify-2 #6).
         if isinstance(stored.get("envelope"), dict) and stored["envelope"]:
-            result["envelope"] = stored["envelope"]
+            from .tokens import count_tokens as _count_tokens_envelope
+            rendered_envelope = json.dumps(stored["envelope"], ensure_ascii=False, default=str)
+            envelope_budget = max(0, max_tokens - _count_tokens_envelope(sliced["content"]))
+            envelope_slice = _slice_content_for_response(
+                rendered_envelope, envelope_budget, envelope_offset
+            )
+            result["envelope"] = envelope_slice["content"]
+            result["envelope_chars"] = envelope_slice["content_chars"]
+            result["envelope_offset"] = envelope_slice["content_offset"]
+            result["envelope_returned_chars"] = envelope_slice["content_returned_chars"]
+            if envelope_slice["content_truncated"]:
+                result["envelope_truncated"] = True
+                result["envelope_next_offset"] = envelope_slice["next_content_offset"]
+                result["has_more"] = True
+                result["envelope_continue_with"] = {
+                    "tool": "lcm_expand",
+                    "store_id": store_id,
+                    "content_offset": (
+                        sliced["next_content_offset"] if sliced["has_more"]
+                        else sliced["content_offset"] + sliced["content_returned_chars"]
+                    ),
+                    "envelope_offset": envelope_slice["next_content_offset"],
+                }
         # fork: betterlcm — an assistant turn's tool CALLS are part of what it said. Node
         # expansion renders and pages them; the raw-row path returned the text with
         # has_more=false and no mention of the calls at all, so a recovery path answered

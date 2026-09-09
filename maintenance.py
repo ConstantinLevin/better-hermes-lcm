@@ -134,8 +134,22 @@ def flush_engine_connections(engine) -> None:
     ``rotate_backup_database`` (rolling backup) so the connection-flush
     contract stays in one place.
     """
-    engine._store.commit()
-    engine._dag._conn.commit()
+    # fork: betterlcm — a flush must never commit ANOTHER operation's unfinished transaction.
+    # Calling this between a node INSERT and its metadata write committed the node without its
+    # sidecar, and the publisher's rollback could no longer undo it (round-3 verify-4 #2). Both
+    # stores expose their write locks; take them, so a publication in flight finishes first.
+    store_lock = getattr(engine._store, "_write_lock", None)
+    if store_lock is not None:
+        with store_lock:
+            engine._store.commit()
+    else:  # pragma: no cover - a store without the lock attribute
+        engine._store.commit()
+    dag_lock = getattr(engine._dag, "_db_lock", None)
+    if dag_lock is not None:
+        with dag_lock:
+            engine._dag._conn.commit()
+    else:  # pragma: no cover
+        engine._dag._conn.commit()
     lifecycle_conn = getattr(getattr(engine, "_lifecycle", None), "_conn", None)
     if lifecycle_conn is not None:
         lifecycle_conn.commit()

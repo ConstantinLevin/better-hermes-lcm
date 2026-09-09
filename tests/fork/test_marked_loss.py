@@ -1455,3 +1455,45 @@ def test_a_partly_internal_turn_is_named_in_the_assembly_receipt(tmp_path):
         assert "internal/reasoning content removed from the replay" in rendered, rendered
     finally:
         e.shutdown()
+
+
+def test_a_pasted_omission_header_with_the_user_s_own_bullet_is_stored(tmp_path):
+    """round-3 verify-4 #5: every line after the omission header only had to start with "- ",
+    so a user who pasted a summary and wrote "- MY NEW DECISION: cancel" under it had that
+    message classified as our own scaffolding and dropped."""
+    from hermes_lcm import marked_loss
+    e = _engine(tmp_path, "bullets.db", incremental_max_depth=0)
+    try:
+        e.on_session_start("bu", platform="cli", context_length=200_000)
+        header = marked_loss.assembly_omission_marker(
+            omitted_node_ids=[2], depth_cap_hits=[], omitted_tail_messages=0)
+        pasted = {"role": "user", "content":
+                  "[Recent Summary (d0, node 1)]\nbody\n\n---\n\n" + header
+                  + "\n- MY NEW DECISION: cancel"}
+        assert e._is_replayed_context_scaffold_message(pasted) is False, pasted
+        ours = {"role": "user", "content":
+                "[Recent Summary (d0, node 1)]\nbody\n\n---\n\n" + header}
+        assert e._is_replayed_context_scaffold_message(ours) is True
+    finally:
+        e.shutdown()
+
+
+def test_leading_turns_a_request_cannot_start_with_are_named(tmp_path):
+    """round-3 verify-4 #7: a provider request cannot begin with an assistant or tool message,
+    so the leading ones were dropped — an assistant turn holding a decision vanished from the
+    agent's own view of its history with nothing in its place."""
+    from hermes_lcm import marked_loss
+    e = _engine(tmp_path, "leading.db", incremental_max_depth=0)
+    try:
+        e.on_session_start("ld", platform="cli", context_length=200_000)
+        assembled = e._assemble_context(None, [
+            {"role": "assistant", "content": "EARLY DECISION: cancel the rollout"},
+            {"role": "user", "content": "last"},
+        ])
+        rendered = "\n".join(str(m.get("content") or "") for m in assembled)
+        assert "last" in rendered
+        assert marked_loss.LEADING_TURNS_DROPPED_PREFIX in rendered, rendered
+        # ... and our own receipt is recognised as scaffolding, never re-ingested as raw text
+        assert e._is_replayed_context_scaffold_message(assembled[0]) is True
+    finally:
+        e.shutdown()
