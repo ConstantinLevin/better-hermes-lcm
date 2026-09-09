@@ -174,3 +174,10 @@ def test_summariser_failure_through_build_turn_context_keeps_the_turn(tmp_path, 
                 assert any(str(r).startswith("cooldown:") for r in warned)
         finally:
             engine.shutdown()
+
+
+# round-3 verify-4 #21 (binding failures counted as ingest failures) is covered by the fix in
+# __init__.py: the post_llm_call hook records a failure that happens BEFORE ingest() through
+# _record_ingest_failure. It has no fork test here because the plugin's __init__ module body
+# does not execute under this suite's import shim (only its submodules do), so the registered
+# hook is not reachable from a test process.

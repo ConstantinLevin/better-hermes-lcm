@@ -598,7 +598,18 @@ def register(ctx):
                 )
                 active_engine.ingest(history)
             except Exception as exc:
-                logger.debug("LCM post_llm_call ingest error: %s", exc)
+                # fork: betterlcm — a failure BEFORE ingest() (binding, dispatch) stored none of
+                # the supplied history and left the ingest-failure counter at zero, so
+                # lcm_doctor reported healthy capture over a turn that was never captured
+                # (round-3 verify-4 #21). Failures here are recorded like any other.
+                logger.warning("LCM post_llm_call ingest error: %s", exc)
+                record_failure = getattr(active_engine, "_record_ingest_failure", None)
+                if callable(record_failure):
+                    try:
+                        record_failure("post_llm_call", exc)
+                    except Exception:  # pragma: no cover - accounting must not raise
+                        logger.debug("LCM could not record a post-call ingest failure",
+                                     exc_info=True)
 
         _mgr._hooks.setdefault("post_llm_call", []).append(_on_post_llm_call)
         logger.debug("LCM registered post_llm_call hook for per-turn ingest")

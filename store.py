@@ -89,6 +89,10 @@ _HOST_MESSAGE_ID_KEYS = ("message_id", "id", "uuid", "event_id")
 
 
 REVISION_SUPERSEDES_KEY = "lcm_supersedes_store_id"
+# fork: betterlcm — the archive row that carries recovered bytes names the row it belongs to.
+# Resolving it by tool_call_id was ambiguous when two calls shared an id and impossible when a
+# result had none (round-3 verify-4 #24).
+RECOVERED_FOR_KEY = "lcm_recovered_for_store_id"
 
 
 def is_revision_row(row: Dict[str, Any]) -> bool:
@@ -631,7 +635,7 @@ class MessageStore:
             try:
                 store_id = _insert(msg, token_estimate)
                 for attached in attached_rows:
-                    _insert(attached, 0)
+                    _insert({**attached, RECOVERED_FOR_KEY: store_id}, 0)
                 self._conn.commit()
             except BaseException:
                 try:
@@ -703,7 +707,19 @@ class MessageStore:
 
         ids = []
         with self._write_lock, self._conn:
+            previous_id = 0
             for msg, est in zip(messages, token_estimates):
+                # fork: betterlcm — an archive row carrying recovered bytes names the row it
+                # belongs to, which is the one inserted just before it. Resolving that link by
+                # tool_call_id was ambiguous or impossible (round-3 verify-4 #24).
+                if (
+                    previous_id
+                    and RECOVERED_FOR_KEY not in msg
+                    and str(_normalize_content_value(msg.get("content")) or "").startswith(
+                        RECOVERED_BODY_PREFIX
+                    )
+                ):
+                    msg = {**msg, RECOVERED_FOR_KEY: previous_id}
                 tc = msg.get("tool_calls")
                 tc_json = json.dumps(tc) if tc else None
                 ts = time.time()
@@ -734,6 +750,7 @@ class MessageStore:
                     ),
                 )
                 ids.append(cur.lastrowid)
+                previous_id = int(cur.lastrowid or 0)
         return ids
 
     def reassign_session_messages(self, old_session_id: str, new_session_id: str) -> int:
@@ -1493,6 +1510,27 @@ class MessageStore:
         serialized = json.dumps(record, sort_keys=True)
         key = self._compaction_telemetry_key(conversation_id)
         self.write_metadata_json([key], serialized, skip_unchanged=True)
+
+    def attached_recovered_body_ids_for_rows(self, session_id: str,
+                                             store_ids: List[int]) -> List[int]:
+        """fork: betterlcm — archive rows explicitly attached to these rows (round-3 #24)."""
+        wanted = {int(value) for value in store_ids or []}
+        if not wanted:
+            return []
+        rows = self._conn.execute(
+            """SELECT store_id, envelope_extra FROM messages
+               WHERE session_id = ? AND envelope_extra LIKE ?""",
+            (session_id, f"%{RECOVERED_FOR_KEY}%"),
+        ).fetchall()
+        found: List[int] = []
+        for store_id, envelope_extra in rows:
+            try:
+                envelope = json.loads(envelope_extra or "{}")
+            except (TypeError, ValueError):
+                continue
+            if int(envelope.get(RECOVERED_FOR_KEY) or 0) in wanted:
+                found.append(int(store_id))
+        return sorted(set(found) - wanted)
 
     def attached_recovered_body_ids(self, session_id: str, tool_call_ids: List[str],
                                     *, exclude_ids: List[int] | None = None) -> List[int]:

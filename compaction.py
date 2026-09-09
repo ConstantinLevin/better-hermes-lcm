@@ -1124,15 +1124,23 @@ class CompactionMixin:
             revision_ids = self._store.revision_rows_for(  # fork: round-3 verify-2 #8
                 self._session_id, consumed_store_ids
             )
-            recovered_body_ids = self._store.attached_recovered_body_ids(
-                self._session_id,
-                [
-                    str(message.get("tool_call_id") or "")
-                    for message in source_lookup_chunk
-                    if str(message.get("role") or "") == "tool"
-                ],
-                exclude_ids=consumed_store_ids,
-            )
+            # fork: betterlcm — the explicit attachment link first (round-3 verify-4 #24); the
+            # call-id lookup remains for rows written before that link existed.
+            recovered_body_ids = sorted(set(
+                self._store.attached_recovered_body_ids_for_rows(
+                    self._session_id, consumed_store_ids
+                )
+            ) | set(
+                self._store.attached_recovered_body_ids(
+                    self._session_id,
+                    [
+                        str(message.get("tool_call_id") or "")
+                        for message in source_lookup_chunk
+                        if str(message.get("role") or "") == "tool"
+                    ],
+                    exclude_ids=consumed_store_ids,
+                )
+            ))
             published_source_ids = sorted(
                 summarised_source_ids
                 | set(consumed_store_ids)

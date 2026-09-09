@@ -69,7 +69,15 @@ def _is_unsupported_filesystem_capability(
 
 
 def _tool_call_stub(tool_call_id: str) -> str:
-    return (tool_call_id or "tool-result").replace("/", "-").replace(":", "-")[:48]
+    """A filename-safe stub for a call id.
+
+    fork: betterlcm — only "/" and ":" were replaced, so a call id containing a SPACE (or any
+    other character the reader's ref pattern stops at) produced a marker whose ref the reader
+    parsed as empty: the payload was written and its reference was unusable
+    (round-3 verify-4 #25). The reader accepts a no-space, no-bracket token; the writer must
+    stay inside that.
+    """
+    return _safe_stub(tool_call_id or "", "tool-result")
 
 
 def _safe_stub(value: str, fallback: str) -> str:
