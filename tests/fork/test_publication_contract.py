@@ -389,3 +389,30 @@ def test_a_tool_argument_correction_is_archived_and_still_maps(tmp_path):
             assert revision_ids <= covered, (revision_ids, covered)
     finally:
         e.shutdown()
+
+
+def test_a_late_session_end_stores_under_the_session_that_ended(tmp_path):
+    """round-3 verify-4 #4: _ingest_messages takes its ownership from mutable engine state, so
+    a session-end callback arriving after the engine had rebound stored the OLD session's
+    history — its whole prefix and final response — under the NEW session."""
+    cfg = LCMConfig(database_path=str(tmp_path / "lateend.db"))
+    e = LCMEngine(config=cfg, hermes_home=str(tmp_path))
+    try:
+        e.on_session_start("old", platform="cli", context_length=200_000)
+        e._ingest_messages([{"role": "user", "content": "the old question"}])
+        e._store.commit()
+        e.on_session_start("new", platform="cli", context_length=200_000)
+
+        e.on_session_end("old", [
+            {"role": "user", "content": "the old question"},
+            {"role": "assistant", "content": "THE OLD FINAL ANSWER"},
+        ])
+        e._store.commit()
+
+        old_rows = [str(row.get("content") or "") for row in e._store.get_session_messages("old")]
+        new_rows = [str(row.get("content") or "") for row in e._store.get_session_messages("new")]
+        assert any("THE OLD FINAL ANSWER" in text for text in old_rows), old_rows
+        assert not any("THE OLD FINAL ANSWER" in text for text in new_rows), new_rows
+        assert e.current_session_id == "new", "the binding is restored"
+    finally:
+        e.shutdown()

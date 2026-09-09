@@ -5,6 +5,7 @@ with a DAG-based summarization system that preserves every message.
 """
 
 import asyncio
+import contextlib
 import copy
 import hashlib
 import json
@@ -2164,6 +2165,42 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
             ) + revisions
         return revisions
 
+    @contextlib.contextmanager
+    def _ended_session_ingest_identity(self, session_id: str):
+        """fork: betterlcm — ingest a final history under the session that ENDED.
+
+        ``_ingest_messages`` takes its ownership from mutable engine state, so a session-end
+        callback that arrives after the engine has already rebound stored the ended session's
+        messages under the new binding (round-3 verify-4 #4). The identity is swapped for the
+        duration of the flush and restored afterwards, under the publication lock so a
+        concurrent compaction cannot observe the temporary binding.
+        """
+        ended = str(session_id or "")
+        if not ended or ended == self._session_id:
+            yield
+            return
+        with self._publication_lock:
+            previous_session = self._session_id
+            previous_conversation = self._conversation_id
+            previous_cursor = self._ingest_cursor
+            previous_needs_reconcile = self._ingest_cursor_needs_reconcile
+            previous_fingerprints = getattr(self, "_last_prefix_revision_fingerprints", {})
+            self._session_id = ended
+            self._conversation_id = (
+                self._lcm_session_last_normal_conversation_id.get(ended) or ended
+            )
+            self._ingest_cursor = 0
+            self._ingest_cursor_needs_reconcile = True
+            self._last_prefix_revision_fingerprints = {}
+            try:
+                yield
+            finally:
+                self._session_id = previous_session
+                self._conversation_id = previous_conversation
+                self._ingest_cursor = previous_cursor
+                self._ingest_cursor_needs_reconcile = previous_needs_reconcile
+                self._last_prefix_revision_fingerprints = previous_fingerprints
+
     def _persist_frontier_marker(self) -> None:
         if not self._session_id or not self._conversation_id:
             return
@@ -3770,7 +3807,13 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                     # Best-effort final flush. Keep this path bounded because
                     # host gateways call session-end hooks from lifecycle paths
                     # that must not wait through SQLite's normal busy timeout.
-                    self._ingest_messages(messages)
+                    #
+                    # fork: betterlcm — under the ENDED session's identity. A late callback
+                    # (start old, start new, then end old) stored the old session's history
+                    # under the new one: wrong provenance for every one of those rows
+                    # (round-3 verify-4 #4).
+                    with self._ended_session_ingest_identity(session_id):
+                        self._ingest_messages(messages)
                 except KeyboardInterrupt:
                     logger.warning(
                         "LCM session-end raw-message ingest interrupted; "
@@ -6746,15 +6789,21 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                 insert_missing_tool_stubs=False,
             )
             skipped_tail_gap = False
-            for msg in reversed(tail_for_selection):
+            # fork: betterlcm — count EVERY message this loop leaves behind. Both `break`s
+            # abandoned the whole older remainder without counting it, so a receipt said "1
+            # tail message" where two had gone (round-3 verify-4 #6).
+            for index, msg in enumerate(reversed(tail_for_selection)):
+                remaining_from_here = len(tail_for_selection) - index
                 msg_tokens = count_message_tokens(msg)
                 if used + tail_token_total + msg_tokens > assembly_cap:
                     if self._is_budget_droppable_tail_message(msg):
                         skipped_tail_gap = True
                         omitted_tail_messages += 1  # fork: counted for the omission marker
                         continue
+                    omitted_tail_messages += remaining_from_here
                     break
                 if skipped_tail_gap:
+                    omitted_tail_messages += remaining_from_here
                     break
                 kept_tail_reversed.append(msg)
                 tail_token_total += msg_tokens
@@ -7190,8 +7239,22 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
             include_lcm_note=False,
         )
         minimum_candidate_len = 1 if system_msg is not None else 0
-        if len(candidate) == minimum_candidate_len and tail_messages:
-            fallback = ([system_msg] if system_msg is not None else []) + [tail_messages[-1]]
+        # fork: betterlcm — "the assembly produced no CONTENT" is the fallback's trigger, not
+        # "the assembly produced no messages". Once a bounded assembly started emitting its
+        # omission receipt, that receipt alone satisfied the old length test and the caller's
+        # latest message was dropped (round-3 verify-4 #6). Our own scaffolding does not count
+        # as content, and it is carried into the fallback rather than discarded.
+        emitted = candidate[minimum_candidate_len:]
+        scaffolding = [
+            message for message in emitted
+            if self._is_replayed_context_scaffold_message(message)
+        ]
+        if len(scaffolding) == len(emitted) and tail_messages:
+            fallback = (
+                ([system_msg] if system_msg is not None else [])
+                + scaffolding
+                + [tail_messages[-1]]
+            )
             return self._sanitize_active_context_messages(fallback)
         return candidate
 

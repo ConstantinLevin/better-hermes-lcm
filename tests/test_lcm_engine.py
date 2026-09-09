@@ -21206,7 +21206,16 @@ class TestAssemblyGuardrails:
 
         result = instance.compress(messages, current_tokens=110)
 
-        assert result == [messages[0], messages[-1]]
+        # fork: betterlcm — the assistant turn really was dropped, so the prefix carries the
+        # minimal receipt saying so; upstream returned the anchor and the tail in silence
+        # (round-3 verify-4 #6).
+        from hermes_lcm import marked_loss
+        assert result[0] == messages[0] and result[-1] == messages[-1]
+        assert any(
+            marked_loss.MINIMAL_ASSEMBLY_OMISSION_MARKER in str(msg.get("content") or "")
+            or "assembly omissions" in str(msg.get("content") or "")
+            for msg in result
+        ), result
         assert instance.get_status()["overflow_recovery_failed"]
 
     def test_overflow_recovery_failure_flag_resets_after_successful_compression(self, tmp_path, monkeypatch):

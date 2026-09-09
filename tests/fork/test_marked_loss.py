@@ -1497,3 +1497,39 @@ def test_leading_turns_a_request_cannot_start_with_are_named(tmp_path):
         assert e._is_replayed_context_scaffold_message(assembled[0]) is True
     finally:
         e.shutdown()
+
+
+def test_a_bounded_assembly_counts_every_message_it_left_behind(tmp_path):
+    """round-3 verify-4 #6: the tail loop abandoned the whole older remainder on its `break`
+    without counting it, so a receipt said "1 tail message" where two had gone — and once the
+    receipt was emitted, the fallback that rescues the caller's latest message stopped firing
+    because it tested the number of messages rather than the presence of content."""
+    from hermes_lcm import marked_loss
+    e = _engine(tmp_path, "tailcount.db", incremental_max_depth=0)
+    try:
+        e.on_session_start("tc", platform="cli", context_length=200_000)
+        messages = [
+            {"role": "user", "content": "u" * 400},
+            {"role": "assistant", "content": "a" * 400},
+            {"role": "user", "content": "THE LATEST REQUEST"},
+        ]
+        assembled = e._assemble_context(
+            {"role": "system", "content": "sys"}, messages, assembly_cap_override=200)
+        rendered = "\n".join(str(m.get("content") or "") for m in assembled)
+        assert "THE LATEST REQUEST" in rendered, assembled
+        says_something = (
+            marked_loss.MINIMAL_ASSEMBLY_OMISSION_MARKER in rendered
+            or marked_loss.COMPACT_ASSEMBLY_OMISSION_PREFIX in rendered
+            or "assembly omissions" in rendered
+        )
+        assert says_something, rendered
+        note = e._last_assembly_omission_note or rendered
+        assert "2 large fresh-tail message(s)" in note, note
+
+        # ... and the recovery path keeps the caller's latest message ALONGSIDE the receipt
+        recovered = e._assemble_overflow_recovery_context(
+            {"role": "system", "content": "sys"}, messages, assembly_cap_override=60)
+        recovered_text = "\n".join(str(m.get("content") or "") for m in recovered)
+        assert "THE LATEST REQUEST" in recovered_text, recovered
+    finally:
+        e.shutdown()
