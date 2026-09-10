@@ -1,4 +1,4 @@
-"""fork: better-hermeslcm — a search that stopped early must say so, and it must be able to find the
+"""fork: better-hermes-lcm — a search that stopped early must say so, and it must be able to find the
 text it holds. Upstream returned a bounded scan the way it returned an exhaustive one, routed
 supplementary CJK to an index that cannot spell it, and built snippets at offsets taken from a
 case-folded copy of the text (audit p05 SQ02 / SQ03 / SQ05)."""

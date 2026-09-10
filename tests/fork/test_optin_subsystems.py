@@ -1,4 +1,4 @@
-"""fork: better-hermeslcm — the opt-in subsystems are default-off, which lowers their priority but
+"""fork: better-hermes-lcm — the opt-in subsystems are default-off, which lowers their priority but
 does not make it acceptable for them to certify incomplete or misattributed evidence
 (audit verify-4 #20-#24)."""
 import sqlite3

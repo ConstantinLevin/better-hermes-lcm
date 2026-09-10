@@ -43,7 +43,7 @@ def test_explicit_fresh_tail_count_is_not_curved(tmp_path):
 
 def test_guard_and_breaker_are_retuned_on_resolve(tmp_path):
     e = _engine(tmp_path)
-    # fork: better-hermeslcm — the guard counts CALLS, and a chunked engine spends many small calls
+    # fork: better-hermes-lcm — the guard counts CALLS, and a chunked engine spends many small calls
     # where upstream spent one big one, so upstream's 24 stopped a drain mid-way. Anchored to
     # what one drain needs; in tokens it is below upstream's spend at both ends.
     # before a window is known there is no chunk fraction to resolve, so compaction is still

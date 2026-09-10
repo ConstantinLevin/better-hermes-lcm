@@ -465,7 +465,7 @@ def _completeness(
     inputs_truncated: bool = False,
 ) -> dict[str, Any]:
     if inputs_truncated:
-        # fork: better-hermeslcm — evidence that was never looked at cannot support closure. With a
+        # fork: better-hermes-lcm — evidence that was never looked at cannot support closure. With a
         # two-reference budget over Alice=2, Bob=3 and Alice=100 the pack reported a closed,
         # product-verified difference of 1 while `refs_truncated` was true: the discarded
         # candidate was the one that contradicted it (verify-4 #22).

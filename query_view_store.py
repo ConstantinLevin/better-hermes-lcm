@@ -568,7 +568,7 @@ class QueryViewStore:
             try:
                 yield
                 self._conn.execute("COMMIT")
-            except BaseException:  # fork: better-hermeslcm — see round-2 verify-5 #5
+            except BaseException:  # fork: better-hermes-lcm — see round-2 verify-5 #5
                 self._conn.execute("ROLLBACK")
                 raise
 

@@ -5,15 +5,19 @@ description: Use, configure, diagnose, and retrieve exact evidence with the Herm
 
 # Hermes-LCM
 
-Use this skill when a task concerns Hermes-LCM setup, operation, compaction, diagnostics, session behavior, or recall from compacted and cross-conversation history.
+Use this skill for Hermes-LCM setup, operation, compaction, diagnostics, session behavior, or
+recall from compacted and cross-conversation history.
+
+`references/recall-policy.md` is already injected into every turn. Do not re-read it for routing —
+the rest of this skill is what it does not cover.
 
 Start here:
 
-1. Confirm that the `hermes-lcm` plugin is enabled and `context.engine` is `lcm`.
-2. For exact historical claims, use the recall workflow instead of trusting a compacted summary.
-3. Use `lcm_status`, `lcm_inspect`, and `lcm_doctor` before changing configuration or attempting repair.
-4. Treat slash-command apply paths as mutations: preview first, keep backups, and require the user's authorization.
-5. Load the relevant reference rather than guessing arguments or lifecycle semantics.
+1. Confirm the `hermes-lcm` plugin is enabled and `context.engine` is `lcm`.
+2. Run `lcm_status`, `lcm_inspect`, or `lcm_doctor` before changing configuration or attempting repair.
+3. Treat every slash-command apply path as a mutation: preview first, back up, and require the
+   user's authorization for the specific operation.
+4. Load the relevant reference rather than guessing arguments or lifecycle semantics.
 
 Reference map:
 
@@ -22,15 +26,21 @@ Reference map:
 - Diagnostics and safe operator workflow: `references/diagnostics.md`
 - Recall tools and routing: `references/recall-tools.md`
 - `/new`, session continuity, and `/lcm rotate`: `references/session-lifecycle.md`
-- Canonical runtime recall policy: `references/recall-policy.md`
 
-Working rules:
+How this build behaves:
 
-- Raw stored messages are authoritative; summaries are bounded recall cues.
-- Prefer newer source-backed evidence when it conflicts with an older summary.
-- Start with the narrowest useful scope and expand only when exact detail is needed.
-- Do not infer exact commands, paths, timestamps, values, counts, or causal chains from summaries alone.
-- Keep current-session, cross-conversation, and Hermes history outside `lcm.db` distinct.
-- Do not treat open-cardinality results as complete without product-verifiable enumeration or coverage.
-- Use `lcm_compile_evidence` when a historical answer needs several named facets, exact operands, conflict handling, or latest-state selection; treat its semantic proposal as untrusted until the product returns validated evidence.
-- Keep default-off assertion, query-view, adaptive-retrieval, and destructive operator paths default-off unless the user explicitly asks to enable them.
+- **Summaries are an index into retained history, not a replacement for it.** Read the rendered
+  summaries to decide *what to expand*; expand to the original before stating an exact command,
+  path, identifier, value, date, quote, or causal chain.
+- **No core retrieval tool trims its response to a character budget.** `limit` (and
+  `max_content_chars`) is the caller's contract, clamped only at each tool's own documented cap and
+  reported as `limit_clamped_from` when it is.
+- **Nothing bounded is reported as complete.** Read `complete`, `incomplete_reason`, `degraded`,
+  `has_more`, `truncated`, and coverage verdicts. An empty result is not proof of absence.
+- **`[LCM …]` and `[Externalized …]` markers** name what was removed and how to recover it. A marker
+  is a handle to follow, never the content.
+- **Most sizes are resolved from a context-window curve**, not a flat default; setting one
+  explicitly turns the curve off for that setting.
+- **Default-off subsystems answer `status: disabled`** — `lcm_recent` (temporal rollups),
+  `lcm_query_state` (assertions), `lcm_retrieve` (adaptive retrieval). Never enable a mutation or
+  subsystem surface merely to diagnose something.

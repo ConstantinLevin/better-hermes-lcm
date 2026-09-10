@@ -185,8 +185,8 @@ LCM_RECALL = {
                     "Response detail. 'snippets' (default) preserves the existing compact "
                     "hit response byte-for-byte. 'answer_ready' keeps at most five hits per "
                     "session and hydrates the first eight selected exact refs into bounded "
-                    "windows of at most 2400 characters each; the complete response remains "
-                    "capped at 64000 characters."
+                    "windows of at most 2400 characters each. Every selected hit is delivered: "
+                    "there is no response character cap, so 'limit' is what bounds the answer."
                 ),
                 "default": "snippets",
             },
@@ -885,9 +885,10 @@ LCM_RETRIEVE = {
 LCM_RECENT = {
     "name": "lcm_recent",
     "description": (
-        "Retrieve recent conversation summaries by a natural UTC time period. "
-        "Ready temporal rollups are served when available; otherwise the tool "
-        "transparently falls back to existing leaf summaries in the same window."
+        "Retrieve recent conversation summaries by a natural UTC time period, from the "
+        "temporal-rollup subsystem. That subsystem is OFF by default, and with it off this "
+        "tool answers status: disabled — use lcm_describe and lcm_expand on the summary nodes "
+        "already in context, or lcm_grep with time_from/time_to."
     ),
     "parameters": {
         "type": "object",
@@ -946,8 +947,9 @@ LCM_LOAD_SESSION = {
             "max_content_chars": {
                 "type": "integer",
                 "description": (
-                    "Maximum content characters to include per message (default 4000, hard upper bound 20000). "
-                    "Longer rows include content_truncated=true and can be recovered fully with lcm_expand(store_id=...)."
+                    "Maximum content characters to include per message (default 4000). Honoured as "
+                    "given — ask for what you need. Rows longer than it include content_truncated=true "
+                    "and can be recovered fully with lcm_expand(store_id=...)."
                 ),
                 "default": 4000,
             },
@@ -1011,7 +1013,7 @@ LCM_DESCRIBE = {
             "index_offset": {
                 "type": "integer",
                 "description": (
-                    "fork: better-hermeslcm — character offset into the node's stored index block, for "
+                    "fork: better-hermes-lcm — character offset into the node's stored index block, for "
                     "continuing one that did not fit an earlier response. Use "
                     "index_block_next_offset (or index_block_continue_with) from that response."
                 ),
@@ -1091,7 +1093,7 @@ LCM_EXPAND = {
             "tool_calls_offset": {
                 "type": "integer",
                 "description": (
-                    "fork: better-hermeslcm — character offset used to continue an oversized rendering "
+                    "fork: better-hermes-lcm — character offset used to continue an oversized rendering "
                     "of an assistant turn's tool CALLS in node_id mode. Use "
                     "next_tool_calls_offset (or tool_calls_continue_with) from the previous "
                     "response; store_id mode does not render tool calls."
@@ -1205,7 +1207,7 @@ LCM_EXPAND_QUERY = {
             },
             "context_max_tokens": {
                 "type": "integer",
-                "description": "Expanded serialized summary/raw/child-source/externalized fresh context budget for the auxiliary LLM before it returns the bounded answer (default max(answer max_tokens, 32000 or LCM_EXPANSION_CONTEXT_TOKENS))",
+                "description": "Expanded serialized summary/raw/child-source/externalized fresh context budget for the auxiliary LLM before it returns the bounded answer. The default is window-weighted (32000 at a 256k context, 125000 at 1M; see lcm_status window_scaling), or LCM_EXPANSION_CONTEXT_TOKENS when set.",
                 "default": 32000,
             },
         },

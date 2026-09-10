@@ -602,7 +602,7 @@ def test_apply_import_routes_oversized_payloads_through_ingest_protection(tmp_pa
         "SELECT content FROM messages WHERE role = 'user' ORDER BY store_id LIMIT 1"
     ).fetchone()[0]
     db.close()
-    # fork: better-hermeslcm — ingest-side externalization is retired, so an imported oversized
+    # fork: better-hermes-lcm — ingest-side externalization is retired, so an imported oversized
     # body is stored WHOLE instead of being replaced by a ref to a file. That is the better
     # outcome for an import: the archive holds what the source held.
     assert content == large_content

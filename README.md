@@ -1125,7 +1125,7 @@ The fork is meant to track upstream **and** the other lossless-context implement
 inspired by. The contract, in full, is in [`FORK.md`](FORK.md); the short form:
 
 1. **Upstream hermes-lcm.** `git fetch upstream && git merge upstream/main` in the fork
-   repository; every fork hook in an upstream file carries a `# fork: better-hermeslcm` marker
+   repository; every fork hook in an upstream file carries a `# fork: better-hermes-lcm` marker
    with its reason, which is what a conflict is resolved against; `scripts/test.sh` must be
    green and both e2e anchors clean.
 2. **lossless-claw.** On every

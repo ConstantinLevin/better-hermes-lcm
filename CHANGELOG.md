@@ -6,6 +6,12 @@ This repo also publishes GitHub Releases. This file is the repo-root release sur
 
 No additional changes yet.
 
+---
+
+Everything below this line is **upstream `stephenschoettler/hermes-lcm`**, kept because this fork
+sits on top of it (base commit in `.upstream-base`). The issue and PR numbers refer to upstream's
+tracker, not to this repository.
+
 ## v1.0.0-rc.1 - 2026-09-03
 
 ### Highlights

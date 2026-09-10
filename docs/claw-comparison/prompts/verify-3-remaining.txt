@@ -1,4 +1,4 @@
-You are deciding whether "better-hermeslcm" (a fork of the hermes-lcm plugin, Python, at the repository root) is FINISHED on a specific criterion.
+You are deciding whether "better-hermes-lcm" (a fork of the hermes-lcm plugin, Python, at the repository root) is FINISHED on a specific criterion.
 
 Purpose of the fork (the yardstick): NO LOSS whatsoever — loss means provenance gone, content unreachable, or a bounded/failed operation reported as complete. Summaries are acceptable only because they are marked, carry provenance and act as an index. A 1,000,000-token window must work well, with every tuning value weighted smoothly between 256k (upstream behaviour kept) and 1M.
 

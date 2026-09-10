@@ -1,7 +1,7 @@
-# better-hermeslcm — fork of stephenschoettler/hermes-lcm
+# better-hermes-lcm — fork of stephenschoettler/hermes-lcm
 
 Base: upstream commit recorded in `.upstream-base` (`git log -1 $(cat .upstream-base)`).
-Branch `better-hermeslcm` carries every fork change; remote `upstream` tracks the original.
+Branch `better-hermes-lcm` carries every fork change; remote `upstream` tracks the original.
 
 ## Why this fork exists
 Make a 1,000,000-token context window work well under a strict no-loss rule, without
@@ -62,7 +62,7 @@ retrieval tools → operator, backup and maintenance.
 > hook no longer attaches to, an upstream fix that duplicates ours, a default the curve claims
 > to mirror. None of that conflicts, and none of it turns the suite red: our tests exercise OUR
 > behaviour, so they pass while upstream's new behaviour goes unexercised. Read the whole diff,
-> intersect the upstream-changed symbols with the ones carrying a `# fork: better-hermeslcm`
+> intersect the upstream-changed symbols with the ones carrying a `# fork: better-hermes-lcm`
 > marker, re-read those functions **in the merged tree, whole**, confirm every marker is still
 > reached and not merely still present, and ask of every change *does this (re)introduce loss?* The ten failure modes and the full procedure are
 > standing task **R1** in [`docs/TASKS.md`](docs/TASKS.md); merge early and often, because a
@@ -71,13 +71,13 @@ retrieval tools → operator, backup and maintenance.
 ```
 git fetch upstream
 git diff $(cat .upstream-base)..upstream/main   # READ THIS, all of it, before merging
-git merge upstream/main          # or rebase better-hermeslcm onto upstream/main
+git merge upstream/main          # or rebase better-hermes-lcm onto upstream/main
 scripts/test.sh                  # must be green
 ```
 Then redeploy: `~/.hermes/plugins/hermes-lcm` is a clone of this repo (remote `fork`), pinned in
 `~/.hermes/plugins/.install-metadata.json` so `hermes plugins update` refuses to touch it.
 ```
-git -C ~/.hermes/plugins/hermes-lcm pull fork better-hermeslcm
+git -C ~/.hermes/plugins/hermes-lcm pull fork better-hermes-lcm
 python3 - <<'PY'   # re-pin the deployed revision
 import json, subprocess, pathlib
 p = pathlib.Path.home()/".hermes/plugins/.install-metadata.json"; d = json.loads(p.read_text())
@@ -95,7 +95,7 @@ identified by this file and `git log`). The live `lcm.db` gains the
 `lcm_node_meta` table on first use; an upstream build classifies such a DB as newer (drop the
 table and the `better_hermeslcm_node_meta_v1` row in `lcm_migration_state` to go back).
 Fork code is kept in NEW modules wherever possible so upstream files receive only small,
-localized hook calls. Each such call carries a `# fork: better-hermeslcm` marker and its reason
+localized hook calls. Each such call carries a `# fork: better-hermes-lcm` marker and its reason
 in the comment beside it — that comment is what tells you whether a conflicting hunk is a hook
 (keep ours, re-apply on top of theirs) or a behavioural change upstream also made (reconcile).
 `git diff $(cat .upstream-base)..HEAD --stat` is the list of files. Every fork-only test lives
@@ -203,7 +203,8 @@ Upstream settings the curve also drives when not set explicitly: `context_thresh
 (leaf_chunk_tokens → 0.20·W, sweep flag only).
 
 ## Layout of fork-only code
-- `window_scaling.py`     — the anchor table and the curve; `resolve_window_scaled(config, W)`
+- `window_scaling.py`     — the weighting table and the curve; `resolve_window_scaled(config, W)`
+- `window_scaled_mixin.py` — the engine side: the `effective_*` properties every consumer reads
 - `host_cooldown.py`      — the host's compression-failure cooldown protocol for a plugin engine
 - `errors.py`             — `SummaryUnavailableError` (replaces upstream's silent L3 truncation)
 - `marked_loss.py`        — every marker text the fork leaves where upstream cut or dropped silently

@@ -90,7 +90,7 @@ def _get_encoder():
     return _encoder if _encoder_ready else None
 
 
-# fork: better-hermeslcm — per-character cost for the fallback estimate, in tokens per character.
+# fork: better-hermes-lcm — per-character cost for the fallback estimate, in tokens per character.
 # Upstream picked ONE divisor from the proportion of non-ASCII characters, which both
 # undercounted dense scripts (100 CJK characters ≈ 150 tokens in practice, estimated as 67)
 # and stepped discontinuously at the ratio boundaries: 49 CJK + 51 ASCII estimated 41 tokens,
@@ -139,7 +139,7 @@ def _fallback_token_estimate(text: str) -> int:
 
 
 def _serialize_for_count(value) -> str:
-    """fork: better-hermeslcm — render a non-string value the way a provider would receive it.
+    """fork: better-hermes-lcm — render a non-string value the way a provider would receive it.
 
     ``len(value) // 4`` on a dict counts its KEYS: a tool call whose ``arguments`` arrive as a
     dict of one 50,000-character command was estimated at ~1 token, and the whole message at
@@ -156,7 +156,7 @@ def _serialize_for_count(value) -> str:
 
 def _count_tokens_core(text) -> int:
     if not isinstance(text, str):
-        text = _serialize_for_count(text)  # fork: better-hermeslcm
+        text = _serialize_for_count(text)  # fork: better-hermes-lcm
     enc = _get_encoder()
     if enc is not None:
         try:
@@ -190,7 +190,7 @@ def _forget_token_cache_owner(owner_id: int) -> None:
 
 
 def set_token_cache_size(maxsize: int, *, owner: Any = None) -> None:
-    """fork: better-hermeslcm — resize the memo (window-weighted: 2048 at 256k, 8192 at 1M).
+    """fork: better-hermes-lcm — resize the memo (window-weighted: 2048 at 256k, 8192 at 1M).
 
     The cache is process-global while engines are not, so the size is the MAXIMUM any live
     engine asked for: a 256k clone used to shrink the cache a 1M engine had just grown, and
@@ -212,7 +212,7 @@ def set_token_cache_size(maxsize: int, *, owner: Any = None) -> None:
             except TypeError:  # pragma: no cover - not weak-referenceable
                 _token_cache_owner_refs[owner_id] = None
     if _token_cache_requests:
-        # fork: better-hermeslcm — the maximum of what the LIVE engines asked for. Flooring it at the
+        # fork: better-hermes-lcm — the maximum of what the LIVE engines asked for. Flooring it at the
         # default meant an explicit smaller override (a 64-entry cache on a memory-tight host)
         # silently became 2048 (round-2 verify-3 #26); with no live request the default stands.
         size = max(_token_cache_requests.values())

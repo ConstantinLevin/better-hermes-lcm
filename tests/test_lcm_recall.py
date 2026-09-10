@@ -538,7 +538,7 @@ def test_answer_ready_delta_is_opt_in_and_returns_only_novel_exact_refs(
 def test_answer_ready_delta_refs_match_every_hit_the_limit_allowed(
     recall_engine, monkeypatch
 ):
-    # fork: better-hermeslcm — this asserted that hits were evicted to fit a response char cap
+    # fork: better-hermes-lcm — this asserted that hits were evicted to fit a response char cap
     # and that the delta still matched the shortened list. There is no cap: `limit` is the
     # contract, so every selected hit is delivered and the delta covers all of them.
     contents = [
@@ -586,7 +586,7 @@ def test_answer_ready_delta_refs_match_every_hit_the_limit_allowed(
 def test_answer_ready_keeps_every_summary_lead_and_reports_no_delta_refs(
     recall_engine, monkeypatch
 ):
-    # fork: better-hermeslcm — this asserted summary leads were evicted to fit a response char
+    # fork: better-hermes-lcm — this asserted summary leads were evicted to fit a response char
     # cap. The cap is gone; the leads are all delivered and only `limit` bounds them.
     response_cap = 6_000
     summary_leads = [
@@ -947,7 +947,7 @@ def test_answer_ready_expands_only_first_eight_and_reports_policy(
     assert policy["expanded_hit_limit"] == 8
     assert policy["per_hit_char_cap"] == 2_400
     assert policy["snippet_char_cap"] == 300
-    # fork: better-hermeslcm — response_char_cap is gone from the payload with the cap itself
+    # fork: better-hermes-lcm — response_char_cap is gone from the payload with the cap itself
     assert "response_char_cap" not in policy
     assert policy["response_truncated"] is False
     assert "no response char cap" in policy["response_policy"]
@@ -957,7 +957,7 @@ def test_answer_ready_expands_only_first_eight_and_reports_policy(
 def test_answer_ready_echoes_a_huge_query_back_whole(
     recall_engine, monkeypatch
 ):
-    # fork: better-hermeslcm — this asserted the response was held under 64,000 chars and that
+    # fork: better-hermes-lcm — this asserted the response was held under 64,000 chars and that
     # the echoed query was cut to 4,096 with a query_truncated flag. Both are gone: the caller
     # sent that query, so it comes back as sent, and an oversized tool response is the host's
     # spillover problem rather than something the plugin trims on the caller's behalf.

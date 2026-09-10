@@ -117,7 +117,7 @@ def test_engine_ingest_does_not_reprotect_messages_in_store(tmp_path, monkeypatc
     def fail_if_store_protects_again(*_args, **_kwargs):
         raise AssertionError("engine ingest already protected this batch")
 
-    # fork: better-hermeslcm — the store protects through the attachment-aware entry point
+    # fork: better-hermes-lcm — the store protects through the attachment-aware entry point
     monkeypatch.setattr(lcm_store_module, "protect_messages_for_ingest_with_attachments",
                         fail_if_store_protects_again)
 
@@ -133,7 +133,7 @@ def test_store_append_batch_still_protects_direct_callers(tmp_path, monkeypatch)
 
     def mark_protected(messages, *_args, **_kwargs):
         calls.append(len(messages))
-        # fork: better-hermeslcm — (protected, attachments-by-input-position)
+        # fork: better-hermes-lcm — (protected, attachments-by-input-position)
         return [dict(message, content="protected by store") for message in messages], {}
 
     monkeypatch.setattr(lcm_store_module, "protect_messages_for_ingest_with_attachments",
@@ -1339,7 +1339,7 @@ def test_ingest_externalizes_tool_calls_function_arguments(tmp_path):
     raw_message = json.loads(lcm_tools.lcm_expand({"store_id": store_id, "max_tokens": 100_000}, engine=engine))
     assert raw_message["externalized_refs"] == [ref]
     assert raw_message["externalized_payloads"][0]["field_path"] == "tool_calls[0].function.arguments"
-    # fork: better-hermeslcm — the row's calls are rendered (round-2 verify-4 #20); what they contain
+    # fork: better-hermes-lcm — the row's calls are rendered (round-2 verify-4 #20); what they contain
     # here is the externalized-payload placeholder, not the payload
     assert "[Externalized LCM ingest payload:" in raw_message["tool_calls"]
     assert "data:image" not in raw_message["tool_calls"]
@@ -1445,7 +1445,7 @@ def test_pre_compaction_tool_arguments_sanitize_payload_keys():
     assert "data:image" not in sanitized
     assert DATA_PAYLOAD[:80] not in sanitized
     parsed = json.loads(sanitized)
-    # fork: better-hermeslcm — a rewritten KEY is a removal like any other and carries its receipt
+    # fork: better-hermes-lcm — a rewritten KEY is a removal like any other and carries its receipt
     # in the object it happened in (round-3 verify-4 #9)
     assert parsed["[Media attachment]"] == "plain-value"
     receipts = [value for key, value in parsed.items() if key.startswith("_lcm_key_sanitisation")]
@@ -1869,7 +1869,7 @@ def test_store_id_expand_never_returns_raw_historical_tool_calls(tmp_path):
     raw_message_text = lcm_tools.lcm_expand({"store_id": store_id, "max_tokens": 100_000}, engine=engine)
     raw_message = json.loads(raw_message_text)
 
-    # fork: better-hermeslcm — the calls are RETURNED now (omitting them answered "this is the whole
+    # fork: better-hermes-lcm — the calls are RETURNED now (omitting them answered "this is the whole
     # row" while hiding what the agent did, round-2 verify-4 #20), but their arguments go
     # through the compaction argument sanitiser, so a legacy row's inline payload is a marker
     # and never the raw bytes.

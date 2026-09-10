@@ -598,7 +598,7 @@ def register(ctx):
                 )
                 active_engine.ingest(history)
             except Exception as exc:
-                # fork: better-hermeslcm — a failure BEFORE ingest() (binding, dispatch) stored none of
+                # fork: better-hermes-lcm — a failure BEFORE ingest() (binding, dispatch) stored none of
                 # the supplied history and left the ingest-failure counter at zero, so
                 # lcm_doctor reported healthy capture over a turn that was never captured
                 # (round-3 verify-4 #21). Failures here are recorded like any other.

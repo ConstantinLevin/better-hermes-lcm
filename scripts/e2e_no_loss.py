@@ -1,4 +1,4 @@
-"""End-to-end no-loss exercise for better-hermeslcm.
+"""End-to-end no-loss exercise for better-hermes-lcm.
 
 Not a unit test: it drives the engine the way the host does — feeding compress()'s own return
 value back as the next turn's context — over a long, tool-heavy conversation, then checks the

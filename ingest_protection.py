@@ -141,9 +141,9 @@ _UNRECOVERABLE_TRUNCATION_RE = re.compile(
     re.IGNORECASE,
 )
 _HERMES_RESULTS_DIRNAME = "hermes-results"
-# fork: better-hermeslcm — private carrier for a recovered body that could not be externalized.
+# fork: better-hermes-lcm — private carrier for a recovered body that could not be externalized.
 _RECOVERED_BODY_KEY = "_lcm_recovered_body"
-# fork: better-hermeslcm — the host's CURRENT home for oversized tool results. Hermes writes them to
+# fork: better-hermes-lcm — the host's CURRENT home for oversized tool results. Hermes writes them to
 # ``$HERMES_HOME/cache/spillover``, names that path in the marker, and deletes files there
 # after 24 hours. Recovery accepted only the older ``<tmp>/hermes-results`` directory, so on
 # this deployment the durable transcript kept the preview and the complete output was left to
@@ -488,7 +488,7 @@ def _persisted_output_saved_path(text: str | None) -> str | None:
 
 
 def _hermes_home_path(hermes_home: str | None = None) -> Path:
-    """fork: better-hermeslcm — the host home this process is working against."""
+    """fork: better-hermes-lcm — the host home this process is working against."""
     candidate = str(hermes_home or "").strip() or os.environ.get("HERMES_HOME", "").strip()
     return Path(candidate).expanduser() if candidate else Path.home() / ".hermes"
 
@@ -496,7 +496,7 @@ def _hermes_home_path(hermes_home: str | None = None) -> Path:
 def _allowed_persisted_output_dirs(hermes_home: str | None = None) -> list[Path]:
     """Directories a persisted-output marker may legitimately point into.
 
-    fork: better-hermeslcm — the host's spillover directory joins the older temp directory here.
+    fork: better-hermes-lcm — the host's spillover directory joins the older temp directory here.
     Both are resolved and compared as whole paths, so the marker still cannot name an
     arbitrary file (audit p06 I2).
     """
@@ -587,7 +587,7 @@ def _read_regular_file_no_symlink(path: Path) -> tuple[str, dict[str, int]] | No
 
 def recover_hermes_persisted_output_with_file_stat(
     text: str | None,
-    hermes_home: str | None = None,  # fork: better-hermeslcm — which host home to trust (p06 I2)
+    hermes_home: str | None = None,  # fork: better-hermes-lcm — which host home to trust (p06 I2)
 ) -> tuple[str, dict[str, int]] | None:
     """Recover Hermes host `<persisted-output>` content when the backing file is safe.
 
@@ -1387,7 +1387,7 @@ def protect_message_for_ingest(
         parse_json_strings=False,
     )
     normalized_content = normalize_content_value(original_content)
-    # fork: better-hermeslcm — recovery must use the SAME host home the engine's replay path uses.
+    # fork: better-hermes-lcm — recovery must use the SAME host home the engine's replay path uses.
     # Passing it on one side only made ingest store the preview while replay recovered the file,
     # so the two identities disagreed and a tool result dropped out of the leaf's sources
     # (verify-2 regression #1).
@@ -1420,7 +1420,7 @@ def protect_message_for_ingest(
             }
             if persisted_output_preview_sha256:
                 persisted_output_metadata["persisted_output_preview_sha256"] = persisted_output_preview_sha256
-            # fork: better-hermeslcm — the durable copy does not depend on the opt-in generic
+            # fork: better-hermes-lcm — the durable copy does not depend on the opt-in generic
             # externalization flag. The host deletes its spillover file after 24 hours, so
             # with the flag off (the default) the archive kept a preview of an output that
             # no longer existed anywhere (audit p06 I2).
@@ -1439,7 +1439,7 @@ def protect_message_for_ingest(
                 ),
             )
 
-    # fork: better-hermeslcm — if the durable copy could not be written but the bytes ARE in hand,
+    # fork: better-hermes-lcm — if the durable copy could not be written but the bytes ARE in hand,
     # keep the bytes. Storing the host's marker instead threw away content that had already
     # reached the plugin, and the host deletes its spillover file after 24 hours, so the
     # remaining recovery path was dead (verify-4 #18). The store is the archive: inline is a
@@ -1659,7 +1659,7 @@ def protect_messages_for_ingest(
 ) -> List[Dict[str, Any]]:
     """One protected message per input message, in the same positions.
 
-    fork: better-hermeslcm — this list is paired POSITIONALLY with the caller's own messages (the
+    fork: better-hermes-lcm — this list is paired POSITIONALLY with the caller's own messages (the
     active-replay path does exactly that), so it must never grow. An earlier version appended
     recovered-body archive rows inline here, which shifted every later replacement onto the
     wrong message — a placeholder landed on the live request (round-3 verify-2 #1). Use
@@ -1679,7 +1679,7 @@ def protect_messages_for_ingest_with_attachments(
 ) -> "tuple[List[Dict[str, Any]], dict[int, List[Dict[str, Any]]]]":
     """``(protected, attachments)`` — attachments keyed by the INPUT position they belong to.
 
-    fork: better-hermeslcm — when the durable copy of a recovered host output could not be written,
+    fork: better-hermes-lcm — when the durable copy of a recovered host output could not be written,
     the recovered bytes ride along as an extra archive row. The marker row keeps its replay
     identity (so reconciliation and leaf publication still work) and the complete output is
     still in the store when the host deletes its expiring file (verify-4 #18). The extra rows

@@ -250,7 +250,7 @@ def _canonical_unit(raw: str | None) -> str | None:
     return text.replace(" ", "_")
 
 
-# fork: better-hermeslcm — a currency the question NAMES. Mapping every currency to "usd" answered a
+# fork: better-hermes-lcm — a currency the question NAMES. Mapping every currency to "usd" answered a
 # euro question with dollar evidence (round-3 verify-4 #17); an operand's unit has to match, so
 # naming the real currency simply leaves a foreign-currency question unanswered instead of
 # answered wrongly.
@@ -572,7 +572,7 @@ def compile_answer_contract(
     if relative and canonical_as_of is None:
         return ContractDecision("fallback", reason_code="question_as_of_required")
     window = _time_window(text, canonical_as_of)
-    # fork: better-hermeslcm — an explicit year in the question must survive into the window. Resolving
+    # fork: better-hermes-lcm — an explicit year in the question must survive into the window. Resolving
     # "March 2024" against a 2026 anchor produced March 2026 and answered a different question
     # (round-3 verify-4 #17); a window that contradicts the year the asker wrote is refused.
     explicit_years = {

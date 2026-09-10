@@ -1,185 +1,46 @@
-# Contributing to hermes-lcm
+# Contributing to better-hermes-lcm
 
-Thanks for contributing.
+This is a maintenance fork of [`stephenschoettler/hermes-lcm`](https://github.com/stephenschoettler/hermes-lcm),
+run for one operator's Hermes install. It is public so the work can be read and reused, not
+because it is looking for contributors. Issues and pull requests are welcome and will be read;
+they may sit for a while.
 
-This project is small, review-driven, and correctness-first. Keep changes scoped, tested, and easy to reason about.
+The branch is `better-hermes-lcm`. There is no `main`.
 
-## Workflow
+## Before proposing a change
 
-Preferred flow:
+Read [`CLAUDE.md`](CLAUDE.md). It is short and it is the contract — in particular:
 
-1. Open or reference an issue when the change affects behavior, architecture, or public tooling.
-2. Create a focused branch from `main`.
-3. Add or update tests with the change.
-4. Run local validation before opening the PR.
-5. Open a PR with a clear summary, rationale, and validation section.
+- **Upstream is the floor, never the target.** "That is what upstream does" describes a choice;
+  it never justifies one.
+- **Nothing becomes unreachable, and anything removed from a view leaves a marker saying what
+  went and how to get it back.** A bounded, capped or failed operation is never reported as
+  complete.
+- **Answer from the code.** Every claim about behaviour is checked at the call site, not against
+  a document — this file included.
 
-Typical branch names:
+Fork logic goes in new modules so upstream merges stay reviewable; upstream files get small
+hooks marked `# fork: better-hermes-lcm`, with the reason in the comment beside them. That marker
+is the merge risk surface: `grep` finds every one of them.
 
-- `fix/...`
-- `feat/...`
-- `docs/...`
-- `refactor/...`
-- `test/...`
+## What counts as validation
 
-## Issues
-
-Use the GitHub issue forms for:
-
-- bugs
-- behavior regressions
-- architectural direction
-- follow-up work that should not be buried in PR comments
-
-Choose the bug/regression form for broken behavior, and the feature/design form for new behavior or architecture proposals.
-
-When filing a bug, include:
-
-- expected behavior
-- actual behavior
-- minimal repro steps
-- relevant logs, stack traces, or failing tests
-- version / branch context when relevant
-
-If a report is speculative, say so. If it is directional rather than a concrete bug, label it clearly in the issue body.
-
-## Commits
-
-Prefer clear, conventional-style subjects:
-
-- `fix: ...`
-- `feat: ...`
-- `docs: ...`
-- `refactor: ...`
-- `test: ...`
-
-Keep commits focused. Avoid mixing unrelated cleanup into the same change.
-
-## Pull Requests
-
-Open small PRs when possible. Large PRs are harder to review and easier to get wrong.
-
-PR titles should be descriptive and usually follow the same style as commit subjects.
-
-PR bodies should use this template. It is mirrored in `.github/PULL_REQUEST_TEMPLATE.md` so GitHub pre-fills new PRs.
-
-```md
-## Summary
--
-
-## Why
--
-
-## Validation
-- [ ] Focused validation: `<command>` -> `<result>`
-- [ ] Default validation:
-  - [ ] `pytest tests/test_lcm_core.py tests/test_lcm_engine.py tests/test_packaging_install.py -q`
-  - [ ] `pytest -q`
-  - [ ] `scripts/validate_release.sh --full --keep-going --output /tmp/hermes-lcm-release-validation-<topic>`
-  - [ ] `git diff --check origin/main...HEAD && git diff --check && git diff --cached --check`
-- [ ] Workflow validation, if workflows changed: `actionlint`
-
-## Notes
--
-
-Refs #
-```
-
-If you skip any validation item, leave it unchecked and explain why in Notes.
-
-Good PRs are:
-
-- accurate about what is actually implemented
-- honest about scope
-- explicit about tradeoffs
-- backed by tests
-
-Do **not** claim behavior that is only partially implemented. If a filter, feature, or fix only applies to one path, say that clearly.
-
-## Validation
-
-Default validation for code changes:
+A green test run is a regression guard, not evidence. The gate is end-to-end behaviour:
 
 ```bash
-scripts/validate_release.sh --full --keep-going --output /tmp/hermes-lcm-release-validation-<topic>
-pytest tests/test_lcm_core.py tests/test_lcm_engine.py tests/test_packaging_install.py -q
-pytest -q
-git diff --check origin/main...HEAD
-git diff --check
-git diff --cached --check
+python3 scripts/e2e_no_loss.py 262144 400
+python3 scripts/e2e_no_loss.py 1000000 3000
 ```
 
-Workflow changes should also run:
+Both must report **0 unreachable rows, 0 missing facts, 0 facts never offered to the
+summariser**. A change that cannot produce those numbers is not finished. Note what these runs
+do *not* prove — they stub the summariser and never reach condensation; `CLAUDE.md` says which
+gaps that leaves.
 
-```bash
-actionlint
-```
+`bash scripts/test.sh` runs the suite (umask 077 matters — SQLite refuses group-writable
+directories).
 
-If your PR only touches a narrow surface area, include the focused command too. Example:
+## In a pull request
 
-```bash
-pytest tests/test_lcm_command.py -q
-```
-
-Packaging or install-flow changes should also verify the standalone user-plugin path:
-
-```bash
-export HERMES_HOME=/tmp/hermes-lcm-smoke
-mkdir -p "$HERMES_HOME/plugins"
-git clone https://github.com/stephenschoettler/hermes-lcm "$HERMES_HOME/plugins/hermes-lcm"
-# then enable `hermes-lcm` in plugins.enabled and set context.engine: lcm
-hermes plugins
-```
-
-If you skip part of the default validation, explain why in the PR body.
-
-## Testing expectations
-
-- behavior changes should come with tests
-- bug fixes should include a regression test when practical
-- command/output changes should verify the rendered text, not just internal helpers
-- keep tests readable; avoid clever fixtures when simple setup is enough
-
-## Review expectations
-
-Before requesting review:
-
-- rebase or merge `main` so the branch is current
-- resolve conflicts locally
-- make sure the PR description matches the branch exactly
-- ensure CI is expected to pass from the current head
-
-Reviewers will check:
-
-- correctness
-- edge cases
-- test coverage
-- whether the implementation matches the claimed behavior
-- whether the change is appropriately scoped
-
-## Scope guidelines
-
-Priority order:
-
-1. correctness
-2. regressions
-3. operator safety
-4. maintainability
-5. new features
-
-Backwards-compatible, well-tested changes are preferred. Destructive or risky workflows should be backup-first and clearly labeled.
-
-## Documentation
-
-Update docs when you change:
-
-- user-facing commands
-- tool schemas
-- configuration flags
-- expected operator workflows
-
-If a new feature needs explanation for contributors or operators, document it in the same PR.
-
-## Questions
-
-If you are unsure whether something should be an issue first, open the issue. It is cheaper than reviewing the wrong PR.
+Say what changed, why, and what you ran. If the change touches an upstream file, say what the
+hook does and what should happen to it when upstream edits the same function.

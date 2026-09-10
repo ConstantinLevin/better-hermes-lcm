@@ -1,4 +1,4 @@
-You are hunting regressions in "better-hermeslcm", a fork of the hermes-lcm plugin (Python, for Hermes Agent) at the repository root. Upstream hermes-lcm (the base) is at commit 8d1b1e6d3d63f5fc7b209e8d7ec1dc9b814f2e54 — read it with `git show 8d1b1e6:<file>`; .upstream-base records the base.
+You are hunting regressions in "better-hermes-lcm", a fork of the hermes-lcm plugin (Python, for Hermes Agent) at the repository root. Upstream hermes-lcm (the base) is at commit 8d1b1e6d3d63f5fc7b209e8d7ec1dc9b814f2e54 — read it with `git show 8d1b1e6:<file>`; .upstream-base records the base.
 
 Purpose of the fork (the yardstick): NO LOSS whatsoever — loss means provenance gone, content unreachable, or a bounded/failed operation reported as complete. Summaries are acceptable only because they are marked, carry provenance and act as an index. Every tuning value is weighted smoothly between a 256k window (upstream behaviour kept exactly) and 1M; at 256k the fork must behave like upstream except where a defect was fixed.
 

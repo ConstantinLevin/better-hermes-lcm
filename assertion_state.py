@@ -103,7 +103,7 @@ def query_assertion_state(
     if not normalized_subject:
         raise ValueError("subject_key is required for a bounded state query")
     if as_of is None:
-        # fork: better-hermeslcm — "what is the state" is a question about NOW. Without an explicit
+        # fork: better-hermes-lcm — "what is the state" is a question about NOW. Without an explicit
         # instant the validity window was not applied at all, so an assertion whose valid_to
         # had passed still came back active and current (verify-4 #23). An explicit as_of is
         # still honoured, including one in the past.

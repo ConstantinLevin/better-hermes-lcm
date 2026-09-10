@@ -263,7 +263,7 @@ def test_lcm_recent_fallback_includes_retained_higher_depth_summary(recent_parts
 
 
 def test_lcm_recent_is_disabled_without_its_subsystem(recent_parts):
-    """fork: better-hermeslcm — with rollups off this used to degrade to "fetch the leaf
+    """fork: better-hermes-lcm — with rollups off this used to degrade to "fetch the leaf
     summaries overlapping this window", which bypasses the index instead of using it. The
     summaries in the prefix exist to show where to expand; anything never expanded was not
     relevant. So the tool answers `status: disabled`, like `lcm_query_state` does."""
@@ -323,7 +323,7 @@ def test_lcm_recent_returns_whole_sections_bounded_only_by_limit(recent_parts):
     raw = lcm_recent({"period": "date:2026-07-15", "limit": 2}, engine=engine)
     result = json.loads(raw)
 
-    # fork: better-hermeslcm — no response char cap. The section content is a leaf SUMMARY, an
+    # fork: better-hermes-lcm — no response char cap. The section content is a leaf SUMMARY, an
     # index entry, and the old cap binary-searched it down to fit and set a bare
     # content_truncated with no cursor. `limit` is the caller's own bound; an oversized response
     # is the host's spillover problem, which the host already solves.
@@ -700,7 +700,7 @@ def test_recent_fallback_releases_snapshot_before_later_dag_write(recent_parts):
     assert connection is not None
     window = parse_recent_period("date:2026-07-15", now=NOW)
 
-    # fork: better-hermeslcm — the helper returns (sections, total_matching): the window's own count
+    # fork: better-hermes-lcm — the helper returns (sections, total_matching): the window's own count
     # is taken BEFORE the display limit (round-2 verify-3 #9)
     sections, total_matching = tools_module._recent_leaf_sections(
         engine, window, "conversation", 10
@@ -759,7 +759,7 @@ def test_recent_fallback_releases_transaction_on_lineage_exception(
         raise RuntimeError("forced recent lineage failure")
 
     monkeypatch.setattr(tools_module, "load_source_lineage", fail_lineage)
-    # fork: better-hermeslcm — a failed read is not an empty window: the helper raises so the caller
+    # fork: better-hermes-lcm — a failed read is not an empty window: the helper raises so the caller
     # can report complete:false instead of certifying an exhaustive negative (audit p02 T16).
     # The transaction must still be released.
     with pytest.raises(tools_module._RecentIncomplete):

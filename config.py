@@ -13,7 +13,7 @@ except Exception:  # pragma: no cover - optional fallback for minimal installs
 
 logger = logging.getLogger(__name__)
 
-# fork: better-hermeslcm — levers that are not levers. Each of these can only be switched into a
+# fork: better-hermes-lcm — levers that are not levers. Each of these can only be switched into a
 # violation of the fork's own rules, so a value from the environment or a config file is refused
 # rather than honoured, and the operator is told why instead of being silently overridden. See
 # the field comments on LCMConfig for the reasoning behind each.
@@ -419,7 +419,7 @@ ENV_FIELD_SPECS: tuple[_EnvFieldSpec, ...] = (
     _EnvFieldSpec("rollup_aggregate_max_tokens", "LCM_ROLLUP_AGGREGATE_MAX_TOKENS", int),
     _EnvFieldSpec("rollup_builds_per_pass", "LCM_ROLLUP_BUILDS_PER_PASS", int),
     _EnvFieldSpec("rollup_maintenance_budget_ms", "LCM_ROLLUP_MAINTENANCE_BUDGET_MS", int),
-    # fork: better-hermeslcm — window-weighted tuning
+    # fork: better-hermes-lcm — window-weighted tuning
     _EnvFieldSpec("scale_low_window", "LCM_SCALE_LOW_WINDOW", int),
     _EnvFieldSpec("scale_high_window", "LCM_SCALE_HIGH_WINDOW", int),
     _EnvFieldSpec("drain_stop_fraction", "LCM_DRAIN_STOP_FRACTION", float),
@@ -591,7 +591,7 @@ class LCMConfig:
 
     # -- Large tool-output externalization — RETIRED, always off ---
     #
-    # fork: better-hermeslcm — this is not a setting any more. Upstream writes an oversized tool
+    # fork: better-hermes-lcm — this is not a setting any more. Upstream writes an oversized tool
     # result to plugin-managed storage and replaces it with a compact ref in the serializer
     # input. Two reasons that is wrong here:
     #
@@ -613,7 +613,7 @@ class LCMConfig:
     large_output_externalization_threshold_chars: int = 12_000
     # Explicit storage directory for externalized payloads (empty = auto under hermes home).
     large_output_externalization_path: str = ""
-    # RETIRED, always off (fork: better-hermeslcm). Replaces textual tool results with durable
+    # RETIRED, always off (fork: better-hermes-lcm). Replaces textual tool results with durable
     # refs in provider-visible replay, and requires the externalization above, which is retired.
     large_output_active_replay_stubbing_enabled: bool = False
     # Token-aware active-replay threshold. The character threshold above still
@@ -623,7 +623,7 @@ class LCMConfig:
     # When enabled, already-externalized summarized tool-result transcript rows may
     # be rewritten to compact GC placeholders after successful leaf compaction.
     large_output_transcript_gc_enabled: bool = False
-    # fork: better-hermeslcm — keep a DURABLE copy of an oversized tool result that the host wrote to
+    # fork: better-hermes-lcm — keep a DURABLE copy of an oversized tool result that the host wrote to
     # its own expiring spillover directory and named in a <persisted-output> marker. The host
     # deletes those files after 24 hours, so without this the archive keeps a preview of an
     # output that no longer exists anywhere (audit p06 I2). This is archival duty, not the
@@ -794,7 +794,7 @@ class LCMConfig:
     # -- Session carry-over ---
     # Depth retained after /new (-1 = all, 0 = nothing, 2 = keep d2+).
     #
-    # fork: better-hermeslcm — 0 by default. NEW MEANS NEW.
+    # fork: better-hermes-lcm — 0 by default. NEW MEANS NEW.
     #
     # The working context is EVERYTHING in the window — system prompt, rendered summaries, the
     # fresh tail, the raw backlog — not just the tail. So upstream's 2 does not give a new
@@ -842,7 +842,7 @@ class LCMConfig:
     config_source_warnings: list[str] = field(default_factory=list)
     ignored_config_yaml_lcm_keys: list[str] = field(default_factory=list)
 
-    # ── fork: better-hermeslcm — window-weighted tuning (see window_scaling.py) ──────────────
+    # ── fork: better-hermes-lcm — window-weighted tuning (see window_scaling.py) ──────────────
     # Anchors of the weighting curve: below scale_low_window every default is upstream's,
     # above scale_high_window it is the large-window design, in between it slides linearly.
     scale_low_window: int = 262_144
@@ -882,7 +882,7 @@ class LCMConfig:
     # Summary size rules (upstream literals, now configurable; defaults unchanged).
     leaf_summary_ratio: float = 0.20          # leaf budget = clamp(ratio*source, min, max)
     leaf_summary_min_tokens: int = 2000
-    # fork: better-hermeslcm — 0 = NO ceiling (upstream's literal was 12000). A summary whose size
+    # fork: better-hermes-lcm — 0 = NO ceiling (upstream's literal was 12000). A summary whose size
     # stops growing while its source keeps growing is published as a complete index over
     # material it had no room to describe; the input is bounded by the leaf chunk instead.
     # An operator may still set a ceiling here, at that cost.

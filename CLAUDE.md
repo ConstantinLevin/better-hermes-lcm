@@ -1,6 +1,6 @@
-# better-hermeslcm — what this is, and how to work on it
+# better-hermes-lcm — what this is, and how to work on it
 
-**This repository is `better-hermeslcm`, a fork of [`stephenschoettler/hermes-lcm`](https://github.com/stephenschoettler/hermes-lcm)** (the LCM context-engine plugin for Hermes Agent — Python, SQLite-backed message store plus a summary DAG). Upstream base commit is in `.upstream-base`. The fork branch is `better-hermeslcm`.
+**This repository is `better-hermes-lcm`, a fork of [`stephenschoettler/hermes-lcm`](https://github.com/stephenschoettler/hermes-lcm)** (the LCM context-engine plugin for Hermes Agent — Python, SQLite-backed message store plus a summary DAG). Upstream base commit is in `.upstream-base`. The fork branch is `better-hermes-lcm`.
 
 Read this before touching anything. Then [`FORK.md`](FORK.md) (the maintenance contract) and [`docs/TASKS.md`](docs/TASKS.md) (the backlog — open work only; what was done is in the code and `git log`).
 
@@ -35,9 +35,9 @@ A cut that fires at 256k but not at 1M is a **defect in this fork**. "That is wh
 
 ## Architecture: where the fork's code lives
 
-Fork logic goes in **new modules** so upstream merges stay reviewable; upstream files get small, marked `# fork: better-hermeslcm` hooks.
+Fork logic goes in **new modules** so upstream merges stay reviewable; upstream files get small, marked `# fork: better-hermes-lcm` hooks.
 
-> **Naming:** everything is **better-hermeslcm** — project, repository, branch and the in-code marker. Grep `# fork: better-hermeslcm` to find every fork hook. The one exception is `node_meta.LEGACY_MIGRATION_STEPS`, which still names the pre-rename migration row so a database written by an older build has that row retired instead of recording one migration twice.
+> **Naming:** everything is **better-hermes-lcm** — project, repository, branch and the in-code marker. Grep `# fork: better-hermes-lcm` to find every fork hook. The one exception is `node_meta.LEGACY_MIGRATION_STEPS`, which still names the pre-rename migration row so a database written by an older build has that row retired instead of recording one migration twice.
 
 Fork modules: `window_scaling.py` (the anchor table and curve), `window_scaled_mixin.py` (`effective_*` resolution), `marked_loss.py` (**every marker the fork emits**), `host_cooldown.py`, `leaf_pipeline.py`, `node_meta.py`, `coverage_doctor.py`, `errors.py`.
 
@@ -49,7 +49,7 @@ ingest → store.py → reconcile.py → compaction.py (leaf + condensation)
        → tools.py (retrieval) → maintenance / lifecycle / backup
 ```
 
-**Every hook in an upstream file carries a `# fork: better-hermeslcm` marker, and the reason goes in the comment.** `grep` for the marker is the merge risk surface; `git diff $(cat .upstream-base)..HEAD` is the file list. There used to be a hand-maintained table of both, and by the time it was deleted a quarter of its rows described code that had moved. Write the note where it cannot drift from what it describes.
+**Every hook in an upstream file carries a `# fork: better-hermes-lcm` marker, and the reason goes in the comment.** `grep` for the marker is the merge risk surface; `git diff $(cat .upstream-base)..HEAD` is the file list. There used to be a hand-maintained table of both, and by the time it was deleted a quarter of its rows described code that had moved. Write the note where it cannot drift from what it describes.
 
 ## Things that will bite you
 
@@ -57,7 +57,7 @@ ingest → store.py → reconcile.py → compaction.py (leaf + condensation)
 - **Never assume or mention which summariser model or gateway is configured.** That is the operator's choice; the plugin is provider-neutral and so is every comment and document in it.
 - **A receipt must never displace live content.** Markers are positionally neutral or they are budgeted; a receipt that pushes out the caller's newest message has caused loss to prevent loss. This has been a real regression more than once.
 - **A receipt is a claim that something was removed.** Do not emit one for a turn that held nothing — a false claim of removal is its own defect.
-- **Test edits:** fork tests go in `tests/fork/`. An upstream test that pins behaviour the fork deliberately changed is re-pointed with a `# fork: better-hermeslcm` comment saying what it used to assert and why that changed — never deleted silently, and never recorded anywhere but in place.
+- **Test edits:** fork tests go in `tests/fork/`. An upstream test that pins behaviour the fork deliberately changed is re-pointed with a `# fork: better-hermes-lcm` comment saying what it used to assert and why that changed — never deleted silently, and never recorded anywhere but in place.
 - **Edit files with the editor.** Do not patch by piping heredoc Python/sed scripts through the shell: the diff becomes unreadable and those scripts have corrupted source files here before.
 
 ## Do not

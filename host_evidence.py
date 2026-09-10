@@ -157,7 +157,7 @@ def _prepare_selector_retrieval(
             break
     metrics = payload.get("metrics")
     metric_map = metrics if isinstance(metrics, Mapping) else {}
-    # fork: better-hermeslcm — a search that did NOT run exhaustively is not a search that found
+    # fork: better-hermes-lcm — a search that did NOT run exhaustively is not a search that found
     # nothing: {complete: false, timeout: true, hits: []} was reported as an ordinary
     # "no_progress", which reads as "there is nothing there" (round-3 verify-4 #14).
     upstream_incomplete = (
@@ -280,7 +280,7 @@ def call_auxiliary_selector(
     content = response.choices[0].message.content
     if not isinstance(content, str):
         content = str(content) if content else ""
-    # fork: better-hermeslcm — see round-4 verify-4 #22: a payload that already parses is not touched
+    # fork: better-hermes-lcm — see round-4 verify-4 #22: a payload that already parses is not touched
     raw_content = content.strip()
     try:
         json.loads(raw_content)

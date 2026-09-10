@@ -18,7 +18,7 @@ import uuid
 from contextlib import contextmanager
 from typing import Iterator, List
 
-# fork: better-hermeslcm — this module logged through a name it never imported, so the one handler
+# fork: better-hermes-lcm — this module logged through a name it never imported, so the one handler
 # that exists to keep a refusing connection from blocking the others raised NameError and left
 # the remaining connections at the temporary 5ms timeout (round-2 verify-3 #26).
 logger = logging.getLogger(__name__)
@@ -232,7 +232,7 @@ def _temporary_sqlite_busy_timeout(
     """Temporarily bound SQLite lock waits for gateway-critical paths."""
     bounded_timeout = max(0, int(timeout_ms))
     originals: list[tuple[sqlite3.Connection, int]] = []
-    # fork: better-hermeslcm — if SETUP fails partway, the connections already changed keep the short
+    # fork: better-hermes-lcm — if SETUP fails partway, the connections already changed keep the short
     # timeout for the rest of the process (a probe left one at 5 ms), and one failing restore
     # used to skip the rest. Every changed connection is restored independently, whether setup
     # or teardown raised (verify-3 #30).
@@ -255,7 +255,7 @@ def _temporary_sqlite_busy_timeout(
 def _restore_sqlite_busy_timeouts(
     originals: "list[tuple[sqlite3.Connection, int]]",
 ) -> None:
-    """fork: better-hermeslcm — restore every connection, even if one of them refuses."""
+    """fork: better-hermes-lcm — restore every connection, even if one of them refuses."""
     for conn, original in reversed(originals):
         try:
             conn.execute(f"PRAGMA busy_timeout={original}")

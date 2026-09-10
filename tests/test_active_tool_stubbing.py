@@ -291,12 +291,12 @@ def test_stubbing_happens_before_assembly_budget_selection(make_engine):
     stubbed = stubbed_engine._assemble_context(
         {"role": "system", "content": "system"},
         tail,
-        assembly_cap_override=310,  # fork: better-hermeslcm — longer LCM system note (+54 tokens)
+        assembly_cap_override=310,  # fork: better-hermes-lcm — longer LCM system note (+54 tokens)
     )
     baseline = baseline_engine._assemble_context(
         {"role": "system", "content": "system"},
         tail,
-        assembly_cap_override=310,  # fork: better-hermeslcm — longer LCM system note (+54 tokens)
+        assembly_cap_override=310,  # fork: better-hermes-lcm — longer LCM system note (+54 tokens)
     )
 
     assert assembled_tool(stubbed, "budget-call")["content"].startswith(
