@@ -6,7 +6,7 @@ Read this before touching anything. Then [`FORK.md`](FORK.md) (the maintenance c
 
 **Do not write anything down that is not code, the README, this file, or the backlog.** No design docs, no pass logs, no notes-to-self. A finding is implemented, in the backlog, or nonsense.
 
-**Answer from the code, never from a document — this one and the backlog included.** Every claim about behaviour carries a `file:line` you opened this turn. "I have not read that yet" is a complete answer.
+**Answer from the code, never from a document — this one and the backlog included.** Not read it yet? Then read it, then answer.
 
 **A finding stands until it is refuted, not until someone sounds annoyed.**
 
