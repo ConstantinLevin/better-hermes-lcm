@@ -5,7 +5,7 @@
 [![Python 3.11-3.14](https://img.shields.io/badge/Python-3.11--3.14-3776AB?logo=python&logoColor=white)](pyproject.toml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-# better-hermeslcm
+# better-hermes-lcm
 
 **A fork of [stephenschoettler/hermes-lcm](https://github.com/stephenschoettler/hermes-lcm)** —
 the Lossless Context Management plugin for
@@ -104,9 +104,11 @@ Core capabilities:
 - **Summary DAG** - builds depth-aware summary nodes over compacted history
 - **Bounded recovery** - pages raw messages, child summaries, and externalized
   payloads instead of dumping everything into the prompt
-- **Agent tools** - `lcm_grep`, `lcm_recall`, `lcm_query_state`, `lcm_compute`, `lcm_compile_evidence`, `lcm_evidence_pack`, `lcm_retrieve`, `lcm_recent`, `lcm_load_session`,
-  `lcm_describe`, `lcm_expand`, `lcm_expand_query`, `lcm_status`, `lcm_inspect`,
-  and `lcm_doctor`
+- **Agent tools** - the ones on the recall path: `lcm_grep`, `lcm_recall`, `lcm_load_session`,
+  `lcm_describe`, `lcm_expand`, `lcm_expand_query`, `lcm_status`, `lcm_inspect`, `lcm_doctor`.
+  Six more (`lcm_query_state`, `lcm_compute`, `lcm_compile_evidence`, `lcm_evidence_pack`,
+  `lcm_retrieve`, `lcm_recent`) belong to upstream's opt-in subsystems and answer
+  `status: disabled` until their flag is set
 - **Source-aware retrieval** - filters raw rows and summaries by descendant
   source lineage
 - **Session controls** - ignore noisy sessions or keep sessions read-only with
@@ -114,7 +116,9 @@ Core capabilities:
 - **Large payload controls** - externalize oversized tool/media/raw payloads and
   protect SQLite from inline media-ish base64 blobs
 - **Sensitive-pattern controls** - optional named redaction of API keys, bearer
-  tokens, passwords, and private keys before LCM stores or summarizes them
+  tokens, passwords, and private keys before LCM stores or summarizes them. Off by default, and
+  one of the four places this fork knowingly does not keep everything: a redacted secret is
+  unrecoverable, and two different secrets can collide on one placeholder
 - **Diagnostics** - runtime health, database checks, optional `/lcm` slash
   commands, backup-first repair/rotate paths
 
@@ -188,14 +192,22 @@ The fork keeps upstream's architecture and changes two things:
 > when it is a genuine preference (a cost, latency or headroom tradeoff). Where it decides how
 > much is lost, or how coarse the index is, it is decided on merit at every window.
 
-**1. Every tuning value is a smooth function of the model's context window.**
+**1. Every tuning value is a function of the model's context window.**
 `t = clamp((W − 256k) / (1M − 256k), 0, 1)`; each setting is `upstream_value + t × (large_window_value − upstream_value)`.
 At 256k the resolved values *are* upstream's, so a fixture session produces the same DAG
 *structure* under upstream and the fork — the anchor is about sizing, not about reproducing
 upstream's cuts (see the note above). At 1M they are the large-window design; between, they
 slide.
+The settings that matter most are not really interpolated at all: the leaf chunk (4 %), the fresh
+tail (15 %), the condensation gate (20 %) and the drain stop (30 %) are the **same fraction of the
+window at both ends**, so they are one weight and the line through them is flat.
 Anchors live in one table, [`window_scaling.py`](window_scaling.py); explicit env/config values
 always win over the curve; `lcm_status → window_scaling` shows every resolved value and its source.
+
+**This only holds between 256k and 1M.** `t` is clamped, and a fraction endpoint is resolved
+against its own anchor window rather than the real one, so outside that range a weight stops
+being a weight — see [Current limitations](#current-limitations). It is the fork's largest known
+defect and it is tracked as an open issue.
 
 Read the table with the middle column in mind: **upstream's value is the same number at 256k and
 at 1M** — that is the whole problem. The fork matches it at 256k for everything that is a
@@ -211,7 +223,8 @@ at 1M** — that is the whole problem. The fork matches it at 256k for everythin
 | DAG depth cap | 3 | 3 | 5 |
 | summariser / expansion timeouts, leaf-loop wall clock | 60 s / 120 s / 120 s | same as upstream | 200 s / 200 s / 200 s |
 | **summariser spend guard** / breaker | **24 calls per 10 min, 2 failures** | **80 calls, 2 failures** | **320 calls, 4 failures** — the guard counts CALLS, and chunking makes the same work cost many small ones; measured in TOKENS these are below upstream's spend at both ends |
-| `lcm_expand` page, tool response caps, SQLite/token caches | 4k tokens, ×1, 2 MiB / 2048 | same as upstream | 32k tokens, ×4, 64 MiB / 8192 |
+| `lcm_expand` page, SQLite/token caches | 4k tokens, 2 MiB / 2048 | same as upstream | 32k tokens, 64 MiB / 8192 |
+| **retrieval tool response caps** | **a char ceiling per tool: `lcm_recall` pops ranked hits until the JSON fits and rewrites `total_results` to the shortened count; `lcm_grep` stops mid-list; `lcm_recent`/`lcm_inspect` binary-search a summary string down** | **none — `limit` is the caller's contract, and an oversized response is the host's spillover problem, which the host already solves** | **none** |
 | **pre-summariser per-message cap** | **3000 chars (head 2000 + tail 800), unmarked** | **none — the cap is the whole window** | **none** |
 | **tool-call argument cap** | **500 chars → 400, unmarked** | **none — shares the message cap** | **none** |
 | **inline fallback when externalization is off/unwritable** | **cut to 3000 chars** | **body stays whole** | **body stays whole** |
@@ -248,7 +261,8 @@ a preference, and there upstream's number is as good as any other.
   would be a false claim of removal.
 - Every remaining cut or drop is marked and points at its provenance: sized `[LCM elided …]`
   markers in summariser input, unmatched tool calls serialised (not dropped), externalized
-  stubs carry a head note, assembly renders the whole frontier and names anything omitted,
+  stubs carry a head note, assembly renders the whole frontier (both assembly caps default to
+  0, so nothing is left out at all; an operator who sets one gets a receipt naming what was),
   `/new` keeps index nodes (retain depth is a carry-over filter, not a delete), `/lcm rotate`
   writes a marker node over rotated raw, bypass trims are marked.
 - Summaries are written as **indexes into recoverable history**: the prompts require coverage
@@ -331,6 +345,24 @@ assumes every leaf is a full chunk and every condensation group is full. Real se
 partial chunks and partial groups, so treat these as an upper bound on the same order of
 magnitude.
 
+**Outside 256k–1M the weights stop scaling, and below 256k that can stop compaction entirely.**
+`t` is clamped to [0, 1], and a fraction endpoint is resolved against its own anchor window, not
+against the window in front of it. So every fractional setting is frozen at its 256k value below
+the low anchor and at its 1M value above the high one:
+
+| window | fresh-tail cap resolves to | which is |
+|---|---|---|
+| 32,768 | 39,322 | **1.20 × the whole window** |
+| 262,144 | 39,322 | 0.15 × W ✅ |
+| 1,000,000 | 150,000 | 0.15 × W ✅ |
+| 2,000,000 | 150,000 | **0.075 × W** |
+
+At 32k the cap is larger than the window, so it is treated as no cap at all, and the 400-message
+tail then protects the entire session: there is nothing outside the tail, and **the session never
+compacts**. Until this is fixed, set `LCM_FRESH_TAIL_MAX_TOKENS` and `LCM_LEAF_CHUNK_FRACTION`
+explicitly on a window below 256k. The fix is not a clamp but the design this table argues for:
+one weight, evaluated against the real window.
+
 ## LCM vs built-in compression
 
 Hermes core may persist original conversation history in `state.db` before
@@ -345,8 +377,7 @@ through host-level history tools such as `session_search`.
   search step
 - explicit source-lineage and session-boundary rules
 
-Position LCM around retrieval quality, autonomy, and drill-down behavior. Do not
-claim that Hermes core has no persisted record of pre-compression history.
+The difference is drill-down, not the existence of a record: Hermes core keeps one too.
 
 ## Quick start
 
@@ -372,22 +403,24 @@ Clone the plugin as a general user plugin, then **pin it** so `hermes plugins up
 replace it with upstream:
 
 ```bash
-git clone -b better-hermeslcm https://github.com/ConstantinLevin/better-hermeslcm \
-  ~/.hermes/plugins/hermes-lcm
+git clone --branch v1.1.0-beta.1 --depth 1 \
+  https://github.com/ConstantinLevin/better-hermes-lcm ~/.hermes/plugins/hermes-lcm
 # pin: ~/.hermes/plugins/.install-metadata.json ->
-#   {"hermes-lcm": {"pinned": true, "revision": "<git rev-parse HEAD>",
-#                   "source": "https://github.com/ConstantinLevin/better-hermeslcm"}}
+#   {"hermes-lcm": {"pinned": true, "revision": "<git -C ~/.hermes/plugins/hermes-lcm rev-parse HEAD>",
+#                   "source": "https://github.com/ConstantinLevin/better-hermes-lcm"}}
 ```
 
-The directory must stay named `hermes-lcm` — that is the plugin id Hermes loads. Pinning is not
-optional: without it an update silently swaps this fork for upstream and every guarantee above
-goes with it. Upstream's own install is the same command against
+Install a **release tag**, not a branch: a branch moves under you, and the pin is what stops
+`hermes plugins update` from silently swapping this fork for upstream — with every guarantee
+above going with it. The directory must stay named `hermes-lcm`; that is the plugin id Hermes
+loads. Upstream's own install is the same shape against
 `https://github.com/stephenschoettler/hermes-lcm`.
 
 For a profile-specific install:
 
 ```bash
-git clone -b better-hermeslcm https://github.com/ConstantinLevin/better-hermeslcm \
+git clone --branch v1.1.0-beta.1 --depth 1 \
+  https://github.com/ConstantinLevin/better-hermes-lcm \
   ~/.hermes/profiles/myprofile/plugins/hermes-lcm
 ```
 
@@ -447,7 +480,7 @@ Typical output:
 
 ```text
 Plugins (1):
-  ✓ hermes-lcm v1.0.0-rc.1 (15 tools)
+  ✓ hermes-lcm v1.1.0-beta.1 (15 tools)
 
 Provider Plugins:
   Context Engine: lcm
@@ -489,16 +522,16 @@ If you installed a symlink from a separate checkout:
 
 Restart Hermes after updating.
 
-For the `v1.0.0-rc.1` line, take a normal backup of `lcm.db` before updating,
-then update the checkout and restart Hermes. No manual core migration or
-backfill is required: the core schema remains version 5. New assertion,
-query-view, and adaptive-retrieval state is additive, created only after the
-corresponding opt-in is enabled, and stored in the same profile database under
-named feature markers. The five new query/evidence tool schemas are visible in
-the tool list on stock installs, but automatic extraction, pre-answer evidence,
-assertion storage, query-view storage, and adaptive retrieval remain off. See
-[the operator upgrade and opt-in notes](docs/operator-guide.md#upgrade-from-v0200-or-v0210-rc2-to-v100-rc1)
-before enabling them.
+Take a backup of `lcm.db` before any update. There is no downgrade: migrations run when the
+database is opened, so the only way back from a bad upgrade is a copy taken before it.
+
+Coming from upstream `v1.0.0-rc.1` or from an earlier fork build, no manual migration is
+required — the core schema stays at version 5, and the fork's own additions (`lcm_node_meta`,
+recorded as the `better_hermeslcm_node_meta_v1` migration row) are additive. Upstream's
+assertion, query-view and adaptive-retrieval state is likewise created only once its opt-in is
+enabled. Their tool schemas appear in the tool list on a stock install and answer
+`status: disabled` until then. See
+[the operator upgrade notes](docs/operator-guide.md#upgrade-from-v0200-or-v0210-rc2-to-v100-rc1).
 
 ## Commands and tools
 
@@ -622,7 +655,7 @@ Most installs only need `plugins.enabled` and `context.engine: lcm`.
 |----------|---------|-----|
 | `LCM_CONTEXT_THRESHOLD` | `0.35` → curve → `0.80` at 1M | Fraction of the context window that triggers LCM compaction. Unset = window-weighted (fork); set = wins over the curve |
 | `LCM_FRESH_TAIL_COUNT` | `400` at every window | Upper bound on recent messages protected from compaction; the token cap below is what actually sizes the tail |
-| `LCM_FRESH_TAIL_MAX_TOKENS` | `0.15·W` at every window | Token cap for the protected fresh tail — what stays verbatim is the same share of the window at any size; always retains the newest message and complete assistant/tool-result groups |
+| `LCM_FRESH_TAIL_MAX_TOKENS` | `0.15·W` between 256k and 1M | Token cap for the protected fresh tail; always retains the newest message and complete assistant/tool-result groups. **Set it explicitly below 256k or above 1M** — see [Current limitations](#current-limitations) |
 | `LCM_INCREMENTAL_MAX_DEPTH` | `3` → `5` at 1M | Max DAG condensation depth (`-1` = unlimited, `0` = leaf only); enables hierarchical summarization |
 | `LCM_LEAF_CHUNK_TOKENS` | `20000` | Raw-backlog floor before leaf compaction (lowered to one chunk when the chunk is smaller); with dynamic chunking enabled, the base chunk target. The chunk size itself is `LCM_LEAF_CHUNK_FRACTION` — 4 % of the window at every anchor |
 | `LCM_DYNAMIC_LEAF_CHUNK_ENABLED` | `false` | Upstream's doubling chunk policy; enabling it keeps upstream's serial behaviour instead of the fork's curved chunking |
@@ -887,7 +920,10 @@ source value, not a wildcard. Legacy blank-source rows are treated as `unknown`.
 search query before result limiting. When a raw-message filter is active,
 `lcm_grep` returns raw rows only and reports `summary_results_omitted`.
 
-Tool responses are bounded so one retrieval call cannot flood the main context.
+A retrieval tool returns what its `limit` asked for. The fork removed the per-tool response
+character ceilings: the caller decides how much it wants, and a response too large for the
+prompt is the host's spillover problem, which the host already handles by writing it to a file.
+The two subsystem tools (`lcm_query_state`, `lcm_compute`) keep upstream's ceiling.
 
 ### Lossless raw recovery contract
 
@@ -1057,7 +1093,7 @@ store.py         SQLite message store and FTS
 dag.py           summary DAG and FTS
 config.py        env var defaults and overrides
 command.py       /lcm command handlers
-tools.py         lcm_grep, lcm_load_session, lcm_describe, lcm_expand, lcm_expand_query
+tools.py         all 15 lcm_* tool handlers
 schemas.py       tool schemas shown to the model
 tests/           standalone pytest coverage (tests/fork/ = fork tests, by step)
 
