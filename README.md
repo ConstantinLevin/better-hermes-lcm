@@ -312,21 +312,20 @@ ratio 0.40, tail 15 % of the window):
 Without LCM the session ends when the conversation reaches the window: **262,144** and
 **1,000,000** tokens. So the arithmetic says roughly **15×** at 256k and **287×** at 1M.
 
-**The number you should actually plan around is lower**, because of a limitation this fork has
-not fixed: the condensation budget is `0.40 × source` with no ceiling, so it grows with depth,
-and it is a request for *output* tokens. At 1M that is 32,768 tokens at depth 3, 52,429 at depth
-4 and 83,886 at depth 5. Most summarisers cannot emit that much in one response. This fork
-refuses a truncated generation rather than storing a chopped node, so the effect is not a
-corrupt index — condensation simply stops succeeding and the DAG stalls at whatever depth the
-model can still write. **Stalling at depth 3 gives ~48.6M tokens at 1M** (19 nodes × 2.56M),
-still ~49× the window. At 256k the deepest request is 8,589 tokens, comfortably within any
-model, so 256k reaches its cap.
+**One condensation request grows with depth.** The budget is `0.40 × source` with no ceiling: at
+1M it is 32,768 tokens at depth 3, 52,429 at depth 4 and 83,886 at depth 5. It reaches the model
+as the prompt's target and as `max_tokens` at twice that — a ceiling, not a demand, so a model
+that writes less simply writes less. A route that instead rejects a `max_tokens` above its own
+output limit fails, and if every route fails, condensation raises rather than storing a chopped
+node: the raw messages stay in context and nothing corrupt is published. Which routes do that is
+the operator's choice of summariser and gateway. At 256k the deepest request is 8,589 tokens, so
+it does not arise there.
 
-**What happens at the ceiling is degradation, not an ending.** When the frontier outgrows the
-prefix, assembly renders what fits and names what it left out; the omitted nodes stay in the DAG
-and stay reachable through `lcm_grep`, `lcm_describe` and `lcm_expand`. Nothing is lost — the
-*rendered* index becomes partial and the agent has to search for the rest instead of seeing it.
-Without LCM the session simply ends.
+**What happens at the ceiling.** Nothing is dropped from the prefix: both assembly caps
+(`max_assembly_tokens`, `reserve_tokens_floor`) default to 0, and with no cap every uncondensed
+node at every depth is rendered. Past the ceiling the prefix just keeps growing, until it and
+the protected tail no longer fit the window and the session ends there — the same ending as
+without LCM, 15× / 287× later.
 
 Two caveats on the table: it is arithmetic from the default settings, not a measurement, and it
 assumes every leaf is a full chunk and every condensation group is full. Real sessions produce

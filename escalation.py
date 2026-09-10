@@ -526,6 +526,20 @@ items; and every other topic touched, at least one clause each. Never write "var
 "and more" in place of an item."""
 
 
+# fork: better-hermeslcm — the fidelity contract (backlog A9). The coverage contract above says what
+# a summary must COVER; nothing said what it must not INVENT. A node that says "the migration
+# succeeded" where the source said "the migration was started" is intact, expandable and carries
+# full provenance — every marker in this fork passes it, and only the text is false. This is the one
+# loss no marker can catch, so it is stated in the prompt, at every depth and on the L2 retry.
+# Condensation summarises SUMMARY text, where smoothing a hedge into a result is likeliest.
+_FIDELITY_CONTRACT_GUIDANCE = """
+State only what the source states: do not infer, extrapolate, resolve an ambiguity, or fill a gap
+with a plausible detail. Keep hedges as hedges — "appears to", "planned to", "was going to" must not
+become "did" — and keep attempted, claimed and confirmed distinct. Name an unresolved thing as
+unresolved instead of picking an outcome. Do not merge two similar-but-different items into one, and
+do not replace several specifics with the category they share."""
+
+
 def _build_l1_prompt(
     text: str,
     token_budget: int,
@@ -554,6 +568,7 @@ def _build_l1_prompt(
     }
     guidance = depth_guidance.get(depth, depth_guidance[2])
     guidance += _INDEX_CONTRACT_GUIDANCE
+    guidance += _FIDELITY_CONTRACT_GUIDANCE
 
     focus_guidance = ""
     if focus_topic:
@@ -637,7 +652,7 @@ the source contains so they know whether to expand it. Cover, one bullet each, i
 terms: decisions and why; approaches rejected and why; constraints and preferences; files, paths,
 commands, identifiers, URLs, versions and values; errors and how they were resolved; what
 informative tool outputs contained; end state and open items; every other topic touched.
-Drop step-by-step process detail, never a topic. Exceed the maximum rather than omit an item.
+Drop step-by-step process detail, never a topic. Exceed the maximum rather than omit an item.{_FIDELITY_CONTRACT_GUIDANCE}
 End with: "Expand for details about: <one line per topic>".{focus_guidance}{custom_guidance}"""
     return build_untrusted_data_messages(
         operation="lcm_summary_l2",
