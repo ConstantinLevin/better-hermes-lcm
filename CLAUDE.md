@@ -49,7 +49,7 @@ ingest → store.py → reconcile.py → compaction.py (leaf + condensation)
        → tools.py (retrieval) → maintenance / lifecycle / backup
 ```
 
-**Every upstream file you touch must be recorded in [`docs/fork-touchpoints.md`](docs/fork-touchpoints.md)** with the hook, the reason, and how to re-apply it on a conflict. That file is the merge risk surface, not documentation garnish.
+**Every hook in an upstream file carries a `# fork: better-hermeslcm` marker, and the reason goes in the comment.** `grep` for the marker is the merge risk surface; `git diff $(cat .upstream-base)..HEAD` is the file list. There used to be a hand-maintained table of both, and by the time it was deleted a quarter of its rows described code that had moved. Write the note where it cannot drift from what it describes.
 
 ## Things that will bite you
 
@@ -57,7 +57,7 @@ ingest → store.py → reconcile.py → compaction.py (leaf + condensation)
 - **Never assume or mention which summariser model or gateway is configured.** That is the operator's choice; the plugin is provider-neutral and so is every comment and document in it.
 - **A receipt must never displace live content.** Markers are positionally neutral or they are budgeted; a receipt that pushes out the caller's newest message has caused loss to prevent loss. This has been a real regression more than once.
 - **A receipt is a claim that something was removed.** Do not emit one for a turn that held nothing — a false claim of removal is its own defect.
-- **Test edits:** fork tests go in `tests/fork/`. Upstream tests that pin behaviour the fork deliberately changed get **re-pointed and recorded** in `docs/fork-touchpoints.md` — never deleted silently.
+- **Test edits:** fork tests go in `tests/fork/`. An upstream test that pins behaviour the fork deliberately changed is re-pointed with a `# fork: better-hermeslcm` comment saying what it used to assert and why that changed — never deleted silently, and never recorded anywhere but in place.
 - **Edit files with the editor.** Do not patch by piping heredoc Python/sed scripts through the shell: the diff becomes unreadable and those scripts have corrupted source files here before.
 
 ## Do not
@@ -126,6 +126,5 @@ Both are written up in `docs/TASKS.md` §E, with the outstanding audits in §F:
 |---|---|
 | [`README.md`](README.md) | user-facing; "What the fork changes" is the upstream-vs-fork comparison |
 | [`FORK.md`](FORK.md) | maintenance contract: the two rules, the configured exceptions to no-loss, upgrade and claw-tracking procedures, the fork config reference |
-| [`docs/TASKS.md`](docs/TASKS.md) | the ledger. Pass history above, **"WHAT IS LEFT TO DO"** below — start there |
-| [`docs/fork-touchpoints.md`](docs/fork-touchpoints.md) | every upstream file touched, why, and how to re-apply on conflict — the merge risk surface |
+| [`docs/TASKS.md`](docs/TASKS.md) | the backlog: open work only, **"WHAT IS LEFT TO DO"** first |
 | `docs/claw-comparison/` | the lossless-claw analyses, the audit reports, and the audit prompts |

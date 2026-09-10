@@ -4156,7 +4156,12 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         return retain
 
     def _carry_over_candidate_nodes(self, session_id: str | None) -> list:
-        """fork: better-hermeslcm — nodes upstream would still have had for ``session_id``."""
+        """fork: better-hermeslcm — nodes upstream would still have had for ``session_id``.
+
+        Every "does this session have nodes?" test in carry-over selection goes through here; a
+        new ``get_session_nodes(...)`` truthiness check merged in from upstream must too, or it
+        reads as "has nodes" for a session whose nodes upstream's reset prune would have deleted.
+        """
         if not session_id:
             return []
         nodes = self._dag.get_session_nodes(session_id)

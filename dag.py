@@ -260,7 +260,12 @@ class SummaryDAG:
     # -- Write --------------------------------------------------------------
 
     def add_node(self, node: SummaryNode) -> int:
-        """Insert a summary node and return its node_id."""
+        """Insert a summary node and return its node_id.
+
+        fork: better-hermeslcm — every publication path in this fork uses ``add_node_with_meta``
+        instead. A node inserted here has no sidecar row, so assembly renders it without its
+        level tag and the index-block reader has nothing to answer for it.
+        """
         with self._db_lock:
             # fork: better-hermeslcm — the INSERT is inside the protection too. A statement that fails
             # (a schema trigger refusing the row, a cancellation) still leaves the transaction
@@ -408,7 +413,9 @@ class SummaryDAG:
                 f"DELETE FROM summary_nodes WHERE node_id IN ({id_placeholders})",
                 node_ids,
             )
-            NodeMetaStore.delete_many(conn, node_ids)  # fork: better-hermeslcm — sidecar cascade
+            # fork: better-hermeslcm — sidecar cascade. Any node-delete path upstream adds must
+            # cascade here too, or lcm_node_meta keeps rows for nodes that no longer exist.
+            NodeMetaStore.delete_many(conn, node_ids)
         return node_ids
 
     def _delete_nodes_batched(

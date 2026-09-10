@@ -517,6 +517,11 @@ def _scaled_cap(base: int, engine: Any = None) -> int:
     The cap sites live in helpers without an engine parameter, so the scale comes from the
     engine the current tool call was handed (_require_engine), else the engine bound to the
     active session (engine_registry); no engine -> upstream's cap.
+
+    On a merge: a response char cap upstream adds to a CORE retrieval tool is removed, not
+    wrapped here. `limit` is the caller's contract and an oversized response is the host's
+    spillover problem — that is why lcm_recent, lcm_inspect, lcm_grep, lcm_recall and
+    lcm_load_session have no response cap left. Only the subsystem tools below still scale one.
     """
     if engine is None:
         engine = getattr(_CURRENT_TOOL_ENGINE, "engine", None)

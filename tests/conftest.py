@@ -149,6 +149,9 @@ def _fork_mock_summary(prompt, max_tokens, model="", timeout=None):
 
 @_pytest.fixture(autouse=True)
 def _fork_mock_summariser(monkeypatch):
+    # fork: better-hermeslcm — autouse because upstream's compaction tests ship no summariser and
+    # relied on L3 deterministic truncation, which this fork removed. Drop this fixture and they
+    # fail with SummaryUnavailableError; the answer is this mock, never restoring L3.
     if _os.environ.get("LCM_TESTS_REAL_SUMMARISER") == "1":
         yield
         return

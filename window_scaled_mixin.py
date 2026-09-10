@@ -9,6 +9,10 @@ code, each a single call:
 * ``_set_context_length`` (both return paths) -> ``_resolve_window_scaled_settings()``
 * ``tools.py`` status dict         -> ``window_scaling_status()``
 
+On an upstream merge: a NEW upstream read of any field the curve owns (``ANCHORS_BY_NAME``) must
+be switched to ``self.effective_<name>``. It arrives without a textual conflict and silently
+un-curves that value.
+
 The threshold is special: upstream derives ``context_threshold`` in ``_runtime_context_threshold``
 and reports the source ``manual_or_default`` when nothing configured it. Only in that case does
 the curve replace it; every configured source (env, ``lcm.context_threshold``,
