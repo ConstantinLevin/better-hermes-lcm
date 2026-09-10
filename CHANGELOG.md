@@ -6,6 +6,16 @@ This repo also publishes GitHub Releases. This file is the repo-root release sur
 
 No additional changes yet.
 
+## v1.1.0-beta.2 - 2026-09-10
+
+`LCM_SUMMARY_REASONING_EFFORT` sets the reasoning effort for every summariser call (empty by
+default, which behaves exactly as `beta.1`). The host has accepted a per-call reasoning config
+all along and the plugin never passed one, so a reasoning summariser always ran at its route's
+default — and on this plugin the summary *is* the index, so that is the one knob that buys index
+quality directly. Also drops the `# fork:` marker from 578 comments; the reason for each hook
+stays, and `git diff $(cat .upstream-base)..HEAD` was always the exact answer to which lines are
+the fork's.
+
 ## v1.1.0-beta.1 - 2026-09-10
 
 First release of this fork, 122 commits on top of upstream `8d1b1e6`. Full notes in

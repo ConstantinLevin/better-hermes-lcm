@@ -403,7 +403,7 @@ Clone the plugin as a general user plugin, then **pin it** so `hermes plugins up
 replace it with upstream:
 
 ```bash
-git clone --branch v1.1.0-beta.1 --depth 1 \
+git clone --branch v1.1.0-beta.2 --depth 1 \
   https://github.com/ConstantinLevin/better-hermes-lcm ~/.hermes/plugins/hermes-lcm
 # pin: ~/.hermes/plugins/.install-metadata.json ->
 #   {"hermes-lcm": {"pinned": true, "revision": "<git -C ~/.hermes/plugins/hermes-lcm rev-parse HEAD>",
@@ -419,7 +419,7 @@ loads. Upstream's own install is the same shape against
 For a profile-specific install:
 
 ```bash
-git clone --branch v1.1.0-beta.1 --depth 1 \
+git clone --branch v1.1.0-beta.2 --depth 1 \
   https://github.com/ConstantinLevin/better-hermes-lcm \
   ~/.hermes/profiles/myprofile/plugins/hermes-lcm
 ```
@@ -480,7 +480,7 @@ Typical output:
 
 ```text
 Plugins (1):
-  ✓ hermes-lcm v1.1.0-beta.1 (15 tools)
+  ✓ hermes-lcm v1.1.0-beta.2 (15 tools)
 
 Provider Plugins:
   Context Engine: lcm
