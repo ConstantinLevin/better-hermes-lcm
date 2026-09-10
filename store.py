@@ -141,7 +141,15 @@ def message_envelope_fingerprint(msg: Dict[str, Any]) -> str:
         # changing only the call id, the tool name or the timestamp produced an identical
         # fingerprint and the edit was never archived (round-4 verify-4 #2).
         "tool_call_id": str(msg.get("tool_call_id") or ""),
-        "tool_name": str(msg.get("tool_name") or msg.get("name") or ""),
+        # fork: better-hermeslcm — a host that names a tool result with `name` rather than
+        # `tool_name` leaves the projected column empty, and `name` is not a projected key, so on
+        # a STORED row it sits inside the envelope. Reading only the top level made the incoming
+        # fingerprint carry the name and the stored one carry "", so an unchanged named tool
+        # result looked edited on every single turn, and after a real edit the archived revision
+        # could never match the incoming message, which blocked leaf publication outright.
+        "tool_name": str(
+            msg.get("tool_name") or msg.get("name") or envelope.get("name") or ""
+        ),
         # The stored row's "timestamp" column is the INGEST time, which an incoming message
         # never carries; the host's own time is "observed_at" there. Compare like for like, or
         # every stored row differs from every incoming one (round-4 verify-4 #2).
@@ -1715,18 +1723,54 @@ class MessageStore:
         return found
 
     def superseded_ids_for(self, session_id: str, store_ids: List[int]) -> Dict[int, int]:
-        """fork: better-hermeslcm — ``{revision row id: the row it supersedes}`` for these rows.
+        """fork: better-hermeslcm — ``{revision row id: the ORIGINAL row it descends from}``.
 
         A revision row is APPENDED at the end of the archive, so its id is not a chronological
         position. Treating it as one made the frontier jump forward and then back, skipping a
         row that was still active (round-4 verify-2 #3).
+
+        The walk follows the whole chain, not one edit. With two edits of the same message —
+        6 supersedes 5, 5 supersedes 1 — a single hop answered ``{6: 5}``, the frontier advanced
+        to 5, and row 1 was left behind it covered by no node at all: an unreachable row, which
+        is the one thing this fork exists to make impossible. ``revision_rows_for`` already
+        walks the same chain in the other direction; this is its mirror.
+
+        Every intermediate version is returned too (5 maps to 1 as well), so a caller that
+        publishes these ids as provenance names the whole chain rather than only its ends.
         """
         wanted = {int(value) for value in store_ids or []}
         if not wanted:
             return {}
+        direct: Dict[int, int] = {}
+        frontier = set(wanted)
+        seen: set = set()
+        for _hop in range(16):  # a bounded walk; chains are short in practice
+            fresh = {store_id for store_id in frontier if store_id not in seen}
+            if not fresh:
+                break
+            seen.update(fresh)
+            direct.update(self._direct_superseded_ids_for(session_id, sorted(fresh)))
+            frontier = {direct[store_id] for store_id in fresh if store_id in direct}
+
+        resolved: Dict[int, int] = {}
+        for store_id in direct:
+            original = store_id
+            walked: set = {store_id}
+            while original in direct:
+                nxt = direct[original]
+                if nxt in walked:  # a cycle can only come from a corrupt envelope
+                    break
+                walked.add(nxt)
+                original = nxt
+            if original != store_id:
+                resolved[store_id] = original
+        return resolved
+
+    def _direct_superseded_ids_for(self, session_id: str, store_ids: List[int]) -> Dict[int, int]:
+        """fork: better-hermeslcm — one hop: ``{row: the row it directly supersedes}``."""
         found: Dict[int, int] = {}
         batch = _SQLITE_MAX_BOUND_VARIABLES - 2
-        ordered = sorted(wanted)
+        ordered = sorted({int(value) for value in store_ids or []})
         for start in range(0, len(ordered), batch):
             chunk = ordered[start:start + batch]
             placeholders = ",".join("?" * len(chunk))

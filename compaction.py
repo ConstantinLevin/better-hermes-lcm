@@ -1191,6 +1191,13 @@ class CompactionMixin:
                 superseded_by_revision.get(store_id, store_id)
                 for store_id in consumed_store_ids
             })
+            # fork: better-hermeslcm — the INTERMEDIATE versions of a twice-edited message are
+            # neither consumed nor the chronological original, so unioning only those two left
+            # them in no leaf. The resolver walks the whole chain, so its keys and values
+            # together are every version of every row this leaf consumed.
+            revision_chain_store_ids = (
+                set(superseded_by_revision) | set(superseded_by_revision.values())
+            )
 
             # fork: better-hermeslcm — every row this leaf CONSUMES becomes a source of it. Upstream
             # published only the summarised lineage, so replies to host-injected placeholders
@@ -1229,6 +1236,7 @@ class CompactionMixin:
                 summarised_source_ids
                 | set(consumed_store_ids)
                 | set(chronological_store_ids)  # fork: the superseded originals too
+                | revision_chain_store_ids      # fork: and every version in between
                 | set(recovered_body_ids)
                 | set(revision_ids)
             )
