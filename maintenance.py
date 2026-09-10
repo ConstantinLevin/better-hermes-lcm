@@ -55,7 +55,7 @@ def _prepare_private_backup_directory(path: Path) -> None:
     finally:
         os.close(fd)
 
-# fork: better-hermes-lcm — backup helpers. A backup is the fork's last line of defence against loss,
+# backup helpers. A backup is the fork's last line of defence against loss,
 # so it may never overwrite another backup, never share a scratch file with a concurrent
 # writer, and never report success for bytes that are still only in the page cache
 # (audit p05 MT01 / MT02 / MT03).
@@ -118,7 +118,7 @@ def _fsync_backup(path: Path) -> None:
     try:
         os.fsync(directory_fd)
     except OSError as exc:
-        # fork: better-hermes-lcm — "this platform cannot fsync a directory" and "the disk refused the
+        # "this platform cannot fsync a directory" and "the disk refused the
         # write" were both swallowed, so a backup whose directory entry never reached the disk
         # was reported as a durable one (round-2 verify-4 #37). Only the former is tolerated.
         if exc.errno not in _UNSUPPORTED_FSYNC_ERRNOS:
@@ -134,7 +134,7 @@ def flush_engine_connections(engine) -> None:
     ``rotate_backup_database`` (rolling backup) so the connection-flush
     contract stays in one place.
     """
-    # fork: better-hermes-lcm — a flush must never commit ANOTHER operation's unfinished transaction.
+    # a flush must never commit ANOTHER operation's unfinished transaction.
     # Calling this between a node INSERT and its metadata write committed the node without its
     # sidecar, and the publisher's rollback could no longer undo it (round-3 verify-4 #2). Both
     # stores expose their write locks; take them, so a publication in flight finishes first.
@@ -180,7 +180,7 @@ def backup_database(engine) -> dict[str, Any]:
     try:
         _prepare_private_backup_directory(backup_dir)
         flush_engine_connections(engine)
-        # fork: exclusive creation — a second backup in the same second gets its own file
+        # exclusive creation — a second backup in the same second gets its own file
         backup_path = _create_unique_backup_file(backup_dir, db_path.stem, timestamp)
         _prepare_private_sqlite_file(backup_path)
 
@@ -190,9 +190,9 @@ def backup_database(engine) -> dict[str, Any]:
         finally:
             dest.close()
         _restrict_existing_sqlite_artifacts(backup_path)
-        _fsync_backup(backup_path)  # fork: durable before we report success
+        _fsync_backup(backup_path)  # durable before we report success
     except (OSError, sqlite3.Error) as exc:
-        # fork: better-hermes-lcm — an incomplete snapshot must not be left behind looking like one.
+        # an incomplete snapshot must not be left behind looking like one.
         try:
             if backup_path is not None and backup_path.exists():
                 backup_path.unlink()
@@ -237,7 +237,7 @@ def rotate_backup_database(engine) -> dict[str, Any]:
         _restrict_existing_sqlite_artifacts(backup_path)
         flush_engine_connections(engine)
 
-        # fork: better-hermes-lcm — a per-call scratch file. Every rotate used to write
+        # a per-call scratch file. Every rotate used to write
         # "<slot>.tmp", so two rotates running together wrote one file: the loser's snapshot
         # was replaced mid-write and the winner renamed a database another writer was still
         # filling in (audit p05 MT02).
@@ -253,12 +253,12 @@ def rotate_backup_database(engine) -> dict[str, Any]:
         finally:
             dest.close()
         _restrict_existing_sqlite_artifacts(tmp_path)
-        _fsync_backup(tmp_path)  # fork: the bytes are on disk before the rename publishes them
+        _fsync_backup(tmp_path)  # the bytes are on disk before the rename publishes them
         # Atomic replace so the rolling slot is never half-written.
         tmp_path.replace(backup_path)
         tmp_path = None
         _restrict_existing_sqlite_artifacts(backup_path)
-        _fsync_backup(backup_path)  # fork: and the rename itself is durable
+        _fsync_backup(backup_path)  # and the rename itself is durable
     except (OSError, sqlite3.Error) as exc:
         # Best-effort cleanup of the tmp file if something failed midway.
         try:

@@ -158,7 +158,7 @@ def test_rotate_marker_records_marker_level(tmp_path):
         e.shutdown()
 
 
-# fork: better-hermes-lcm — the suite runs with an isolated HOME (audit E, E07), so this one test,
+# the suite runs with an isolated HOME (audit E, E07), so this one test,
 # which deliberately reads a COPY of the live database to prove bootstrap compatibility with a
 # pre-existing file, asks conftest for the real home instead of expanding "~".
 _LIVE_DB = Path(os.environ.get("LCM_TESTS_ORIGINAL_HOME", "~")).expanduser() / ".hermes" / "lcm.db"

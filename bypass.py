@@ -10,7 +10,7 @@ unchanged.
 
 import importlib
 import json
-import inspect  # fork: better-hermes-lcm
+import inspect
 import logging
 from typing import Any, Dict, List, Optional
 
@@ -18,7 +18,7 @@ from .message_analysis import _assistant_tool_call_ids
 from .message_content import normalize_content_value
 from .session_patterns import build_session_match_keys, matches_session_pattern
 from .tokens import count_messages_tokens
-from . import marked_loss  # fork: better-hermes-lcm
+from . import marked_loss
 
 logger = logging.getLogger(__name__)
 
@@ -155,7 +155,7 @@ class BypassMixin:
             # fallback deliberately conservative rather than failing open to an
             # unbounded ignored/stateless transcript.
             #
-            # fork: better-hermes-lcm — drop only the kwargs this host cannot take. Upstream fell back
+            # drop only the kwargs this host cannot take. Upstream fell back
             # to a fixed five-argument call, which silently discarded the operator's summary
             # model, provider, credentials and context length: one unsupported keyword sent
             # bypassed summarisation to a different route than the one that was configured
@@ -189,7 +189,7 @@ class BypassMixin:
 
     @staticmethod
     def _constructor_supported_kwargs(factory: Any, kwargs: Dict[str, Any]) -> Dict[str, Any]:
-        """fork: better-hermes-lcm — the subset of ``kwargs`` this constructor actually accepts.
+        """the subset of ``kwargs`` this constructor actually accepts.
 
         Falls back to the minimum every known host supports when the signature cannot be
         read, so an unreadable signature degrades the same way the old fixed call did.
@@ -290,7 +290,7 @@ class BypassMixin:
 
     @staticmethod
     def _truncate_bypass_content_value(content: Any, char_budget: int, *, suffix: str = "") -> Any:
-        """fork: better-hermes-lcm — the cut marker is kept even at a zero budget (audit p05 BY01).
+        """the cut marker is kept even at a zero budget (audit p05 BY01).
 
         Upstream appended the suffix only while ``char_budget > 0``, so the one case where the
         whole text disappeared was also the one case that left no trace of it.
@@ -351,7 +351,7 @@ class BypassMixin:
             for idx, msg in enumerate(compacted):
                 if idx == 0:
                     continue
-                # fork: better-hermes-lcm — never remove the receipt that says messages were removed
+                # never remove the receipt that says messages were removed
                 if marked_loss.is_bypass_omission_marker(msg):
                     continue
                 if msg.get("role") != "assistant" or not msg.get("tool_calls"):
@@ -374,7 +374,7 @@ class BypassMixin:
                 ):
                     remove_index = 0
                 if marked_loss.is_bypass_omission_marker(compacted[remove_index]):
-                    # fork: the receipt is not a removal candidate; take the next message
+                    # the receipt is not a removal candidate; take the next message
                     following = next(
                         (
                             index
@@ -387,7 +387,7 @@ class BypassMixin:
                         break
                     remove_index = following
                 if remove_index >= len(compacted) - 1:
-                    # fork: better-hermes-lcm — protecting the receipt must never cost the NEWEST
+                    # protecting the receipt must never cost the NEWEST
                     # message: skipping the receipt at index 1 made the request the agent has
                     # to answer the next removal candidate (verify-2 regression #2). Stop
                     # deleting whole messages here and let the character-trim stages below
@@ -421,17 +421,17 @@ class BypassMixin:
             newest_index = len(compacted) - 1
             for index, msg in enumerate(compacted):
                 if marked_loss.is_bypass_omission_marker(msg):
-                    next_messages.append(msg)  # fork: the receipt is never shortened
+                    next_messages.append(msg)  # the receipt is never shortened
                     continue
                 if index == newest_index:
-                    # fork: better-hermes-lcm — the newest message is the request the agent has to
+                    # the newest message is the request the agent has to
                     # answer; the ordered last-resort stage below shrinks it only after
                     # everything else, including the receipt, has already given way.
                     next_messages.append(msg)
                     continue
                 next_msg = dict(msg)
                 content = next_msg.get("content")
-                # fork: better-hermes-lcm — a cut carries a marker (marked_loss.BYPASS_TRIM_SUFFIX)
+                # a cut carries a marker (marked_loss.BYPASS_TRIM_SUFFIX)
                 next_msg["content"] = self._truncate_bypass_content_value(
                     content, char_budget, suffix=marked_loss.BYPASS_TRIM_SUFFIX
                 )
@@ -446,7 +446,7 @@ class BypassMixin:
             ratio = target_tokens / max(1, token_count)
             char_budget = max(0, min(char_budget - 1, int(char_budget * max(0.25, ratio * 0.8))))
 
-        # fork: better-hermes-lcm — drop from the front, but never the receipt and never the newest
+        # drop from the front, but never the receipt and never the newest
         # message. Upstream dropped whatever was first; keeping the receipt at the front then
         # made the live request the thing that went (verify-2 regression #2). When only the
         # receipt and the newest message are left, the character-trim stage below shrinks them
@@ -469,7 +469,7 @@ class BypassMixin:
                 break
             compacted = sanitized
 
-        # fork: better-hermes-lcm — an ORDER of last resorts, because trimming every message together
+        # an ORDER of last resorts, because trimming every message together
         # cut the live request to a bare marker while older context was still present
         # (verify-2 regression #2):
         #   1. shrink the older messages,
@@ -535,7 +535,7 @@ class BypassMixin:
             return self._trim_bypass_compacted_to_cap(messages, target_tokens)
         head_count = max(1, min(self.protect_first_n, len(messages)))
         tail_count = max(1, min(self.protect_last_n, len(messages) - head_count))
-        # fork: better-hermes-lcm — the receipt says HOW MUCH went. Upstream's marker named neither the
+        # the receipt says HOW MUCH went. Upstream's marker named neither the
         # number of messages nor their size, so a bypassed session could lose most of its
         # history behind a sentence that read like boilerplate (audit p05 BY01).
         dropped = messages[head_count:len(messages) - tail_count]
@@ -546,7 +546,7 @@ class BypassMixin:
         }
         compacted = list(messages[:head_count]) + [marker] + list(messages[-tail_count:])
         trimmed = self._trim_bypass_compacted_to_cap(compacted, target_tokens)
-        # fork: better-hermes-lcm — the cap loop above may remove more messages after the receipt was
+        # the cap loop above may remove more messages after the receipt was
         # written, so the counts are recomputed against what actually SURVIVED. Upstream's
         # receipt (and the fork's first version of it) claimed "8 messages dropped" while nine
         # had gone (verify-4 #17).
@@ -554,7 +554,7 @@ class BypassMixin:
 
     @staticmethod
     def _bypass_envelope_chars(message: Dict[str, Any]) -> int:
-        """fork: better-hermes-lcm — the size of everything a dropped message carried.
+        """the size of everything a dropped message carried.
 
         A dropped assistant turn's tool CALLS are part of what was removed; counting content
         alone reported "~2 chars" for a message holding 10,000 characters of arguments
@@ -574,7 +574,7 @@ class BypassMixin:
         original: List[Dict[str, Any]],
         trimmed: List[Dict[str, Any]],
     ) -> List[Dict[str, Any]]:
-        """fork: better-hermes-lcm — restate the receipt's counts from the FINAL result.
+        """restate the receipt's counts from the FINAL result.
 
         Counted in aggregate rather than by object identity: the surviving messages are
         trimmed COPIES, and the characters the trim removed from them are gone too.
@@ -596,7 +596,7 @@ class BypassMixin:
         ]
         dropped = original_messages[:max(0, len(original_messages) - len(surviving))]
         dropped_chars = max(0, _chars(original_messages) - _chars(surviving))
-        # fork: better-hermes-lcm — the receipt is CUMULATIVE. Every surviving receipt was rewritten
+        # the receipt is CUMULATIVE. Every surviving receipt was rewritten
         # with counts from the latest reduction alone, so a second bypass compaction erased
         # the record of the first: two receipts both claimed 6 messages / 3,046 characters
         # where 10 / 5,100 had already gone (round-5 verify-6 #10). Earlier receipts state
@@ -708,7 +708,7 @@ class BypassMixin:
                 self._last_compress_aborted = False
             return compacted
         self._mirror_host_fallback_state(compressor)
-        # fork: better-hermes-lcm — an abort is a decision to PRESERVE, not a failed attempt. Upstream
+        # an abort is a decision to PRESERVE, not a failed attempt. Upstream
         # counted every native return as at least one compression and, when the unchanged
         # result was still over target, ran the deterministic trim over it and cleared the
         # abort flag — so the host's explicit "do not compress this" became a destructive
@@ -724,7 +724,7 @@ class BypassMixin:
         compacted = self._sanitize_active_context_messages(compacted)
         if target_tokens is not None and count_messages_tokens(compacted) > target_tokens:
             if native_aborted and not native_changed:
-                # fork: better-hermes-lcm — say plainly that the host's preservation decision is being
+                # say plainly that the host's preservation decision is being
                 # overridden. The assembly cap is a hard provider bound for a session LCM does
                 # not store, so the deterministic trim still has to run, but upstream counted
                 # the untouched native return as a compression first and reported the whole

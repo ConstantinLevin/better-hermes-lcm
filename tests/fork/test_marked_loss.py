@@ -893,7 +893,7 @@ def test_recent_reports_an_unscannable_window_instead_of_an_empty_one(tmp_path, 
         payload = json.loads(lcm_tools.lcm_recent({"period": "today"}, engine=e))
         assert payload["complete"] is False and "database is locked" in payload["incomplete_reason"]
 
-        # fork: the helper now returns (sections, total_matching)
+        # the helper now returns (sections, total_matching)
         monkeypatch.setattr(lcm_tools, "_recent_leaf_sections", lambda *a, **k: ([], 0))
         payload = json.loads(lcm_tools.lcm_recent({"period": "today"}, engine=e))
         assert payload["complete"] is True and "incomplete_reason" not in payload

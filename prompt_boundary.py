@@ -57,7 +57,7 @@ def _fit_single_source_to_serialized_budget(
 ) -> list[dict[str, str]]:
     """Serialize one source WITHOUT removing any of it.
 
-    fork: better-hermes-lcm — upstream compared the serialized envelope against the caller's
+    upstream compared the serialized envelope against the caller's
     source-token allowance and, when JSON escaping pushed it over, replaced the middle of the
     source with a marker. The allowance escalation passes is the source's OWN token count, so
     an escape-heavy chunk lost its middle — a decision could vanish before the summariser ever

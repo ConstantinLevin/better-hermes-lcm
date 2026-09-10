@@ -406,7 +406,7 @@ def test_update_model_updates_runtime_metadata_and_context_window(engine):
     assert engine.provider == "opencode-go"
     assert engine.api_mode == "anthropic_messages"
     assert engine.context_length == 1_000_000
-    assert engine.threshold_tokens == int(1_000_000 * engine.context_threshold)  # fork: resolved (curved) threshold
+    assert engine.threshold_tokens == int(1_000_000 * engine.context_threshold)  # resolved (curved) threshold
 
 
 def test_codex_gpt55_uses_route_cap_and_hermes_autoraise_threshold(tmp_path):
@@ -620,7 +620,7 @@ def test_non_codex_gpt55_keeps_host_context_window(engine):
     assert engine.raw_context_length == 400_000
     assert engine.context_length == 400_000
     assert engine.effective_context_length_cap is None
-    assert engine.threshold_tokens == int(400_000 * engine.context_threshold)  # fork: resolved (curved) threshold
+    assert engine.threshold_tokens == int(400_000 * engine.context_threshold)  # resolved (curved) threshold
 
 
 @pytest.mark.parametrize(
@@ -695,7 +695,7 @@ def test_session_start_does_not_overwrite_update_model_context_length_with_stale
 
     assert engine.model == "deepseek-v4-flash"
     assert engine.context_length == 1_000_000
-    assert engine.threshold_tokens == int(1_000_000 * engine.context_threshold)  # fork: resolved (curved) threshold
+    assert engine.threshold_tokens == int(1_000_000 * engine.context_threshold)  # resolved (curved) threshold
 
 
 def test_session_start_accepts_raw_context_length_for_capped_codex_runtime(tmp_path, caplog):
@@ -820,7 +820,7 @@ def test_session_start_does_not_overwrite_update_model_with_stale_runtime_identi
     assert engine.model == "deepseek-v4-flash"
     assert engine.provider == "opencode-go"
     assert engine.context_length == 1_000_000
-    assert engine.threshold_tokens == int(1_000_000 * engine.context_threshold)  # fork: resolved (curved) threshold
+    assert engine.threshold_tokens == int(1_000_000 * engine.context_threshold)  # resolved (curved) threshold
 
 
 def test_session_start_does_not_overwrite_update_model_identity_when_context_length_matches(engine):
@@ -851,7 +851,7 @@ def test_session_start_does_not_overwrite_update_model_identity_when_context_len
     assert engine.provider == "new-provider"
     assert engine.api_mode == "chat_completions"
     assert engine.context_length == 204_800
-    assert engine.threshold_tokens == int(204_800 * engine.context_threshold)  # fork: resolved (curved) threshold
+    assert engine.threshold_tokens == int(204_800 * engine.context_threshold)  # resolved (curved) threshold
 
 
 def test_session_start_does_not_clear_or_repopulate_update_model_identity_when_optional_fields_are_empty(engine):
@@ -920,7 +920,7 @@ def test_session_start_can_initialize_context_length_without_update_model(engine
 
     assert engine.model == "minimax-m2.7"
     assert engine.context_length == 204_800
-    assert engine.threshold_tokens == int(204_800 * engine.context_threshold)  # fork: resolved (curved) threshold
+    assert engine.threshold_tokens == int(204_800 * engine.context_threshold)  # resolved (curved) threshold
 
 
 def test_session_start_clears_previous_session_context_window_when_new_window_is_missing(engine):
@@ -970,7 +970,7 @@ def test_missing_session_start_context_length_does_not_clear_authoritative_updat
     assert engine.model == "resolver-window-model"
     assert engine.provider == "resolver-provider"
     assert engine.context_length == 1_000_000
-    assert engine.threshold_tokens == int(1_000_000 * engine.context_threshold)  # fork: resolved (curved) threshold
+    assert engine.threshold_tokens == int(1_000_000 * engine.context_threshold)  # resolved (curved) threshold
     assert engine._context_length_source == "update_model"
 
 
@@ -1002,7 +1002,7 @@ def test_missing_session_start_context_length_preserves_update_model_window_with
     assert engine.provider == "resolver-provider"
     assert engine.api_mode == "chat_completions"
     assert engine.context_length == 1_000_000
-    assert engine.threshold_tokens == int(1_000_000 * engine.context_threshold)  # fork: resolved (curved) threshold
+    assert engine.threshold_tokens == int(1_000_000 * engine.context_threshold)  # resolved (curved) threshold
     assert engine._context_length_source == "update_model"
 
 
@@ -1126,7 +1126,7 @@ def test_positive_session_start_context_length_replaces_consumed_update_model_wi
     assert engine.model == "session-only-model"
     assert engine.provider == "session-provider"
     assert engine.context_length == 204_800
-    assert engine.threshold_tokens == int(204_800 * engine.context_threshold)  # fork: resolved (curved) threshold
+    assert engine.threshold_tokens == int(204_800 * engine.context_threshold)  # resolved (curved) threshold
     assert engine._context_length_source == "session_start"
 
 
@@ -1620,7 +1620,7 @@ class TestEscalationStripReasoning:
             assert envelope["operation"] == "lcm_summary_l1"
             bounded_source = envelope["sources"][0]
             original_source = adversarial + "\n\n---\n\n" + second_summary
-            # fork: better-hermes-lcm — the envelope carries the source WHOLE (audit p05 PB01)
+            # the envelope carries the source WHOLE (audit p05 PB01)
             assert bounded_source["content"] == original_source
             assert "content_truncated" not in bounded_source
             assert session_id not in messages[1]["content"]
@@ -8199,7 +8199,7 @@ class TestMessageFiltering:
         dependent_ids = [row["store_id"] for row in rows if "dependent assistant reply" in row["content"]]
         nodes = engine._dag.get_session_nodes("user-123")
         assert dependent_ids
-        # fork: better-hermes-lcm — the reply stays out of the summariser input and out of active
+        # the reply stays out of the summariser input and out of active
         # context, but a row this leaf CONSUMED must remain reachable from it: it is a
         # source of the node and is named there as not summarised (audit p05 CP01).
         assert any(dependent_ids[0] in node.source_ids for node in nodes)
@@ -8269,7 +8269,7 @@ class TestMessageFiltering:
         dependent_ids = [row["store_id"] for row in rows if "trailing dependent assistant reply" in row["content"]]
         nodes = engine._dag.get_session_nodes("user-123")
         assert dependent_ids
-        # fork: better-hermes-lcm — the reply stays out of the summariser input and out of active
+        # the reply stays out of the summariser input and out of active
         # context, but a row this leaf CONSUMED must remain reachable from it: it is a
         # source of the node and is named there as not summarised (audit p05 CP01).
         assert any(dependent_ids[0] in node.source_ids for node in nodes)
@@ -8799,7 +8799,7 @@ class TestMessageFiltering:
         ]
         nodes = engine._dag.get_session_nodes("user-123")
         assert dependent_ids
-        # fork: better-hermes-lcm — the reply stays out of the summariser input and out of active
+        # the reply stays out of the summariser input and out of active
         # context, but a row this leaf CONSUMED must remain reachable from it: it is a
         # source of the node and is named there as not summarised (audit p05 CP01).
         assert any(dependent_ids[0] in node.source_ids for node in nodes)
@@ -10166,7 +10166,7 @@ class TestEngineCompress:
 
         assert "keep this real user content" in serialized
         assert "[ASSISTANT]: keep this real assistant content" in serialized
-        # fork: better-hermes-lcm — the noise turns are still kept OUT of the summariser's input, but
+        # the noise turns are still kept OUT of the summariser's input, but
         # the removal is by wording, not by a trusted synthetic-origin signal, so each one
         # leaves a one-line receipt instead of disappearing (round-4 verify-4 #8).
         assert "[ASSISTANT]: ACK" not in serialized
@@ -10533,7 +10533,7 @@ class TestEngineCompress:
         serialized = engine._serialize_messages(messages)
 
         assert "I can still explain the plan" in serialized
-        # fork: better-hermes-lcm — an unmatched call is serialized and marked, not dropped
+        # an unmatched call is serialized and marked, not dropped
         assert "terminal(" in serialized
         assert "noisy-orphan" in serialized
         assert "[no tool result in this chunk]" in serialized
@@ -10565,7 +10565,7 @@ class TestEngineCompress:
         assert "read_file(" in serialized
         assert "README says hello" in serialized
         assert "standalone legacy payload" in serialized
-        # fork: better-hermes-lcm — the unmatched call stays, marked; the matched one is unmarked
+        # the unmatched call stays, marked; the matched one is unmarked
         assert "stale orphan args" in serialized
         assert 'terminal({"command": "stale orphan args"}) [no tool result in this chunk]' in serialized
         assert 'read_file({"path": "README.md"}) [no' not in serialized
@@ -10597,7 +10597,7 @@ class TestEngineCompress:
         result = engine.compress(messages)
 
         assert len(result) == len(messages)
-        # fork: better-hermes-lcm — the strip leaves its receipt on the turn it cut
+        # the strip leaves its receipt on the turn it cut
         assert result[-1]["content"] == f"Visible answer\n{INTERNAL_REPLAY_MARKER}"
         assert engine._last_compression_status == "sanitized"
         assert engine._last_compression_noop_reason == ""
@@ -11540,7 +11540,7 @@ class TestEngineCompress:
             token_pairs.append((last_pressure_tokens, count_messages_tokens(candidate_raw)))
             return candidate_raw[:1]
 
-        # fork: better-hermes-lcm — the leaf loop now has a wall clock at EVERY window (it chunks at
+        # the leaf loop now has a wall clock at EVERY window (it chunks at
         # every window), so the deadline reaches the summariser here too.
         def fake_summary(chunk, focus_topic=None, deadline=None):
             return chunk, count_messages_tokens(chunk), "Window summary.\nExpand for details about: current window", 1, 0
@@ -12014,7 +12014,7 @@ class TestEngineCompress:
         engine.compress(messages, current_tokens=900)
 
         depth1 = engine._dag.get_session_nodes("test-session", depth=1)
-        # fork: better-hermes-lcm — this test is about the SUPPRESSION being bypassed, not about how
+        # this test is about the SUPPRESSION being bypassed, not about how
         # many groups one call may publish. Upstream condenses one group per call because it
         # produces one leaf per call; this fork chunks at every window, so `condense_group_cap`
         # absorbs one compaction's worth of leaves and more than one group may land here.
@@ -12313,7 +12313,7 @@ class TestSessionRetainDepth:
             ))
         assert len(engine._dag.get_session_nodes("test-session")) == 3
         engine.on_session_reset()
-        # fork: better-hermes-lcm — nodes are never deleted; retain 0 just carries nothing
+        # nodes are never deleted; retain 0 just carries nothing
         assert len(engine._dag.get_session_nodes("test-session")) == 3
         assert engine.carry_over_new_session_context("test-session", "next-session") == 0
         assert engine._dag.get_session_nodes("next-session") == []
@@ -12331,7 +12331,7 @@ class TestSessionRetainDepth:
                 source_type="messages", created_at=time.time(),
             ))
         engine.on_session_reset()
-        # fork: better-hermes-lcm — nothing deleted; d2+ carry over, d0/d1 stay with the old session
+        # nothing deleted; d2+ carry over, d0/d1 stay with the old session
         remaining = engine._dag.get_session_nodes("test-session")
         assert len(remaining) == 4
         assert engine.carry_over_new_session_context("test-session", "next-session") == 2
@@ -12369,7 +12369,7 @@ class TestSessionRetainDepth:
         moved = engine.carry_over_new_session_context("old-session", "new-session")
 
         assert moved == 2
-        # fork: better-hermes-lcm — the d0/d1 nodes stay with the old session instead of being deleted
+        # the d0/d1 nodes stay with the old session instead of being deleted
         assert sorted(n.depth for n in engine._dag.get_session_nodes("old-session")) == [0, 1]
         new_nodes = engine._dag.get_session_nodes("new-session")
         assert len(new_nodes) == 2
@@ -12392,7 +12392,7 @@ class TestSessionRetainDepth:
             created_at=time.time(),
         ))
 
-        # fork: better-hermes-lcm — carry-over is OFF by default now (new means new), so a test of
+        # carry-over is OFF by default now (new means new), so a test of
         # the carry-over mechanism has to ask for it rather than inherit it from the default.
         engine._config.new_session_retain_depth = 2
 
@@ -12619,7 +12619,7 @@ class TestSessionRollover:
         assert engine._session_id == "new-session"
         assert engine._session_platform == "cli"
         assert engine._store.get_session_count("old-session") == 3
-        # fork: better-hermes-lcm — d0/d1 stay with the old session instead of being deleted
+        # d0/d1 stay with the old session instead of being deleted
         assert sorted(n.depth for n in engine._dag.get_session_nodes("old-session")) == [0, 1]
         new_nodes = engine._dag.get_session_nodes("new-session")
         assert len(new_nodes) == 2
@@ -12661,7 +12661,7 @@ class TestSessionRollover:
         s3_nodes = engine._dag.get_session_nodes("s3")
         assert len(s3_nodes) == 3
         assert sorted(node.summary for node in s3_nodes) == ["fresh d2", "seed d2", "seed d3"]
-        # fork: better-hermes-lcm — the shallow node stays with s2 instead of being deleted
+        # the shallow node stays with s2 instead of being deleted
         assert [node.summary for node in engine._dag.get_session_nodes("s2")] == ["fresh d0"]
         assert engine._session_id == "s3"
 
@@ -12724,7 +12724,7 @@ class TestSessionRollover:
                 "from_current_session": True,
             }
         ]
-        # fork: better-hermes-lcm — the shallow node is kept with the old session, out of current scope
+        # the shallow node is kept with the old session, out of current scope
         pruned_node = engine._dag.get_node(pruned_node_id)
         assert pruned_node is not None and pruned_node.session_id == "old-retrieval"
         assert engine._store.get_session_count("old-retrieval") == 1
@@ -13400,7 +13400,7 @@ class TestSessionRollover:
         )
         engine.update_model("foreground-model", 200000)
         assert engine.context_length == 200000
-        assert engine.threshold_tokens == int(200000 * engine.context_threshold)  # fork: resolved (curved) threshold
+        assert engine.threshold_tokens == int(200000 * engine.context_threshold)  # resolved (curved) threshold
 
         HostAgentFrame(
             session_id="background-review-session",
@@ -13408,7 +13408,7 @@ class TestSessionRollover:
         ).update_context_engine(engine)
 
         assert engine.context_length == 200000
-        assert engine.threshold_tokens == int(200000 * engine.context_threshold)  # fork: resolved (curved) threshold
+        assert engine.threshold_tokens == int(200000 * engine.context_threshold)  # resolved (curved) threshold
 
     def test_state_db_only_child_session_can_rebind_as_foreground_branch(self, tmp_path):
         hermes_home = tmp_path / "hermes-home"
@@ -15875,7 +15875,7 @@ class TestSessionRollover:
         assert not engine._thread_context_has_auxiliary_session("foreground-branch-session")
         branch.update_model(engine, 300000)
         assert engine.context_length == 300000
-        assert engine.threshold_tokens == int(300000 * engine.context_threshold)  # fork: resolved (curved) threshold
+        assert engine.threshold_tokens == int(300000 * engine.context_threshold)  # resolved (curved) threshold
         branch.should_compress_preflight(engine, [
             {"role": "user", "content": "foreground branch must persist"},
         ])
@@ -20885,7 +20885,7 @@ class TestAssemblyGuardrails:
         config = LCMConfig(
             fresh_tail_count=10,
             database_path=str(tmp_path / "lcm_guardrail_summary.db"),
-            max_assembly_tokens=252,  # fork: better-hermes-lcm — empty-hint fallback text (+21 chars per node)
+            max_assembly_tokens=252,  # empty-hint fallback text (+21 chars per node)
         )
         instance = LCMEngine(config=config)
         instance._session_id = "guardrail-session"
@@ -21222,7 +21222,7 @@ class TestAssemblyGuardrails:
 
         result = instance.compress(messages, current_tokens=110)
 
-        # fork: better-hermes-lcm — the assistant turn really was dropped, so the prefix carries the
+        # the assistant turn really was dropped, so the prefix carries the
         # minimal receipt saying so; upstream returned the anchor and the tail in silence
         # (round-3 verify-4 #6).
         from hermes_lcm import marked_loss
@@ -22251,7 +22251,7 @@ class TestAssemblyToolPairGuardrail:
         self._assert_provider_tool_sequence_valid(result)
         assert result[1]["role"] == "tool"
         assert result[1]["tool_call_id"] == "call_late"
-        # fork: better-hermes-lcm — the stub says what is true, not that a summary above covers it, and
+        # the stub says what is true, not that a summary above covers it, and
         # the late result itself is named rather than dropped in silence (verify-4 #10). Here
         # the result IS in this window, just not replayable at this position: claiming it was
         # archived (or never received) would both be false (round-2 verify-4 #19).
@@ -22295,7 +22295,7 @@ class TestAssemblyToolPairGuardrail:
         self._assert_provider_tool_sequence_valid(result)
 
     def test_sanitize_tool_pairs_reorders_parallel_results_instead_of_dropping_them(self, tmp_path):
-        """fork: better-hermes-lcm — upstream kept the first result and replaced every later
+        """upstream kept the first result and replaced every later
         out-of-order one with an "earlier conversation" stub, so a real tool result the agent
         had already received was deleted to satisfy an ORDERING constraint. The results are
         complete and identifiable by call id, so the fork reorders them to match the call
@@ -23681,11 +23681,11 @@ class TestEngineTools:
             "total_sources": 5,
             "next_source_offset": 3,
             "next_content_offset": 0,
-            # fork: better-hermes-lcm — an assistant turn's tool calls are paged too (audit p02 T04),
+            # an assistant turn's tool calls are paged too (audit p02 T04),
             # and an expansion says whether every source it names could be read (verify-4 #15)
             "tool_calls_offset": 0,
             "next_tool_calls_offset": 0,
-            # fork: better-hermes-lcm — the envelope has a cursor of its own and travels with the page
+            # the envelope has a cursor of its own and travels with the page
             # (round-5 verify-6 #6)
             "envelope_offset": 0,
             "next_envelope_offset": 0,
@@ -27399,7 +27399,7 @@ class TestHandleLoadSession:
         assert result["messages"][0]["next_content_offset"] == 3
 
     def test_load_session_honours_max_content_chars_as_given(self, engine):
-        # fork: better-hermes-lcm — this asserted the request was clamped to a hard 20,000 and
+        # this asserted the request was clamped to a hard 20,000 and
         # reported as max_content_chars_clamped_from. The clamp is gone: the argument is the
         # caller's contract, and the plugin overriding how much the agent asked for is the
         # plugin deciding for the agent.

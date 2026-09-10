@@ -62,9 +62,10 @@ retrieval tools → operator, backup and maintenance.
 > hook no longer attaches to, an upstream fix that duplicates ours, a default the curve claims
 > to mirror. None of that conflicts, and none of it turns the suite red: our tests exercise OUR
 > behaviour, so they pass while upstream's new behaviour goes unexercised. Read the whole diff,
-> intersect the upstream-changed symbols with the ones carrying a `# fork: better-hermes-lcm`
-> marker, re-read those functions **in the merged tree, whole**, confirm every marker is still
-> reached and not merely still present, and ask of every change *does this (re)introduce loss?* The ten failure modes and the full procedure are
+> intersect the upstream-changed symbols with the ones this fork touched
+> (`git diff $(cat .upstream-base)..HEAD`), re-read those functions **in the merged tree, whole**,
+> confirm each fork behaviour is still *reached* and not merely still present, and ask of every
+> change *does this (re)introduce loss?* The ten failure modes and the full procedure are
 > standing task **R1**; merge early and often, because a
 > merge deferred until upstream has moved hundreds of commits is a rewrite, not a merge.
 
@@ -96,11 +97,11 @@ identified by this file and `git log`). The live `lcm.db` gains the
 `lcm_node_meta` table on first use; an upstream build classifies such a DB as newer (drop the
 table and the `better_hermeslcm_node_meta_v1` row in `lcm_migration_state` to go back).
 Fork code is kept in NEW modules wherever possible so upstream files receive only small,
-localized hook calls. Each such call carries a `# fork: better-hermes-lcm` marker and its reason
-in the comment beside it — that comment is what tells you whether a conflicting hunk is a hook
-(keep ours, re-apply on top of theirs) or a behavioural change upstream also made (reconcile).
-`git diff $(cat .upstream-base)..HEAD --stat` is the list of files. Every fork-only test lives
-under `tests/fork/`.
+localized hook calls, each with the reason for it in the comment beside it — that comment is what
+tells you whether a conflicting hunk is a hook (keep ours, re-apply on top of theirs) or a
+behavioural change upstream also made (reconcile). `git diff $(cat .upstream-base)..HEAD` is the
+authoritative list of what this fork touched, file by file and line by line. Every fork-only test
+lives under `tests/fork/`.
 
 ## Tracking lossless-claw (the second maintenance duty)
 The fork was inspired by [lossless-claw](https://github.com/Martian-Engineering/lossless-claw)

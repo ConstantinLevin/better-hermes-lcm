@@ -39,11 +39,11 @@ class ResetStateMixin:
 
     def _reset_compaction_progress(self) -> None:
         """Reset process-local compaction markers for a fresh/unproven session."""
-        # fork: better-hermes-lcm — every reset retires the publication fence, so a summary that was
+        # every reset retires the publication fence, so a summary that was
         # already being generated cannot be published into the session that replaced it
         # (round-2 verify-4 #3 / RS02).
         self._publication_generation = int(getattr(self, "_publication_generation", 0)) + 1
-        self._last_prefix_revision_fingerprints = {}  # fork: better-hermes-lcm (round-3 verify-2 #10)
+        self._last_prefix_revision_fingerprints = {}  # round-3 verify-2 #10
         self._last_compacted_store_id = 0
         self._ingest_cursor = 0
         self._ingest_cursor_needs_reconcile = False
@@ -64,7 +64,7 @@ class ResetStateMixin:
         self._compression_boundary_active_placeholder_digest_budget = {}
         self._compression_boundary_active_placeholder_digest_ordinals = {}
         self._compression_boundary_stored_placeholder_digest_counts = {}
-        # fork: better-hermes-lcm — preflight decisions belong to the REQUEST that made them. Leaving
+        # preflight decisions belong to the REQUEST that made them. Leaving
         # them set across a reset let a new session inherit "this compress is cleanup only"
         # from the old one and skip the leaf pass it needed (audit p05 RS01). The failure
         # cooldown is cleared by HostCooldownMixin.on_session_reset for the same reason.

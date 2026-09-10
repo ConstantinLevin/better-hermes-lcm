@@ -17,7 +17,7 @@ from hermes_lcm.schemas import LCM_COMPILE_EVIDENCE
 
 
 def _engine(tmp_path):
-    # fork: better-hermes-lcm — the evidence tools are OPT-IN and answer `status: disabled` until the
+    # the evidence tools are OPT-IN and answer `status: disabled` until the
     # flag is set (round-5 verify-6, default-reachability).
     config = LCMConfig(
         database_path=str(tmp_path / "lcm.db"),

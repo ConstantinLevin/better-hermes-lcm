@@ -15,7 +15,7 @@ from hermes_lcm.tools import lcm_evidence_pack
 
 
 def _engine(tmp_path):
-    # fork: better-hermes-lcm — lcm_evidence_pack is an OPT-IN subsystem tool and now answers
+    # lcm_evidence_pack is an OPT-IN subsystem tool and now answers
     # `status: disabled` until its flag is set, like lcm_query_state and lcm_retrieve
     # (round-5 verify-6, default-reachability). These tests exercise the enabled behaviour.
     config = LCMConfig(

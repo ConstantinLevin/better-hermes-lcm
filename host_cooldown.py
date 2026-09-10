@@ -1,4 +1,4 @@
-"""Compression-failure cooldown for a plugin engine (fork: better-hermes-lcm).
+"""Compression-failure cooldown for a plugin engine.
 
 Hermes only implements cooldown / "compression blocked" handling for its built-in
 ``ContextCompressor``: on an exception from a *plugin* engine's ``compress()`` the host
@@ -63,7 +63,7 @@ class HostCooldownMixin:
         return max(0.0, value)
 
     def _cooldown_applies_to_current_session(self) -> bool:
-        """fork: better-hermes-lcm — a failure cools down the session that suffered it.
+        """a failure cools down the session that suffered it.
 
         The deadline lives on the engine, and the engine outlives a session: after `/new` or a
         foreground rebind the next session inherited a block it never earned. Backoff for
@@ -77,7 +77,7 @@ class HostCooldownMixin:
     def _record_compression_failure(self, error: str) -> None:
         seconds = self._cooldown_seconds()
         self._lcm_failure_cooldown_until = time.monotonic() + seconds
-        self._lcm_failure_session = str(getattr(self, "_session_id", "") or "")  # fork: scope
+        self._lcm_failure_session = str(getattr(self, "_session_id", "") or "")  # scope
         self._lcm_failure_error = str(error or "")[:500]
         self._lcm_failure_count = int(getattr(self, "_lcm_failure_count", 0)) + 1
         logger.warning(
@@ -86,7 +86,7 @@ class HostCooldownMixin:
         )
 
     def on_session_reset(self) -> None:  # type: ignore[override]
-        """fork: better-hermes-lcm — a reset ends the session the cooldown was armed for."""
+        """a reset ends the session the cooldown was armed for."""
         self.clear_compression_failure_cooldown()
         parent = getattr(super(), "on_session_reset", None)
         if callable(parent):
@@ -186,7 +186,7 @@ class HostCooldownMixin:
         return result
 
     def _compaction_lock_object(self):
-        # fork: better-hermes-lcm — normally constructed in LCMEngine.__init__ (see H01). The lazy
+        # normally constructed in LCMEngine.__init__ (see H01). The lazy
         # branch remains only for objects that mix this in without that constructor; it is not
         # the ordinary path, so it cannot re-introduce the two-locks race for the engine.
         lock = getattr(self, "_compaction_lock", None)

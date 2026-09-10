@@ -9,7 +9,7 @@ import importlib
 import tempfile as _bootstrap_tempfile
 from pathlib import Path
 
-# fork: better-hermes-lcm — isolate the run from live storage BEFORE anything imports the plugin
+# isolate the run from live storage BEFORE anything imports the plugin
 # (audit E, E07). A test that builds an LCMEngine without an explicit database_path resolves
 # to $HERMES_HOME/lcm.db, and inherited LCM_* variables would silently change what is being
 # tested. Nothing here is a claim that the suite currently writes to live data; it removes
@@ -76,7 +76,7 @@ if pkg_name not in sys.modules:
                 pass  # some modules may fail (e.g. engine needs agent)
 
 
-# ── fork: better-hermes-lcm ──────────────────────────────────────────────────────────────────────
+# ──  ──────────────────────────────────────────────────────────────────────
 # Upstream's tests ran compactions without any LLM and silently relied on the deterministic
 # L3 truncation fallback to produce "summaries". The fork removed L3 (every summariser
 # failure now arms a cooldown and leaves the raw messages in place), so the suite needs an
@@ -149,7 +149,7 @@ def _fork_mock_summary(prompt, max_tokens, model="", timeout=None):
 
 @_pytest.fixture(autouse=True)
 def _fork_mock_summariser(monkeypatch):
-    # fork: better-hermes-lcm — autouse because upstream's compaction tests ship no summariser and
+    # autouse because upstream's compaction tests ship no summariser and
     # relied on L3 deterministic truncation, which this fork removed. Drop this fixture and they
     # fail with SummaryUnavailableError; the answer is this mock, never restoring L3.
     if _os.environ.get("LCM_TESTS_REAL_SUMMARISER") == "1":

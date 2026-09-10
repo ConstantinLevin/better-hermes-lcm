@@ -64,7 +64,7 @@ def _unknown(
         observed = 0.0
     anchor = _parse_anchor(session_date)
     return {
-        "observed_at": observed,  # fork: never overwritten by the session anchor (p05 OT01)
+        "observed_at": observed,  # never overwritten by the session anchor (p05 OT01)
         "session_date_at": _epoch(anchor) if anchor else None,
         "stored_at": observed,
         "event_at": None,
@@ -80,7 +80,7 @@ def _unknown(
 def _relative_day(match: "re.Match[str]", anchor: date) -> "date | None":
     """Resolve one supported relative expression against the session anchor.
 
-    fork: better-hermes-lcm — source text is arbitrary. "999999999999 days ago" raised OverflowError
+    source text is arbitrary. "999999999999 days ago" raised OverflowError
     out of the arithmetic and aborted the caller's whole enrichment pass; an unresolvable count
     is explicit unknown metadata, not an exception (audit p05 OT03).
     """
@@ -136,7 +136,7 @@ def resolve_occurrence_time(
             reason="ambiguous_multiple_explicit_dates",
         )
     if explicit:
-        # fork: better-hermes-lcm — an explicit date used to return immediately, before the relative
+        # an explicit date used to return immediately, before the relative
         # expressions were looked at, so "On 2020-01-01 we proposed removal; yesterday we
         # cancelled it" was recorded as a definite 2020 event (audit p05 OT02). Only a relative
         # expression that resolves to a DIFFERENT day is a conflict: "Today (2026-09-08) we
@@ -156,7 +156,7 @@ def resolve_occurrence_time(
         day, match = explicit[0]
         anchor = _parse_anchor(session_date)
         return {
-            # fork: better-hermes-lcm — the OBSERVATION time is the host's timestamp for this row.
+            # the OBSERVATION time is the host's timestamp for this row.
             # Upstream replaced it with midnight of the session date, which made provenance
             # less precise and then labelled that as the original observation (audit p05 OT01).
             "observed_at": float(observed_at or 0.0),
@@ -200,7 +200,7 @@ def resolve_occurrence_time(
         )
 
     return {
-        "observed_at": float(observed_at or 0.0),  # fork: the host's timestamp (p05 OT01)
+        "observed_at": float(observed_at or 0.0),  # the host's timestamp (p05 OT01)
         "session_date_at": _epoch(anchor),
         "stored_at": float(observed_at or 0.0),
         "event_at": _epoch(day),

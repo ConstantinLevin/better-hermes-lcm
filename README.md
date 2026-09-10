@@ -1097,14 +1097,15 @@ tools.py         all 15 lcm_* tool handlers
 schemas.py       tool schemas shown to the model
 tests/           standalone pytest coverage (tests/fork/ = fork tests, by step)
 
-window_scaling.py      fork: anchor table + curve + resolver
-window_scaled_mixin.py fork: resolves the curve on the engine, exposes effective_* values
-host_cooldown.py       fork: the host's compression-failure cooldown protocol
-marked_loss.py         fork: every marker left where upstream cut or dropped silently
-node_meta.py           fork: lcm_node_meta sidecar (escalation level + index block)
-leaf_pipeline.py       fork: concurrent leaf summarisation as a lookahead over the serial loop
-coverage_doctor.py     fork: lcm_doctor coverage
-errors.py              fork: SummaryUnavailableError
+fork-only modules:
+window_scaling.py      the weighting table, the curve and the resolver
+window_scaled_mixin.py resolves the curve on the engine, exposes the effective_* values
+host_cooldown.py       the host's compression-failure cooldown protocol
+marked_loss.py         every marker left where upstream cut or dropped silently
+node_meta.py           lcm_node_meta sidecar (escalation level + index block)
+leaf_pipeline.py       concurrent leaf summarisation as a lookahead over the serial loop
+coverage_doctor.py     lcm_doctor coverage
+errors.py              SummaryUnavailableError
 ```
 
 Run tests:
@@ -1112,7 +1113,7 @@ Run tests:
 ```bash
 pip install pytest
 python -m pytest tests/ -v
-# fork: the same suite through the plugin's host venv, with the umask the SQLite guard needs
+# the same suite through the plugin's host venv, with the umask the SQLite guard needs
 scripts/test.sh
 ```
 
@@ -1125,9 +1126,9 @@ The fork is meant to track upstream **and** the other lossless-context implement
 inspired by. The contract, in full, is in [`FORK.md`](FORK.md); the short form:
 
 1. **Upstream hermes-lcm.** `git fetch upstream && git merge upstream/main` in the fork
-   repository; every fork hook in an upstream file carries a `# fork: better-hermes-lcm` marker
-   with its reason, which is what a conflict is resolved against; `scripts/test.sh` must be
-   green and both e2e anchors clean.
+   repository; `git diff $(cat .upstream-base)..HEAD` says exactly what this fork changed, and
+   each hook carries its reason in the comment beside it, which is what a conflict is resolved
+   against; `scripts/test.sh` must be green and both e2e anchors clean.
 2. **lossless-claw.** On every
    [lossless-claw](https://github.com/Martian-Engineering/lossless-claw) release, compare it
    deeply against this fork — compaction/DAG algorithm, loss-avoidance and provenance,

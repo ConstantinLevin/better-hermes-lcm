@@ -1,4 +1,4 @@
-"""fork: better-hermes-lcm — concurrent leaf summarisation as a *lookahead* over the serial loop.
+"""concurrent leaf summarisation as a *lookahead* over the serial loop.
 
 Upstream's leaf loop is kept verbatim in shape: preamble → select the oldest chunk →
 summarise → persist → repeat. This module lets the summariser calls for the NEXT chunks run
@@ -49,7 +49,7 @@ except Exception:  # pragma: no cover - CI without hermes-agent
 
 
 class HostExecutionScope:
-    """fork: better-hermes-lcm — the host's per-call execution context, captured on the compaction
+    """the host's per-call execution context, captured on the compaction
     thread and re-installed inside every worker.
 
     Upstream called the summariser directly on the thread the host had prepared, so it ran
@@ -99,7 +99,7 @@ class HostExecutionScope:
 
 
 class DaemonThreadPoolExecutor:
-    """fork: better-hermes-lcm — a small pool of DAEMON workers that cannot block process exit.
+    """a small pool of DAEMON workers that cannot block process exit.
 
     The stdlib pool joins its threads at interpreter exit, so a summariser call the host has
     already abandoned would hold up shutdown; the host solves the same problem the same way for
@@ -159,7 +159,7 @@ class DaemonThreadPoolExecutor:
     def purge_cancelled(self) -> int:
         """Drop queued work whose future was already cancelled; return how many went.
 
-        fork: better-hermes-lcm — cancelling a future does not remove its queued callable, and the
+        cancelling a future does not remove its queued callable, and the
         callable holds the lookahead, its input messages and the captured host scope. Four
         abandoned attempts with blocked callbacks left six queued entries and four retained
         lookaheads alive (round-3 verify-2 #4). Live entries are re-queued in order.
@@ -245,15 +245,15 @@ class LeafLookahead:
         focus_topic: Optional[str],
         deadline: Optional[float],
         input_filter: Callable[[Sequence[Dict[str, Any]]], List[Dict[str, Any]]] = list,
-        executor: "DaemonThreadPoolExecutor | None" = None,  # fork: shared per engine
+        executor: "DaemonThreadPoolExecutor | None" = None,  # shared per engine
     ) -> None:
         self._summarize = summarize
         self._inputs: List[List[Dict[str, Any]]] = [input_filter(chunk) for chunk in chunks]
         self._concurrency = max(1, int(concurrency))
         self._focus_topic = focus_topic
         self._deadline = deadline
-        self._scope = HostExecutionScope()  # fork: captured on the compaction thread
-        # fork: better-hermes-lcm — the pool may be SHARED across attempts. A per-instance pool bounded
+        self._scope = HostExecutionScope()  # captured on the compaction thread
+        # the pool may be SHARED across attempts. A per-instance pool bounded
         # each attempt on its own, so a host that abandoned one compaction and retried left the
         # previous attempt's blocked workers running and started a second set: 2 → 4 → 6 live
         # workers over three retries (round-2 verify-2 #6). One pool per engine bounds the
@@ -328,7 +328,7 @@ class LeafLookahead:
         self._submit_ahead()
         if future is None:
             raise RuntimeError("lookahead chunk had no summariser input")
-        # fork: better-hermes-lcm — a BOUNDED wait. An unbounded `future.result()` kept the compaction
+        # a BOUNDED wait. An unbounded `future.result()` kept the compaction
         # thread (and the per-engine compaction lock) occupied after the host had already
         # abandoned the attempt, so the host's retry found the engine busy and did nothing.
         timeout = None
@@ -355,7 +355,7 @@ class LeafLookahead:
         if self._owns_executor:
             self._executor.shutdown(wait=False, cancel_futures=True)
         else:
-            # fork: better-hermes-lcm — the shared pool outlives this attempt, so its queue must not
+            # the shared pool outlives this attempt, so its queue must not
             # keep the cancelled work (and everything that work holds) alive across retries
             # (round-3 verify-2 #4).
             purge = getattr(self._executor, "purge_cancelled", None)

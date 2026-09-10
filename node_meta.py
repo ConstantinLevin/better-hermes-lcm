@@ -1,4 +1,4 @@
-"""fork: better-hermes-lcm — sidecar table ``lcm_node_meta`` (escalation level + index block).
+"""sidecar table ``lcm_node_meta`` (escalation level + index block).
 
 ``summary_nodes`` rows decode positionally, the v5 shape classifier fails closed on any
 unregistered core column and the rollup trigger SQL is byte-compared, so per-node data the
@@ -29,7 +29,7 @@ from .db_bootstrap import mark_migration_step_complete
 
 NODE_META_TABLE = "lcm_node_meta"
 MIGRATION_STEP = "better_hermeslcm_node_meta_v1"
-# fork: better-hermes-lcm — the step was named `betterlcm_node_meta_v1` before the project was
+# the step was named `betterlcm_node_meta_v1` before the project was
 # renamed, and that row exists in every database written by an earlier build. The step is
 # idempotent (the table creation is `IF NOT EXISTS`), so a database carrying only the old name
 # is not broken by the new one — but the old row is retired explicitly rather than left behind
@@ -76,7 +76,7 @@ def extract_index_block(summary: str) -> str:
     """Everything after the LAST ``Expand for details about:`` marker, whitespace-normalised
     per line. Empty when the summary carries no marker.
 
-    fork: better-hermes-lcm — this used to be cut at 1,600 characters, which sliced the index in the
+    this used to be cut at 1,600 characters, which sliced the index in the
     middle of a topic: a 200-topic block ended partway through topic 84, and the tools that
     surface the sidecar showed the cut copy with no continuation. Cutting the index is exactly
     the loss this fork exists to remove, and the block is bounded by the summary that contains
@@ -115,7 +115,7 @@ class NodeMetaStore:
 
     def write_statement(self, node_id: int, *, level: int, summary: str = "",
                         index_block: Optional[str] = None) -> None:
-        """fork: better-hermes-lcm — the same write, WITHOUT its own commit.
+        """the same write, WITHOUT its own commit.
 
         For callers that publish the node and its sidecar in one transaction, so a summary can
         never become visible without the level and index block that describe it (audit p05
@@ -159,7 +159,7 @@ class NodeMetaStore:
         ids = [int(node_id) for node_id in node_ids]
         if not ids:
             return
-        # fork: better-hermes-lcm — batched under SQLite's bound-variable ceiling (verify-3 p04 ST5)
+        # batched under SQLite's bound-variable ceiling (verify-3 p04 ST5)
         for start in range(0, len(ids), 900):
             chunk = ids[start:start + 900]
             placeholders = ",".join("?" for _ in chunk)

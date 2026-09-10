@@ -157,7 +157,7 @@ def _prepare_selector_retrieval(
             break
     metrics = payload.get("metrics")
     metric_map = metrics if isinstance(metrics, Mapping) else {}
-    # fork: better-hermes-lcm — a search that did NOT run exhaustively is not a search that found
+    # a search that did NOT run exhaustively is not a search that found
     # nothing: {complete: false, timeout: true, hits: []} was reported as an ordinary
     # "no_progress", which reads as "there is nothing there" (round-3 verify-4 #14).
     upstream_incomplete = (
@@ -273,14 +273,14 @@ def call_auxiliary_selector(
     started = time.perf_counter()
     response = call_llm(**call_kwargs)
     latency_ms = round((time.perf_counter() - started) * 1_000.0, 3)
-    from .escalation import unfinished_generation_reason  # fork: round-3 verify-4 #27
+    from .escalation import unfinished_generation_reason  # round-3 verify-4 #27
     unfinished = unfinished_generation_reason(response)
     if unfinished:
         raise ValueError(f"host selector returned an unfinished generation ({unfinished})")
     content = response.choices[0].message.content
     if not isinstance(content, str):
         content = str(content) if content else ""
-    # fork: better-hermes-lcm — see round-4 verify-4 #22: a payload that already parses is not touched
+    # see round-4 verify-4 #22: a payload that already parses is not touched
     raw_content = content.strip()
     try:
         json.loads(raw_content)

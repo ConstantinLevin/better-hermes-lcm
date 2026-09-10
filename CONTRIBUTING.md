@@ -20,8 +20,8 @@ Read [`CLAUDE.md`](CLAUDE.md). It is short and it is the contract — in particu
   a document — this file included.
 
 Fork logic goes in new modules so upstream merges stay reviewable; upstream files get small
-hooks marked `# fork: better-hermes-lcm`, with the reason in the comment beside them. That marker
-is the merge risk surface: `grep` finds every one of them.
+hooks, each with the reason for it in the comment beside it. The merge risk surface is
+`git diff $(cat .upstream-base)..HEAD` — exact, and current by construction.
 
 ## What counts as validation
 

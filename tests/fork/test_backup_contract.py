@@ -1,4 +1,4 @@
-"""fork: better-hermes-lcm — the backup is the last line of defence against loss, so it must never
+"""the backup is the last line of defence against loss, so it must never
 overwrite another backup, never share a scratch file with a concurrent rotate, and never
 report success for bytes that are still only in the page cache (audit p05 MT01/MT02/MT03)."""
 import os
@@ -100,7 +100,7 @@ def test_backup_is_fsynced_before_success_is_reported(tmp_path, monkeypatch):
 
 
 def test_the_suite_cannot_reach_live_storage(tmp_path):
-    """fork: better-hermes-lcm (audit E, E07) — an engine built without an explicit database_path must
+    """ (audit E, E07) — an engine built without an explicit database_path must
     resolve inside the test home, never $HOME/.hermes of the live account."""
     import os
     from pathlib import Path

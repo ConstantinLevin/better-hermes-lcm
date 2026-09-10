@@ -22,10 +22,10 @@ def engine(tmp_path, monkeypatch):
 
 def test_init_seeds_upstream_values_without_window(engine):
     assert engine.context_length == 0
-    assert engine.effective_fresh_tail_count == 400  # fork: the TOKEN cap governs the tail
+    assert engine.effective_fresh_tail_count == 400  # the TOKEN cap governs the tail
     assert engine.effective_summary_timeout_ms == 60_000
     assert engine.effective_incremental_max_depth == 3
-    # fork: chunking runs at every window, so its scheduling values are not upstream's serial
+    # chunking runs at every window, so its scheduling values are not upstream's serial
     # ones even before a window is known
     assert engine.effective_summary_concurrency == 6
     assert engine.context_threshold == pytest.approx(0.35)
@@ -64,7 +64,7 @@ def test_cleared_context_length_resets_effective_values(engine):
     assert engine.effective_fresh_tail_count == 400
     engine._set_context_length(0, source="test")
     assert engine.context_length == 0
-    assert engine.effective_fresh_tail_count == 400  # fork: the TOKEN cap governs the tail
+    assert engine.effective_fresh_tail_count == 400  # the TOKEN cap governs the tail
     assert engine.effective_condense_budget_tokens == 0
     assert engine.threshold_tokens == 0
 
@@ -82,7 +82,7 @@ def test_configured_threshold_is_never_curved(tmp_path):
     # drain stop has fixed anchors and is clamped to the resolved threshold
     assert e.effective_drain_stop_fraction == pytest.approx(0.30)
     e._set_context_length(W256, source="test")
-    assert e.effective_drain_stop_fraction == pytest.approx(0.30)  # fork: a real drain target
+    assert e.effective_drain_stop_fraction == pytest.approx(0.30)  # a real drain target
 
 
 def test_uses_capped_window(engine, monkeypatch):
@@ -92,7 +92,7 @@ def test_uses_capped_window(engine, monkeypatch):
     engine._set_context_length(W1M, source="test", model="x", provider="y")
     assert engine.context_length == W256
     assert engine.effective_context_length_cap == W256
-    assert engine.effective_fresh_tail_count == 400  # fork: the TOKEN cap governs the tail
+    assert engine.effective_fresh_tail_count == 400  # the TOKEN cap governs the tail
 
 
 def test_protect_last_n_is_not_curved(engine):

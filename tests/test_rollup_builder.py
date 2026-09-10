@@ -861,7 +861,7 @@ def test_session_reset_stales_rollups_referencing_deleted_nodes(tmp_path):
 
             engine.on_session_reset()
 
-            # fork: better-hermes-lcm — reset deletes nothing, so the rollup's sources still
+            # reset deletes nothing, so the rollup's sources still
             # exist and it stays ready
             assert [node.node_id for node in engine._dag.get_session_nodes(scope)] == [node_id]
             store.drain_invalidations(event_limit=256, day_budget=256)

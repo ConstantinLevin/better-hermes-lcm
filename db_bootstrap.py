@@ -299,7 +299,7 @@ _V5_CORE_TABLE_COLUMNS: dict[str, frozenset[str]] = {
 # have them until MessageStore opens it. Their presence is recognised, but an
 # unrelated extra core column still fails closed as a genuinely newer shape.
 _V5_CORE_OPTIONAL_COLUMNS: dict[str, frozenset[str]] = {
-    # fork: better-hermes-lcm — ``envelope_extra`` holds the host fields the columns do not project
+    # ``envelope_extra`` holds the host fields the columns do not project
     # (round-2 verify-4 #4). It is additive and backward-compatible: an older build simply
     # does not read it, so its presence must not classify the database as newer.
     "messages": frozenset({
@@ -323,7 +323,7 @@ _KNOWN_FEATURE_TABLE_PREFIXES = (
     "lcm_assertion",
     "lcm_query",
     "lcm_trajectory",
-    "lcm_node",  # fork: better-hermes-lcm — lcm_node_meta sidecar (node_meta.py)
+    "lcm_node",  # lcm_node_meta sidecar (node_meta.py)
 )
 
 # The known opt-in feature families whose derived tables an interim build may
@@ -2938,7 +2938,7 @@ def _normalized_sql(text: str) -> str:
 def _fts_missing_triggers(conn: sqlite3.Connection, spec: ExternalContentFtsSpec) -> bool:
     """True when an expected trigger is absent OR is not the trigger we expect.
 
-    fork: better-hermes-lcm — the check compared NAMES only, so a trigger of the right name with a
+    the check compared NAMES only, so a trigger of the right name with a
     different (or empty) body passed: repair reported ``rebuilt=true, degraded=false``, the
     existing rows were searchable, and the next appended row was missing from the index with
     nothing saying so (round-2 verify-4 #35). The stored definition is compared instead.
@@ -3095,7 +3095,7 @@ def repair_external_content_fts(
         else:
             triggers_were_missing = _fts_missing_triggers(conn, spec)
             if triggers_were_missing:
-                # fork: better-hermes-lcm — the trigger SQL is CREATE ... IF NOT EXISTS, so a trigger
+                # the trigger SQL is CREATE ... IF NOT EXISTS, so a trigger
                 # of the right NAME with a wrong body survived "repair" untouched: the index
                 # then missed every row appended afterwards (round-2 verify-4 #35). Drop what
                 # we own before recreating it.

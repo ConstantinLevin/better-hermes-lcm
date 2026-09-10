@@ -1276,13 +1276,13 @@ def _doctor_source_apply_text(engine) -> str:
 
 
 def _doctor_coverage_text(engine) -> str:
-    """fork: better-hermes-lcm — `/lcm doctor coverage`."""
+    """`/lcm doctor coverage`."""
     from .coverage_doctor import coverage_check, session_coverage
 
     report = session_coverage(engine, engine.current_session_id)
     check = coverage_check(report)
     lines = [
-        "LCM index coverage (fork: better-hermes-lcm)",
+        "LCM index coverage",
         f"- session: {report['session_id']}",
         f"- nodes scored: {report['scored_nodes']} of {report['nodes']}",
         (f"- aggregate: {report['aggregate_fraction']:.0%} of index-bearing entities discoverable "
@@ -1869,7 +1869,7 @@ def _doctor_retention_text(engine) -> str:
 
 
 class CleanupWouldBreakProvenance(RuntimeError):
-    """fork: better-hermes-lcm — deleting these sessions would strand a summary outside them."""
+    """deleting these sessions would strand a summary outside them."""
 
     def __init__(self, node_ids: list[int], store_ids: list[int]) -> None:
         self.node_ids = node_ids
@@ -1911,7 +1911,7 @@ def _delete_clean_candidates_atomically(engine, session_ids: set[str]) -> dict[s
             "lifecycle_skipped": 0,
         }
 
-    # fork: better-hermes-lcm — cleanup owns the message connection for the whole destructive
+    # cleanup owns the message connection for the whole destructive
     # transaction. Without the store's write lock, an ordinary append on another thread
     # committed cleanup's half-finished deletion: the raw rows were gone, cleanup then failed,
     # and a summary still pointed at them (round-4 verify-4 #4).
@@ -1931,7 +1931,7 @@ def _delete_clean_candidates_in_owned_transaction(
         SummaryDAG.stage_delete_session_scope(conn, session_ids)
         scope_table = SummaryDAG.DELETE_SESSION_SCOPE_TABLE
 
-        # fork: better-hermes-lcm — refuse to delete anything a node OUTSIDE the deletion set still
+        # refuse to delete anything a node OUTSIDE the deletion set still
         # points at. `/new` retains the deeper summaries in the new session and leaves their
         # children with the old one, so cleaning the predecessor could break a parent in a
         # session the operator never selected: the retained node stays, its lineage does not,
@@ -2057,7 +2057,7 @@ def _delete_clean_candidates_in_owned_transaction(
         lifecycle_skipped = scoped_count - lifecycle_deleted
         conn.commit()
     except BaseException:
-        # fork: better-hermes-lcm — BaseException, not Exception: a KeyboardInterrupt or a host
+        # BaseException, not Exception: a KeyboardInterrupt or a host
         # cancellation mid-cleanup left the deletion transaction open, and a later unrelated
         # commit made those deletes permanent (verify-4 #4).
         try:
@@ -2116,7 +2116,7 @@ def _doctor_clean_apply_text(engine) -> str:
     session_ids = {item["session_id"] for item in candidates}
     try:
         deleted = _delete_clean_candidates_atomically(engine, session_ids)
-    except CleanupWouldBreakProvenance as exc:   # fork: better-hermes-lcm
+    except CleanupWouldBreakProvenance as exc: 
         return "\n".join([
             "LCM doctor clean apply",
             "status: refused",
@@ -5128,7 +5128,7 @@ def handle_lcm_command(raw_args: str | None, engine) -> str:
             return _doctor_source_text(engine)
         if len(rest) == 1 and rest[0].lower() == "retention":
             return _doctor_retention_text(engine)
-        if len(rest) == 1 and rest[0].lower() == "coverage":  # fork: better-hermes-lcm
+        if len(rest) == 1 and rest[0].lower() == "coverage":
             return _doctor_coverage_text(engine)
         if len(rest) == 2 and rest[0].lower() == "clean" and rest[1].lower() == "apply":
             return _doctor_clean_apply_text(engine)
@@ -5149,7 +5149,7 @@ def handle_lcm_command(raw_args: str | None, engine) -> str:
             return _doctor_repair_schema_stamp_apply_text(engine)
         if len(rest) == 2 and rest[0].lower() == "source" and rest[1].lower() == "apply":
             return _doctor_source_apply_text(engine)
-        return _help_text("`/lcm doctor` currently supports `clean`, `clean apply`, `clean lifecycle`, `clean lifecycle apply`, `repair`, `repair apply`, `repair schema-stamp`, `repair schema-stamp apply`, `source`, `source apply`, and `retention` as extra subcommands (fork: also `coverage`).")
+        return _help_text("`/lcm doctor` currently supports `clean`, `clean apply`, `clean lifecycle`, `clean lifecycle apply`, `repair`, `repair apply`, `repair schema-stamp`, `repair schema-stamp apply`, `source`, `source apply`, and `retention` as extra subcommands (also `coverage`).")
 
     if head == "backup":
         if rest:

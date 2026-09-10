@@ -291,7 +291,7 @@ class RetrievalRound:
     tool_provenance: dict[str, Any] = field(default_factory=dict)
     tool_metrics: dict[str, Any] = field(default_factory=dict)
     result_truncated: bool = False
-    # fork: better-hermes-lcm — why the round was incomplete, when the TOOL said so (verify-4 #21)
+    # why the round was incomplete, when the TOOL said so (verify-4 #21)
     incomplete_reason: str = ""
 
     def public_dict(self) -> dict[str, Any]:
@@ -1082,7 +1082,7 @@ class AdaptiveRetrievalRegistry:
             latency_ms = round((time.perf_counter() - started) * 1_000.0, 3)
 
             new_items: list[ExactEvidence] = []
-            # fork: better-hermes-lcm — the TOOL's own incompleteness counts as truncation of this
+            # the TOOL's own incompleteness counts as truncation of this
             # round. A search that returned complete:false, bounded_scans or has_more became an
             # adaptive round with result_truncated=false and no continuation lead, so the round
             # read as an exhaustive look at the archive (verify-4 #21).

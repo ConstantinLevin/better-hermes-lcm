@@ -1,4 +1,4 @@
-"""fork: better-hermes-lcm — every place the fork still drops or cuts text leaves a marker.
+"""every place the fork still drops or cuts text leaves a marker.
 
 Rule (CLAUDE.md): a summary is acceptable only while its provenance is intact AND
 the visible text still hints at what was cut. These helpers build those hints so the
@@ -21,7 +21,7 @@ TRUNCATED_LITERAL = "...[truncated]..."
 BYPASS_TRIM_SUFFIX = "…[LCM bypass trim: text cut to fit the cap; full text in the host transcript]"
 BYPASS_FINAL_TRIM_SUFFIX = "…[LCM cut]"
 ROTATE_MARKER_PREFIX = "[LCM rotate marker]"
-# fork: better-hermes-lcm — the receipt for a bypassed session's dropped messages. It is identified by
+# the receipt for a bypassed session's dropped messages. It is identified by
 # this prefix so the cap-trimming loop can refuse to remove or shorten the one message that
 # says something was removed (audit p05 BY01).
 BYPASS_OMISSION_PREFIX = "[Context omitted:"
@@ -44,7 +44,7 @@ _BYPASS_COMPACT_COUNTS_RE = re.compile(r"(\d+) msg / (\d+) chars dropped")
 def bypass_omission_counts(text: str) -> tuple[int, int]:
     """The (messages, chars) a receipt records, in either of its two forms.
 
-    fork: better-hermes-lcm — reading both forms makes compaction IDEMPOTENT: compacting an already
+    reading both forms makes compaction IDEMPOTENT: compacting an already
     compact receipt used to turn the counted sentence into an uncounted one (verify-4 #17).
     """
     value = str(text or "")
@@ -58,7 +58,7 @@ def bypass_omission_counts(text: str) -> tuple[int, int]:
 def compact_bypass_omission_marker(text: str) -> str:
     """The shortest honest form of the receipt, for a cap nothing else can satisfy.
 
-    fork: better-hermes-lcm — the receipt is never removed, but when the budget cannot hold it AND the
+    the receipt is never removed, but when the budget cannot hold it AND the
     live request, the counts are what must survive, not the sentence around them.
     """
     messages, chars = bypass_omission_counts(text)
@@ -71,7 +71,7 @@ def compact_bypass_omission_marker(text: str) -> str:
 
 
 def is_bypass_omission_marker(message: Any) -> bool:
-    """fork: better-hermes-lcm — is this the receipt above?"""
+    """is this the receipt above?"""
     if not isinstance(message, dict):
         return False
     content = message.get("content")
@@ -83,7 +83,7 @@ _WS_RE = re.compile(r"\s+")
 def elide_text(text: str, cap: int, *, original_chars: int | None = None) -> str:
     """Keep head + tail of ``text`` under ``cap`` chars with a marked, sized elision.
 
-    fork: better-hermes-lcm — an elision must not swallow an EARLIER receipt. Sanitisation runs first
+    an elision must not swallow an EARLIER receipt. Sanitisation runs first
     and leaves its own "[LCM: N chars of injected context removed]" line in the middle of the
     text; the elision then cut that line out and reported only the characters IT removed, so a
     20,031-character message became a 6,065-character one whose accounting said 5,785
@@ -106,7 +106,7 @@ def elide_text(text: str, cap: int, *, original_chars: int | None = None) -> str
         f"\n{TRUNCATED_LITERAL} [LCM elided {removed} of {len(text)} chars before summarising"
         f"{before_sanitising}; the full message is in the raw store — lcm_expand this node]\n"
     )
-    # fork: better-hermes-lcm — a marker that CROSSES the cut survived as a fragment ("[LCM: 1000 chars
+    # a marker that CROSSES the cut survived as a fragment ("[LCM: 1000 chars
     # ") with its accounting and recovery clause gone (round-4 verify-4 #11). Scan the WHOLE
     # text and carry every marker whose span is not completely inside what was kept.
     carried: List[str] = []
@@ -131,7 +131,7 @@ def elide_text(text: str, cap: int, *, original_chars: int | None = None) -> str
 def elide_args(args: str, cap: int) -> str:
     """Tool-call arguments: keep the head, say how much is missing.
 
-    fork: better-hermes-lcm — a cut here must not swallow an EARLIER receipt. Sanitisation runs first
+    a cut here must not swallow an EARLIER receipt. Sanitisation runs first
     and can leave "[LCM: N chars of injected context removed]" inside the arguments; cutting the
     tail then destroyed that record along with the text it accounted for (round-5 verify-6 #5).
     Every marker whose span is not entirely inside the kept head travels with the elision.
@@ -177,7 +177,7 @@ _ACCOUNTED_TOOL_FUNCTION_KEYS = frozenset({"name", "arguments"})
 
 
 def tool_call_fields_note(call: dict) -> str:
-    """fork: better-hermes-lcm — name what a rendered ``name(arguments)`` call leaves out.
+    """name what a rendered ``name(arguments)`` call leaves out.
 
     The summariser saw only the function name and its arguments. Anything else the provider
     attached to the call — a cache hint, a server-side id, a partial-arguments flag, a
@@ -259,7 +259,7 @@ def missing_tool_result_stub(tool_call_id: str, *, store_ids: Sequence[int] | No
                              elsewhere_in_window: bool = False) -> str:
     """Stand in for a tool result the replay window does not contain.
 
-    fork: better-hermes-lcm — upstream's stub said the result was "in the context summary above", which
+    upstream's stub said the result was "in the context summary above", which
     was a claim about a summary nobody had verified: with an empty DAG the reader was sent to
     something that did not exist (verify-4 #10). Naming the raw store unconditionally was the
     same mistake one level down: a call that NEVER received a result was described as archived
@@ -325,7 +325,7 @@ def injected_context_marker(removed_chars: int) -> str:
 def unmappable_rows_marker(count: int) -> str:
     """Name consumed messages that have no durable store row of their own.
 
-    fork: better-hermes-lcm — a host truncation marker whose file could not be copied has no row the
+    a host truncation marker whose file could not be copied has no row the
     archive can point at (the host owns the file and deletes it). The leaf still summarises the
     span, so the summary says plainly that those messages cannot be expanded, rather than
     implying the whole span is recoverable (round-2 verify-2 #2).
@@ -355,7 +355,7 @@ def excluded_reply_marker(store_ids: List[int]) -> str:
 RECEIPT_LINE_PREFIX = "[LCM:"
 
 
-# fork: better-hermes-lcm — EVERY marker spelling this module writes, not only "[LCM:". Inheritance
+# EVERY marker spelling this module writes, not only "[LCM:". Inheritance
 # recognised the colon form alone, so a child carrying a rotate marker ("[LCM rotate marker] …
 # nothing here is summarised") condensed into a parent with no warning at all: the reader was
 # told the parent covered material that was never summarised (round-2 verify-4 #18).
@@ -397,7 +397,7 @@ def _drop_partial_markers(kept: str, carried: List[str]) -> str:
 def marker_fragments(text: str) -> List[str]:
     """Every marker this module wrote that occurs in ``text``, in order, de-duplicated.
 
-    fork: better-hermes-lcm — the fragment is not shortened below its closing bracket. A 300-character
+    the fragment is not shortened below its closing bracket. A 300-character
     cut removed the recovery clause from a long receipt (round-3 verify-4 #10); running to the
     end of the line restored the surrounding body (round-4 verify-2 #7). The marker itself is
     what travels.
@@ -419,7 +419,7 @@ def is_marker_line(line: str) -> bool:
 def inherited_receipts(summaries: Iterable[str]) -> List[str]:
     """Every marker line found in these summaries, de-duplicated in order.
 
-    fork: better-hermes-lcm — a condensed parent is written by the summariser, which has no obligation
+    a condensed parent is written by the summariser, which has no obligation
     to reproduce a receipt its sources carried. Merging them into the parent keeps the record
     of what was excluded attached to the node that now stands for it (verify-4 #8), and every
     spelling counts, not only the ``[LCM:`` one (round-2 verify-4 #18).
@@ -432,7 +432,7 @@ def inherited_receipts(summaries: Iterable[str]) -> List[str]:
                 if stripped not in seen:
                     seen.append(stripped)
                 continue
-            # fork: better-hermes-lcm — a receipt can sit AFTER visible text on the same line (a
+            # a receipt can sit AFTER visible text on the same line (a
             # sanitiser replaces an injected block mid-sentence). Whole-line matching ignored
             # those, so the loss they record ended at the condensation boundary after all
             # (round-3 verify-4 #10).
@@ -448,7 +448,7 @@ MINIMAL_ASSEMBLY_OMISSION_MARKER = "[LCM: content omitted from this prefix — l
 def minimal_assembly_omission_marker() -> str:
     """The smallest receipt that still says something is missing.
 
-    fork: better-hermes-lcm — when neither the full nor the one-line receipt fits the summary budget,
+    when neither the full nor the one-line receipt fits the summary budget,
     the receipt used to be dropped and recorded only in status: the prefix then omitted content
     silently, which is precisely the failure the receipt exists to prevent (round-2 verify-4
     #17). This form is ~12 tokens and is emitted even when it puts the prefix marginally over
@@ -463,7 +463,7 @@ LEADING_TURNS_DROPPED_PREFIX = "[LCM: leading turn(s) not replayable at the star
 def leading_turns_dropped_marker(dropped: int, roles: List[str]) -> str:
     """Name assistant/tool turns dropped because a request cannot START with them.
 
-    fork: better-hermes-lcm — a conversation replayed to a provider may not open with an assistant or
+    a conversation replayed to a provider may not open with an assistant or
     tool message, so the leading ones were dropped silently; an assistant turn holding a
     decision simply vanished from the agent's own view of its history (round-3 verify-4 #7).
     The rows are untouched in the store.
@@ -478,7 +478,7 @@ def leading_turns_dropped_marker(dropped: int, roles: List[str]) -> str:
 
 # Envelope fields that CHANGE what a turn means and are cheap to render inline.
 _INLINE_ENVELOPE_FIELDS = (
-    # fork: better-hermes-lcm — small fields that change what the CONTENT means. `exit_code`/`error`
+    # small fields that change what the CONTENT means. `exit_code`/`error`
     # were only named, not shown, so a reader saw "operation done" with no way to tell it had
     # failed without a second call (round-5 verify-6 #8).
     "name", "is_error", "status", "error_code", "error", "exit_code", "finish_reason",
@@ -486,7 +486,7 @@ _INLINE_ENVELOPE_FIELDS = (
 
 
 def envelope_inventory(envelope: dict) -> tuple[dict, list[str]]:
-    """fork: better-hermes-lcm — the same split as :func:`envelope_summary_suffix`, as data.
+    """the same split as :func:`envelope_summary_suffix`, as data.
 
     Returns (inline outcome fields, names of the fields left in the store). JSON-shaped
     readers (``lcm_load_session``) need the structure rather than a rendered suffix; without
@@ -508,7 +508,7 @@ def envelope_inventory(envelope: dict) -> tuple[dict, list[str]]:
 
 
 def envelope_summary_suffix(envelope: dict, *, max_listed: int = 10) -> str:
-    """fork: better-hermes-lcm — render the small outcome fields, inventory the rest.
+    """render the small outcome fields, inventory the rest.
 
     The summariser was given ``[ASSISTANT]: Visible`` for a turn whose envelope also carried
     ``reasoning_content="DECISION cancel"`` and ``is_error=True``: a failed step read exactly
@@ -544,7 +544,7 @@ def envelope_summary_suffix(envelope: dict, *, max_listed: int = 10) -> str:
 
 
 def acknowledgement_only_marker(content: str) -> str:
-    """fork: better-hermes-lcm — an acknowledgement-shaped turn removed from the summariser's input.
+    """an acknowledgement-shaped turn removed from the summariser's input.
 
     The removal is by WORDING, not by a trusted synthetic-origin signal, so a genuine
     "Acknowledged." disappeared with nothing in its place (round-4 verify-4 #8). The stored row
@@ -573,7 +573,7 @@ def internal_replay_marker_part(structured: bool) -> Any:
 def revision_rows_marker(store_ids: List[int]) -> str:
     """Name archived corrections that supersede rows this node covers.
 
-    fork: better-hermes-lcm — a correction the host made to an already-stored message is archived as
+    a correction the host made to an already-stored message is archived as
     its own row. The leaf covering the original covers the correction too, so the newer text is
     never reachable from no summary, and this line says the newer version exists
     (round-3 verify-2 #8).
@@ -590,7 +590,7 @@ def revision_rows_marker(store_ids: List[int]) -> str:
 def aggregated_inherited_receipt_marker(receipts: List[str], node_ids: List[int]) -> str:
     """One line standing for receipts whose verbatim copies would defeat condensation.
 
-    fork: better-hermes-lcm — a condensed parent inherits its children's receipts verbatim, and four
+    a condensed parent inherits its children's receipts verbatim, and four
     children carrying distinct receipts made the "condensed" parent LARGER than its sources
     (round-2 verify-2 #9), which raises the very pressure condensation exists to reduce. The
     children are still stored, still reachable from this node's ``source_ids``, and still carry
@@ -607,7 +607,7 @@ def aggregated_inherited_receipt_marker(receipts: List[str], node_ids: List[int]
 def recovered_body_rows_marker(store_ids: List[int]) -> str:
     """Name the archive rows holding bytes a host truncation marker stands for.
 
-    fork: better-hermes-lcm — when the durable copy of a recovered host output cannot be written, the
+    when the durable copy of a recovered host output cannot be written, the
     bytes are stored as an extra archive row next to the marker row. Those rows belonged to no
     node, so the leaf covering the marker left the real content outside the graph and read as
     if expansion were impossible (round-2 verify-4 #1). They are sources of the leaf now, and
@@ -632,7 +632,7 @@ def compact_assembly_omission_marker(
 ) -> str:
     """The one-line form, for a summary budget that cannot hold the full receipt.
 
-    fork: better-hermes-lcm — the receipt is what tells the reader something is missing, so it must
+    the receipt is what tells the reader something is missing, so it must
     survive a budget that the full sentence does not fit into (verify-4 #9). The counts are
     what matter; ``lcm_status`` and the log carry the ids.
     """
@@ -684,7 +684,7 @@ def assembly_omission_marker(
             "they remain in the raw store (lcm_recent / lcm_expand)"
         )
     if dropped_internal_turns:
-        # fork: better-hermes-lcm — active-context cleanup removes assistant turns whose only content
+        # active-context cleanup removes assistant turns whose only content
         # was internal/reasoning material. Upstream logged that for the operator and left the
         # agent's own view of its history quietly one turn shorter (audit p05 SA01).
         lines.append(
@@ -692,7 +692,7 @@ def assembly_omission_marker(
             "and are not replayed; the stored rows are unchanged (lcm_recent / lcm_expand)"
         )
     if redacted_internal_turns:
-        # fork: better-hermes-lcm — a turn can be PARTLY internal: the visible text is replayed and the
+        # a turn can be PARTLY internal: the visible text is replayed and the
         # reasoning block is not. Only whole dropped turns were counted, so a turn that lost a
         # decision written inside <think> left no trace at all (round-2 verify-4 #16).
         lines.append(

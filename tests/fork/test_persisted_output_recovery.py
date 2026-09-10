@@ -1,4 +1,4 @@
-"""fork: better-hermes-lcm — Hermes writes oversized tool results to $HERMES_HOME/cache/spillover,
+"""Hermes writes oversized tool results to $HERMES_HOME/cache/spillover,
 names that path in the marker, and deletes the file after 24 hours. Recovery accepted only the
 older <tmp>/hermes-results directory, so on the deployed configuration LCM stored the preview
 and let the complete output expire: unrecoverable loss on the default setup (audit p06 I2)."""

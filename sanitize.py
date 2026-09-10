@@ -47,7 +47,7 @@ def _contains_sensitive_redaction(value: Any) -> bool:
 
 
 def _structured_part_text(part: Dict[str, Any]) -> str:
-    """fork: better-hermes-lcm — EVERY text-bearing field of the block, not just the first one found.
+    """EVERY text-bearing field of the block, not just the first one found.
 
     A block can carry `text` (a reasoning stream) beside `content` (the visible answer, or a
     failure message). Returning the first key meant the visible sibling was invisible to the
@@ -99,7 +99,7 @@ def _structured_part_has_visible_assistant_content(part: Any) -> bool:
     if part_type in _VISIBLE_TEXT_PART_TYPES:
         if _strip_reasoning_blocks(_structured_part_text(part)).strip():
             return True
-        # fork: better-hermes-lcm — a typed text block whose text is empty can still carry the thing
+        # a typed text block whose text is empty can still carry the thing
         # that matters (annotations, a citation list, an outcome flag). Judging it by its text
         # alone dropped the whole turn with no receipt (round-5 verify-6 #9).
         return _part_has_substantive_fields(part)
@@ -124,7 +124,7 @@ def _assistant_message_has_visible_content(msg: Dict[str, Any]) -> bool:
 
 
 def _strip_structured_text_part(part: Dict[str, Any]) -> Dict[str, Any] | None:
-    """fork: better-hermes-lcm — strip EVERY text field of the block, and judge the block afterwards.
+    """strip EVERY text field of the block, and judge the block afterwards.
 
     This returned as soon as it had handled one key, so a block carrying `text` (reasoning)
     beside `content` (the visible answer) either kept the reasoning and never cleaned the
@@ -184,7 +184,7 @@ def _sanitize_active_assistant_content(content: Any) -> Any | None:
 
 
 def _mark_internal_removal(cleaned_content: Any) -> Any:
-    """fork: better-hermes-lcm — say, in the replay itself, that this turn was cut.
+    """say, in the replay itself, that this turn was cut.
 
     Upstream stripped ``<think>`` (and reasoning/analysis parts) out of the assistant turns it
     replays and left nothing behind: the model saw a turn that silently differed from the one
@@ -214,7 +214,7 @@ def _mark_internal_removal(cleaned_content: Any) -> Any:
 def _content_carries_text(value: Any) -> bool:
     """Did this content hold anything at all? A blank turn loses nothing when it is dropped.
 
-    fork: better-hermes-lcm — this asked a fixed list of text-bearing keys, so a reasoning block whose
+    this asked a fixed list of text-bearing keys, so a reasoning block whose
     payload sat in `encrypted_content`, or a text block carrying only `annotations`, counted as
     empty and vanished with no receipt (round-5 verify-6 #9). Every key except the structural
     ones counts; only `type`/`cache_control` are scaffolding rather than content.
@@ -245,7 +245,7 @@ def _clean_active_assistant_message(msg: Dict[str, Any]) -> Dict[str, Any] | Non
     original_content = msg.get("content")
     cleaned_content = _sanitize_active_assistant_content(original_content)
     if cleaned_content is None:
-        # fork: better-hermes-lcm — a turn holding ONLY internal content is not dropped without a
+        # a turn holding ONLY internal content is not dropped without a
         # trace either: the receipt takes its place, so the model still sees that a turn
         # happened here and can read it whole from the store. A turn that held NOTHING is
         # still dropped outright — an empty turn loses nothing, and inventing a receipt for
@@ -263,7 +263,7 @@ def _clean_active_assistant_message(msg: Dict[str, Any]) -> Dict[str, Any] | Non
 def _is_internal_replay_receipt_only(msg: Any) -> bool:
     """A turn whose whole replayed body is the internal-removal receipt.
 
-    fork: better-hermes-lcm — such a turn carries no content of its own, so under assembly budget
+    such a turn carries no content of its own, so under assembly budget
     pressure it is dropped and named in the prefix's omission marker instead of competing
     with the caller's live messages for room.
     """

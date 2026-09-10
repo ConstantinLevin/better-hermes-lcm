@@ -24,7 +24,7 @@ def test_fresh_tail_uses_curved_caps(tmp_path):
     e._set_context_length(W256, source="test")
     b256 = e._fresh_tail_boundary(msgs)
     # at the low anchor the cap cannot bind and is reported as upstream's 0
-    # fork: the protected tail is sized in TOKENS at every window (0.15*W), not by upstream's
+    # the protected tail is sized in TOKENS at every window (0.15*W), not by upstream's
     # flat 32 messages — what 32 messages protect depends on how long they happen to be.
     assert b256.token_limit == round(W256 * 0.15) and b256.token_limited is True
     assert b256.count_limit == 400 and b256.count > 32
@@ -43,7 +43,7 @@ def test_explicit_fresh_tail_count_is_not_curved(tmp_path):
 
 def test_guard_and_breaker_are_retuned_on_resolve(tmp_path):
     e = _engine(tmp_path)
-    # fork: better-hermes-lcm — the guard counts CALLS, and a chunked engine spends many small calls
+    # the guard counts CALLS, and a chunked engine spends many small calls
     # where upstream spent one big one, so upstream's 24 stopped a drain mid-way. Anchored to
     # what one drain needs; in tokens it is below upstream's spend at both ends.
     # before a window is known there is no chunk fraction to resolve, so compaction is still

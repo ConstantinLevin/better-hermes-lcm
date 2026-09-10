@@ -1,4 +1,4 @@
-"""Engine-side integration of the weighting curve (fork: better-hermes-lcm).
+"""Engine-side integration of the weighting curve.
 
 ``WindowScaledSettingsMixin`` is mixed into ``LCMEngine``. It owns the ``effective_*``
 attributes that consumers read instead of raw ``self._config`` values, and re-resolves them
@@ -81,7 +81,7 @@ class WindowScaledSettingsMixin:
     def _effective(self, name: str) -> Any:
         value = self._effective_raw(name)
         if name == "fresh_tail_max_tokens" and self._is_curved(name):
-            # fork: better-hermes-lcm — the curve interpolates this cap from "the whole window" (which
+            # the curve interpolates this cap from "the whole window" (which
             # cannot bind, i.e. upstream's `0 = disabled`) down to 0.15*W at 1M. While it still
             # cannot bind, report upstream's literal 0. A curved cap must also never *add* a
             # message to a tail the count limit excluded. An OPERATOR's explicit cap is never
@@ -130,7 +130,7 @@ class WindowScaledSettingsMixin:
         entry = resolved.get("context_threshold")
         if entry is None:
             return
-        # fork: better-hermes-lcm — the RESOLVER is the single authority on "did anything configure
+        # the RESOLVER is the single authority on "did anything configure
         # this?". An earlier version also required the engine's own
         # ``_context_threshold_source`` to equal "manual_or_default", but ``LCMConfig.from_env``
         # records "default" for an unconfigured threshold — so on a clean install the guard
@@ -167,7 +167,7 @@ class WindowScaledSettingsMixin:
         except ImportError:  # pragma: no cover
             from tokens import set_token_cache_size  # type: ignore
         try:
-            # fork: the memo is process-global while engines are not; identify the requester
+            # the memo is process-global while engines are not; identify the requester
             # so a second engine's smaller window cannot shrink (and empty) the shared cache
             set_token_cache_size(int(self._effective("token_cache_size") or 0), owner=self)
         except Exception:  # pragma: no cover

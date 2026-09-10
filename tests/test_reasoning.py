@@ -741,7 +741,7 @@ def test_verifier_preserves_result_entities_units_and_exact_citations(evidence_d
     trace = execute_plan(plan, operands).trace
     assert verify_final_answer(trace.answer, trace).status == "verified"
     cited = " ".join(f"[{citation}]" for citation in trace.citations)
-    # fork: better-hermes-lcm — only the computation's OWN answer is verifiable here. A rephrasing that
+    # only the computation's OWN answer is verifiable here. A rephrasing that
     # preserves numbers, units and entities was the shape that let unsupported claims through
     # ("Alice authorized fraud" passed every earlier check), so anything but the deterministic
     # answer falls back (round-3 verify-2/verify-3 on round-2 verify-5 #1).

@@ -1,4 +1,4 @@
-"""Window-weighted tuning defaults (fork: better-hermes-lcm).
+"""Window-weighted tuning defaults.
 
 Every LCM size that is a *preference* about how to spend a context window is resolved as a
 linear function of ``context_length`` (``W``) between two anchors:
@@ -34,7 +34,7 @@ THRESHOLD = object()
 # Sentinel for "same as config.leaf_chunk_tokens" (sweep target's low anchor: upstream falls back to it).
 LEAF_CHUNK = object()
 
-# fork: better-hermes-lcm — how much raw history one summariser call turns into one leaf node,
+# how much raw history one summariser call turns into one leaf node,
 # as a FRACTION of the window. The same fraction at both anchors, so it slides with the
 # window like every other weighted value instead of being a hardcoded token count.
 #
@@ -76,7 +76,7 @@ WINDOW_SCALED_DEFAULTS: tuple[Anchor, ...] = (
     # result to the resolved threshold, so an operator who lowers the threshold below the curve
     # still gets a stop point that is reachable. (Was: the *curved* threshold as a moving low
     # anchor, which made the drain stop rise to 0.44 mid-range before falling.)
-    # fork: better-hermes-lcm — the low anchor was THRESHOLD ("stop the moment we are back under it"),
+    # the low anchor was THRESHOLD ("stop the moment we are back under it"),
     # which is upstream's rule for a loop that only ever takes one whole-backlog pass. With real
     # chunking that rule stops the drain after the first chunk, leaving the rest of the backlog
     # raw until the next turn crosses the threshold again — chunking on paper, one-shot in
@@ -229,7 +229,7 @@ def curve_t(context_length: int, low_window: int = DEFAULT_SCALE_LOW_WINDOW,
 def _anchor_value(raw: Any, is_fraction: bool, anchor_window: int) -> float:
     """Resolve one endpoint.
 
-    fork: better-hermes-lcm — a fraction endpoint is resolved against **its own** anchor window
+    a fraction endpoint is resolved against **its own** anchor window
     (``scale_low_window`` for ``low``, ``scale_high_window`` for ``high``), never against the
     current window. Resolving both endpoints against the current window made the curve
     non-monotonic: ``leaf_chunk`` (1.0*W -> 0.04*W) produced 262k tokens/call at 256k, 345k at
@@ -268,7 +268,7 @@ def interpolate(anchor: Anchor, context_length: int, t: float, *,
 
 @lru_cache(maxsize=1)
 def _env_keys_by_field() -> Mapping[str, str]:
-    """fork: better-hermes-lcm — the env-spec list is immutable; index it once.
+    """the env-spec list is immutable; index it once.
 
     Every resolved setting used to walk the whole specification list, and every explicitness
     check walked the dataclass fields, on every resolve (audit verify-3 O9).
@@ -289,7 +289,7 @@ _NO_DEFAULT = object()
 
 @lru_cache(maxsize=8)
 def _field_defaults_for(config_type: type) -> Mapping[str, Any]:
-    """fork: better-hermes-lcm — dataclass defaults for one config type, computed once (verify-3 O9)."""
+    """dataclass defaults for one config type, computed once (verify-3 O9)."""
     defaults: dict[str, Any] = {}
     try:
         import dataclasses

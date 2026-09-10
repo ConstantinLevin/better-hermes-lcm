@@ -1,4 +1,4 @@
-"""fork: better-hermes-lcm — ``lcm_doctor coverage``: the executable definition of "no loss".
+"""``lcm_doctor coverage``: the executable definition of "no loss".
 
 A summary is acceptable only while a reader can tell from it WHAT the sources contain. This
 check extracts index-bearing entities from a node's sources (paths, identifiers, quoted
@@ -57,7 +57,7 @@ def extract_index_entities(text: str, *, limit: int = 400) -> List[str]:
 
 
 def index_entities_with_bound(text: str, *, limit: int = 400) -> tuple[List[str], bool]:
-    """fork: better-hermes-lcm — the entity list AND whether the cap cut it short.
+    """the entity list AND whether the cap cut it short.
 
     A source holding 1,000 filenames whose summary kept the first 400 scored 100% coverage:
     the cap decided which entities existed, and the score was computed over exactly the ones
@@ -82,7 +82,7 @@ def coverage_of(summary_text: str, index_block: str, sources_text: str,
     haystack = (str(summary_text or "") + "\n" + str(index_block or "")).lower()
     present = [e for e in entities if _present(e, haystack)]
     missing = [e for e in entities if not _present(e, haystack)]
-    # fork: better-hermes-lcm — no evidence is NOT full coverage. A node whose sources are missing,
+    # no evidence is NOT full coverage. A node whose sources are missing,
     # unreadable or empty yields zero entities; scoring that 1.0 let a broken-provenance node
     # certify as perfect. Report it as unscored and let the caller decide.
     fraction = (len(present) / len(entities)) if entities else None
@@ -92,7 +92,7 @@ def coverage_of(summary_text: str, index_block: str, sources_text: str,
         "fraction": round(fraction, 3) if fraction is not None else None,
         "scored": fraction is not None,
         "missing_sample": missing[:12],
-        # fork: better-hermes-lcm — the score describes only what was EXAMINED (round-2 verify-4 #34)
+        # the score describes only what was EXAMINED (round-2 verify-4 #34)
         "entities_truncated": bool(entities_truncated),
         "source_truncated": bool(source_truncated),
         "coverage_bounded": bool(entities_truncated or source_truncated),
@@ -149,7 +149,7 @@ def node_coverage(engine: Any, node: Any) -> Dict[str, Any]:
         "depth": int(node.depth),
         "level": int((meta or {}).get("level", 1) or 1),
         "source_count": len(node.source_ids),
-        # fork: a source the node records but the store/DAG cannot produce is a provenance
+        # a source the node records but the store/DAG cannot produce is a provenance
         # failure, reported separately from semantic coverage.
         "unreadable_source_ids": unreadable,
     })
@@ -165,7 +165,7 @@ def session_coverage(engine: Any, session_id: Optional[str] = None, *, limit: in
     below = [n for n in scored if n["fraction"] < floor]
     total_entities = sum(n["entities"] for n in scored)
     total_present = sum(n["present"] for n in scored)
-    # fork: better-hermes-lcm — three outcomes, never conflated: scored, unscored (no evidence), and
+    # three outcomes, never conflated: scored, unscored (no evidence), and
     # structurally broken (a recorded source that cannot be read).
     unscored = [n for n in per_node if n["entities"] == 0]
     broken = [n for n in per_node if n["unreadable_source_ids"]]
@@ -183,7 +183,7 @@ def session_coverage(engine: Any, session_id: Optional[str] = None, *, limit: in
         ],
         # a paging limit bounds the WORK, never the claim: say when the scan was partial
         "scan_complete": not truncated_scan,
-        # fork: better-hermes-lcm — nodes whose score covers only part of their sources or entities
+        # nodes whose score covers only part of their sources or entities
         "nodes_with_bounded_coverage": [n["node_id"] for n in bounded],
         "aggregate_fraction": round(total_present / total_entities, 3) if total_entities else None,
         "nodes_below_floor": [

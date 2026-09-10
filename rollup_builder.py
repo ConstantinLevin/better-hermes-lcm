@@ -12,7 +12,7 @@ from typing import Callable, Sequence
 
 from .config import LCMConfig
 from .dag import SummaryDAG
-from .errors import SummaryUnavailableError  # fork: better-hermes-lcm
+from .errors import SummaryUnavailableError
 from .escalation import summarize_with_escalation
 from .rollup_periods import CoverageNode, canonical_frontier, load_source_lineage
 from .rollup_store import RollupBuildToken, RollupStore
@@ -92,7 +92,7 @@ def _stable_hash(value: object) -> str:
 
 
 class RollupSourcesUnavailable(RuntimeError):
-    """fork: better-hermes-lcm — the summary database could not be read for this scope.
+    """the summary database could not be read for this scope.
 
     Distinct from "this scope has no content": an unavailable database used to read as an
     empty frontier, and a day with no sources RESOLVES — which deleted a previously ready
@@ -296,7 +296,7 @@ def _summarize_capped(
         if summary_tokens <= hard_max:
             return summary, summary_tokens
         if summary_tokens >= previous_tokens:
-            # fork: better-hermes-lcm — never truncate. A rollup that cannot be shrunk below its cap
+            # never truncate. A rollup that cannot be shrunk below its cap
             # fails loudly for this period; the DAG and raw store are untouched.
             raise SummaryUnavailableError(
                 f"rollup summary did not converge below {hard_max} tokens "

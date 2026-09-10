@@ -1,7 +1,7 @@
 name: hermes-lcm
-# fork: better-hermes-lcm — this line used to be byte-identical to upstream's, so nothing in a
-# running install said which of the two was loaded. The fork carries its own version from here
-# on; upstream's line is 1.0.0-rc.1 and the fork branches after it.
+# This line used to be byte-identical to upstream's, so nothing in a running install said which
+# of the two was loaded. The fork carries its own version from here on; upstream's line is
+# 1.0.0-rc.1 and the fork branches after it.
 version: 1.1.0-beta.1
 description: "Lossless Context Management — standalone Hermes plugin with a DAG-based context engine that never loses a message (better-hermes-lcm fork)"
 author: "Voltropy / Hermes Community"

@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
-from .node_meta import NodeMetaStore, ensure_node_meta_table  # fork: better-hermes-lcm
+from .node_meta import NodeMetaStore, ensure_node_meta_table
 from .db_bootstrap import (
     ExternalContentFtsSpec,
     add_column_if_missing,
@@ -158,7 +158,7 @@ class SummaryNode:
     search_directness: float = 0.0
 
 
-# fork: better-hermes-lcm — the exact order `_row_to_node` decodes. Every summary_nodes read uses it
+# the exact order `_row_to_node` decodes. Every summary_nodes read uses it
 # instead of `SELECT *`, so physical column order can never change the meaning of a field.
 _NODE_SELECT_COLUMNS = (
     "node_id, session_id, depth, summary, token_count, source_token_count, "
@@ -229,8 +229,8 @@ class SummaryDAG:
         )
         run_versioned_migrations(self._conn)
         self._ensure_source_window_columns()
-        ensure_node_meta_table(self._conn)  # fork: better-hermes-lcm
-        self.node_meta = NodeMetaStore(self._conn, self._db_lock)  # fork: better-hermes-lcm
+        ensure_node_meta_table(self._conn)
+        self.node_meta = NodeMetaStore(self._conn, self._db_lock)
         self._conn.commit()
 
     def _ensure_source_window_columns(self) -> None:
@@ -262,12 +262,12 @@ class SummaryDAG:
     def add_node(self, node: SummaryNode) -> int:
         """Insert a summary node and return its node_id.
 
-        fork: better-hermes-lcm — every publication path in this fork uses ``add_node_with_meta``
+        every publication path in this fork uses ``add_node_with_meta``
         instead. A node inserted here has no sidecar row, so assembly renders it without its
         level tag and the index-block reader has nothing to answer for it.
         """
         with self._db_lock:
-            # fork: better-hermes-lcm — the INSERT is inside the protection too. A statement that fails
+            # the INSERT is inside the protection too. A statement that fails
             # (a schema trigger refusing the row, a cancellation) still leaves the transaction
             # it opened OPEN, and the next unrelated commit on this connection published
             # whatever was pending in it (round-2 verify-3 #3).
@@ -299,7 +299,7 @@ class SummaryDAG:
             return node.node_id
 
     def _rollback_failed_publication(self) -> None:
-        """fork: better-hermes-lcm — leave no pending statement for an unrelated commit to publish."""
+        """leave no pending statement for an unrelated commit to publish."""
         try:
             self._conn.rollback()
         except Exception:  # pragma: no cover - a dead connection cannot roll back
@@ -307,7 +307,7 @@ class SummaryDAG:
 
     def add_node_with_meta(self, node: SummaryNode, *, level: int,
                            summary: Optional[str] = None) -> int:
-        """fork: better-hermes-lcm — publish a node and its sidecar in ONE transaction.
+        """publish a node and its sidecar in ONE transaction.
 
         Upstream inserted the node, committed, then wrote the level/index-block sidecar in a
         second transaction. A failure in between left a summary in the DAG that assembly
@@ -316,7 +316,7 @@ class SummaryDAG:
         """
         with self._db_lock:
             try:
-                # fork: the INSERT is inside the protection: a refused insert left the
+                # the INSERT is inside the protection: a refused insert left the
                 # transaction it opened open, and the next unrelated commit published whatever
                 # was pending in it (round-2 verify-3 #3).
                 cur = self._conn.execute(
@@ -413,7 +413,7 @@ class SummaryDAG:
                 f"DELETE FROM summary_nodes WHERE node_id IN ({id_placeholders})",
                 node_ids,
             )
-            # fork: better-hermes-lcm — sidecar cascade. Any node-delete path upstream adds must
+            # sidecar cascade. Any node-delete path upstream adds must
             # cascade here too, or lcm_node_meta keeps rows for nodes that no longer exist.
             NodeMetaStore.delete_many(conn, node_ids)
         return node_ids
@@ -488,11 +488,11 @@ class SummaryDAG:
         Used for /new carry-over where retained summaries should become part of
         the fresh session while preserving node IDs and node-to-node links.
 
-        fork: better-hermes-lcm — ``min_depth`` moves only nodes at that depth or deeper; the
+        ``min_depth`` moves only nodes at that depth or deeper; the
         shallower ones stay in the old session instead of being deleted.
         """
         with self._db_lock:
-            # fork: better-hermes-lcm — same rollback discipline as `add_node_with_meta`. A failed
+            # same rollback discipline as `add_node_with_meta`. A failed
             # commit here left the transaction open with the ownership change pending, the
             # connection already reading the nodes under the new session, and the next
             # unrelated publication committed the carry-over that had reported failure
@@ -517,7 +517,7 @@ class SummaryDAG:
         return moved
 
     def get_frontier_token_total(self, session_id: str) -> int:
-        """fork: better-hermes-lcm — SUM(token_count) over the session's uncondensed nodes, in SQL.
+        """SUM(token_count) over the session's uncondensed nodes, in SQL.
 
         Same set as ``get_uncondensed_at_depth`` unioned over depths; avoids decoding every
         node row just to add up one column (``_summary_frontier_tokens`` is polled per pass).
@@ -536,7 +536,7 @@ class SummaryDAG:
         return int(row[0] or 0) if row else 0
 
     def get_frontier_nodes(self, session_id: str) -> List["SummaryNode"]:
-        """fork: better-hermes-lcm — the session's uncondensed nodes, in SQL and UNBOUNDED.
+        """the session's uncondensed nodes, in SQL and UNBOUNDED.
 
         The engine built this set by loading every node with ``limit=100_000`` and filtering in
         Python. Past that limit the frontier was computed from a truncated node set, silently:
@@ -559,7 +559,7 @@ class SummaryDAG:
         return [self._row_to_node(r) for r in rows]
 
     def covered_message_prefix_end(self, session_id: str, *, floor: int = 0) -> int:
-        """fork: better-hermes-lcm — the end of the CONTIGUOUS run of stored rows this session's leaves
+        """the end of the CONTIGUOUS run of stored rows this session's leaves
         already summarise, starting just after ``floor``.
 
         The DAG is the durable record of what has been compacted; the lifecycle frontier is a
@@ -604,7 +604,7 @@ class SummaryDAG:
 
     def get_parent_node_ids(self, node_id: int, limit: int = 256,
                             *, session_id: Optional[str] = None) -> List[int]:
-        """fork: better-hermes-lcm — nodes that record ``node_id`` as one of their sources.
+        """nodes that record ``node_id`` as one of their sources.
 
         Used to decide whether a node is reachable from the caller's session: after ``/new``
         carries the retained depths forward, a legitimately expandable child can live in the
@@ -636,7 +636,7 @@ class SummaryDAG:
         return [int(row[0]) for row in rows]
 
     def get_session_depths(self, session_id: str) -> List[int]:
-        """fork: better-hermes-lcm — the distinct depths present for a session, ascending."""
+        """the distinct depths present for a session, ascending."""
         with self._db_lock:
             rows = self._conn.execute(
                 """SELECT DISTINCT depth FROM summary_nodes
@@ -806,7 +806,7 @@ class SummaryDAG:
           session-level source presence
         - mixed-source nodes may match more than one ``source`` filter
 
-        fork: better-hermes-lcm — pass ``progress`` to learn whether the answer is EXHAUSTIVE. The
+        pass ``progress`` to learn whether the answer is EXHAUSTIVE. The
         scan is bounded by a candidate cap, and upstream returned the bounded result the same
         way it returned a complete one, so "no matches" could mean "your match is candidate
         501" (audit p05 SQ03). The dict is filled with ``complete``, ``scanned_rows``,
@@ -815,7 +815,7 @@ class SummaryDAG:
         def _finish(found: List[SummaryNode], *, complete: bool, scanned: int,
                     cap: int, path: str, more_available: bool | None = None,
                     work_capped: bool | None = None) -> List[SummaryNode]:
-            # fork: better-hermes-lcm — three different things used to collapse into ``complete``:
+            # three different things used to collapse into ``complete``:
             # an ordered page that IS the correct answer, a corpus with more matches past
             # this page, and a scan that actually hit its work cap. A correct top-k page was
             # reported as a capped failure (round-2 verify-2 #11), which teaches the agent to
@@ -898,7 +898,7 @@ class SummaryDAG:
                 results.append(node)
             results.sort(key=lambda node: _fts_result_sort_key(node, sort))
 
-            rows_exhausted = len(rows) < fetch_limit  # fork: the index really ran out
+            rows_exhausted = len(rows) < fetch_limit  # the index really ran out
             exhausted = rows_exhausted or scanned_rows >= candidate_cap
             if source and not exhausted:
                 offset += len(rows)
@@ -966,7 +966,7 @@ class SummaryDAG:
         terms = extract_search_terms(safe_query)
         phrases = extract_quoted_phrases(safe_query)
         if not terms:
-            # fork: a query that sanitizes to nothing was never run — say so
+            # a query that sanitizes to nothing was never run — say so
             if progress is not None:
                 progress.update({"complete": False, "scanned_rows": 0, "candidate_cap": 0,
                                  "path": "like", "no_terms": True,
@@ -984,7 +984,7 @@ class SummaryDAG:
             like_clauses.append("summary LIKE ? ESCAPE '\\'")
             args.append(f"%{escape_like(term)}%")
         where.append("(" + " OR ".join(like_clauses) + ")")
-        # fork: better-hermes-lcm — a term whose meaning is a symbol the index deletes must actually
+        # a term whose meaning is a symbol the index deletes must actually
         # MATCH. Scoring by "any term" turned "alpha∀ beta" into a search for either word, so a
         # row holding neither symbol-bearing term came back first and complete
         # (round-3 verify-2 #7). A standalone symbol (an emoji) stays a routing trigger.
@@ -998,12 +998,12 @@ class SummaryDAG:
         nodes: list[SummaryNode] = []
         source_match_cache: dict[int, bool] = {}
         while True:
-            # fork: better-hermes-lcm — order in SQL BEFORE the limit. Paging an unordered candidate
+            # order in SQL BEFORE the limit. Paging an unordered candidate
             # set and sorting the page in Python meant "give me the newest match" returned the
             # newest of an arbitrary page: with 100 matching summaries, sort="recency" limit=1
             # returned #50. This path is not exotic — CJK and emoji queries are routed here by
             # design, not only a broken FTS index.
-            # fork: better-hermes-lcm — order by the SAME clock the Python ranking uses. Selecting by
+            # order by the SAME clock the Python ranking uses. Selecting by
             # created_at and then ranking by latest_at dropped the newest-content node before
             # ranking ever saw it (verify-3: "LIKE ordering is fixed" → partially).
             order_sql = (
@@ -1034,7 +1034,7 @@ class SummaryDAG:
                 if required_terms and not all(
                     count_term_matches(node.summary, term) for term in required_terms
                 ):
-                    continue  # fork: better-hermes-lcm — see required_terms above
+                    continue  # see required_terms above
                 node.search_rank = -float(score)
                 node.search_directness = compute_directness_score(node.summary, terms, phrases)
                 nodes.append(node)
@@ -1042,7 +1042,7 @@ class SummaryDAG:
             nodes.sort(key=lambda node: _fallback_result_sort_key(node, sort))
             rows_exhausted = len(rows) < fetch_limit
             if not source or rows_exhausted or scanned_rows >= candidate_cap:
-                # fork: better-hermes-lcm — a full page under a recency sort was ordered by the SAME
+                # a full page under a recency sort was ordered by the SAME
                 # clock the Python ranking uses, so a page already ``limit`` long is the exact
                 # newest-first answer; only relevance/hybrid ordering, which is computed in
                 # Python after the fetch, can still be displaced by an unscanned row.
@@ -1066,7 +1066,7 @@ class SummaryDAG:
         """Get the immediate child nodes of a summary node."""
         if node.source_type != "nodes" or not node.source_ids:
             return []
-        # fork: better-hermes-lcm — batched under SQLite's bound-variable ceiling (verify-3 p04 ST5)
+        # batched under SQLite's bound-variable ceiling (verify-3 p04 ST5)
         rows = []
         ids = [int(source_id) for source_id in node.source_ids]
         for start in range(0, len(ids), _SQLITE_MAX_BOUND_VARIABLES):
@@ -1175,7 +1175,7 @@ class SummaryDAG:
     def get_source_time_window(self, node_ids: List[int]) -> tuple[float | None, float | None]:
         if not node_ids:
             return None, None
-        # fork: better-hermes-lcm — batched under SQLite's bound-variable ceiling (verify-3 p04 ST5)
+        # batched under SQLite's bound-variable ceiling (verify-3 p04 ST5)
         ids = [int(node_id) for node_id in node_ids]
         earliest: float | None = None
         latest: float | None = None
@@ -1234,7 +1234,7 @@ class SummaryDAG:
     def _row_to_node(self, row) -> SummaryNode:
         """Decode one summary_nodes row.
 
-        fork: better-hermes-lcm — the projection is EXPLICIT (``_NODE_SELECT_COLUMNS``) and decoding is
+        the projection is EXPLICIT (``_NODE_SELECT_COLUMNS``) and decoding is
         positional against that projection, not against ``SELECT *``. With ``SELECT *`` the
         field order came from the physical table, so a database whose columns were added in a
         different order — an older build, a restored backup, a future migration — silently

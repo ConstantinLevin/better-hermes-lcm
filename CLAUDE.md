@@ -41,9 +41,9 @@ A cut that fires at 256k but not at 1M is a **defect in this fork**. "That is wh
 
 ## Architecture: where the fork's code lives
 
-Fork logic goes in **new modules** so upstream merges stay reviewable; upstream files get small, marked `# fork: better-hermes-lcm` hooks.
+Fork logic goes in **new modules** so upstream merges stay reviewable; upstream files get small hooks, each with the reason for it in the comment beside it.
 
-> **Naming:** everything is **better-hermes-lcm** — project, repository, branch and the in-code marker. Grep `# fork: better-hermes-lcm` to find every fork hook. The one exception is `node_meta.LEGACY_MIGRATION_STEPS`, which still names the pre-rename migration row so a database written by an older build has that row retired instead of recording one migration twice.
+> **Naming:** everything is **better-hermes-lcm** — project, repository and branch. Two identifiers deliberately keep the older spelling because they exist in databases already written: `node_meta.MIGRATION_STEP` (`better_hermeslcm_node_meta_v1`) and `node_meta.LEGACY_MIGRATION_STEPS` beside it, which names the pre-rename row so an older build's database has it retired rather than recording one migration twice.
 
 Fork modules: `window_scaling.py` (the anchor table and curve), `window_scaled_mixin.py` (`effective_*` resolution), `marked_loss.py` (**every marker the fork emits**), `host_cooldown.py`, `leaf_pipeline.py`, `node_meta.py`, `coverage_doctor.py`, `errors.py`.
 
@@ -55,7 +55,7 @@ ingest → store.py → reconcile.py → compaction.py (leaf + condensation)
        → tools.py (retrieval) → maintenance / lifecycle / backup
 ```
 
-**Every hook in an upstream file carries a `# fork: better-hermes-lcm` marker, and the reason goes in the comment.** `grep` for the marker is the merge risk surface; `git diff $(cat .upstream-base)..HEAD` is the file list. There used to be a hand-maintained table of both, and by the time it was deleted a quarter of its rows described code that had moved. Write the note where it cannot drift from what it describes.
+**`git diff $(cat .upstream-base)..HEAD` is the merge risk surface.** It is exact and it is always current, which is why there is no marker convention and no table: a hand-maintained list of the same thing had a quarter of its rows describing code that had moved by the time it was deleted, and a label repeated in five hundred comments told a reader nothing they did not already know from being in this repository. Put the *reason* for a hook in a comment beside it, where it cannot drift from what it describes, and let the diff say which lines are ours.
 
 ## Things that will bite you
 

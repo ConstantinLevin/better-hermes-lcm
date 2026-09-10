@@ -71,7 +71,7 @@ def _is_unsupported_filesystem_capability(
 def _tool_call_stub(tool_call_id: str) -> str:
     """A filename-safe stub for a call id.
 
-    fork: better-hermes-lcm — only "/" and ":" were replaced, so a call id containing a SPACE (or any
+    only "/" and ":" were replaced, so a call id containing a SPACE (or any
     other character the reader's ref pattern stops at) produced a marker whose ref the reader
     parsed as empty: the payload was written and its reference was unusable
     (round-3 verify-4 #25). The reader accepts a no-space, no-bracket token; the writer must
@@ -972,7 +972,7 @@ def load_externalized_payload(ref: str, *, config, hermes_home: str = "") -> Dic
     except (OSError, json.JSONDecodeError):
         return None
     summary = _externalized_summary(path, payload)
-    # fork: better-hermes-lcm — a parseable file is not a valid payload. A file holding only
+    # a parseable file is not a valid payload. A file holding only
     # {"content_chars": 200} loaded "successfully" with content "", so a truncated or
     # half-written artifact read as a recovered empty result (round-2 verify-4 #33). Missing
     # or short content is an explicit corruption outcome, not an empty value.
@@ -2133,7 +2133,7 @@ def maybe_externalize_payload(
     hermes_home: str = "",
     force: bool = False,
     metadata: Dict[str, Any] | None = None,
-    ignore_enabled_flag: bool = False,  # fork: better-hermes-lcm — see below
+    ignore_enabled_flag: bool = False,  # see below
 ) -> Dict[str, Any] | None:
     """Externalize one normalized payload if configured.
 
@@ -2142,7 +2142,7 @@ def maybe_externalize_payload(
     unavailable. On storage failure callers should keep the original content so
     there is no silent data loss.
 
-    fork: better-hermes-lcm — ``ignore_enabled_flag`` is for content that would otherwise be LOST
+    ``ignore_enabled_flag`` is for content that would otherwise be LOST
     rather than merely large: an oversized tool result recovered from the host's expiring
     spillover directory. The opt-in generic externalization flag governs whether ordinary
     large outputs move out of the transcript; it must not decide whether the archive keeps

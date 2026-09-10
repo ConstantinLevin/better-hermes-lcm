@@ -10,5 +10,5 @@
 - [ ] Anything else you ran, and what it showed
 
 ## If this touches an upstream file
-- [ ] The hook carries a `# fork: better-hermes-lcm` marker and the reason is in the comment
+- [ ] The reason for the hook is in the comment beside it
 - [ ] Said here what should happen to it when upstream edits the same function
