@@ -6,6 +6,19 @@ This repo also publishes GitHub Releases. This file is the repo-root release sur
 
 No additional changes yet.
 
+## v1.1.0-beta.1 - 2026-09-10
+
+First release of this fork, 122 commits on top of upstream `8d1b1e6`. Full notes in
+[`.github/release-notes/v1.1.0-beta.1.md`](.github/release-notes/v1.1.0-beta.1.md). In short:
+leaf chunking now works at every window rather than degenerating into a one-shot compaction at
+256k; the retrieval tools no longer trim their own answers and then report the shortened count as
+the total; a summariser refusal is a refusal instead of a silent truncation; the prompt forbids
+inference; the injected recall policy tells the agent to expand a summary before trusting it; and
+a host-spilled tool output gets a durable copy before the host's 24-hour cache deletes it.
+
+It has never run a real session. The weighting is frozen outside 256k–1M, and condensation is
+verified by reading rather than by running.
+
 ---
 
 Everything below this line is **upstream `stephenschoettler/hermes-lcm`**, kept because this fork
