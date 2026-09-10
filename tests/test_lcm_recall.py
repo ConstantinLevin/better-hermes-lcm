@@ -535,9 +535,12 @@ def test_answer_ready_delta_is_opt_in_and_returns_only_novel_exact_refs(
     assert exhausted["delta"]["termination_reason"] == "no_novel_exact_ref"
 
 
-def test_answer_ready_delta_refs_match_hits_after_response_cap_eviction(
+def test_answer_ready_delta_refs_match_every_hit_the_limit_allowed(
     recall_engine, monkeypatch
 ):
+    # fork: better-hermeslcm — this asserted that hits were evicted to fit a response char cap
+    # and that the delta still matched the shortened list. There is no cap: `limit` is the
+    # contract, so every selected hit is delivered and the delta covers all of them.
     contents = [
         f"kanban dashboard sprint evidence-{index} " + (str(index) * 2_300)
         for index in range(3)
@@ -574,16 +577,17 @@ def test_answer_ready_delta_refs_match_hits_after_response_cap_eviction(
     )
 
     delivered_refs = [hit["exact_ref"] for hit in payload["hits"]]
-    assert payload["provenance"]["answer_ready"]["response_truncated"] is True
+    assert payload["provenance"]["answer_ready"]["response_truncated"] is False
     assert payload["delta"]["novel_refs"] == delivered_refs
     assert payload["delta"]["novel_ref_count"] == len(delivered_refs)
-    assert all_refs - set(delivered_refs)
-    assert not (all_refs - set(delivered_refs)) & set(payload["delta"]["novel_refs"])
+    assert set(delivered_refs) == all_refs
 
 
-def test_answer_ready_response_cap_evicts_summary_leads_without_delta_refs(
+def test_answer_ready_keeps_every_summary_lead_and_reports_no_delta_refs(
     recall_engine, monkeypatch
 ):
+    # fork: better-hermeslcm — this asserted summary leads were evicted to fit a response char
+    # cap. The cap is gone; the leads are all delivered and only `limit` bounds them.
     response_cap = 6_000
     summary_leads = [
         {
@@ -622,9 +626,8 @@ def test_answer_ready_response_cap_evicts_summary_leads_without_delta_refs(
 
     expansion = payload["provenance"]["answer_ready"]
     assert payload["hits"] == []
-    assert len(expansion["summary_leads"]) < len(summary_leads)
-    assert len(json.dumps(payload, ensure_ascii=False)) <= response_cap
-    assert expansion["response_truncated"] is True
+    assert len(expansion["summary_leads"]) == len(summary_leads)
+    assert expansion["response_truncated"] is False
     assert payload["delta"]["novel_refs"] == []
     assert payload["delta"]["novel_ref_count"] == 0
 
@@ -944,15 +947,20 @@ def test_answer_ready_expands_only_first_eight_and_reports_policy(
     assert policy["expanded_hit_limit"] == 8
     assert policy["per_hit_char_cap"] == 2_400
     assert policy["snippet_char_cap"] == 300
-    assert policy["response_char_cap"] == 64_000
+    # fork: better-hermeslcm — response_char_cap is gone from the payload with the cap itself
+    assert "response_char_cap" not in policy
     assert policy["response_truncated"] is False
-    assert "whole hits only" in policy["response_policy"]
+    assert "no response char cap" in policy["response_policy"]
     assert "no additional retrieval search" in policy["hydration_policy"]
 
 
-def test_answer_ready_enforces_complete_response_cap_and_marks_query_truncation(
+def test_answer_ready_echoes_a_huge_query_back_whole(
     recall_engine, monkeypatch
 ):
+    # fork: better-hermeslcm — this asserted the response was held under 64,000 chars and that
+    # the echoed query was cut to 4,096 with a query_truncated flag. Both are gone: the caller
+    # sent that query, so it comes back as sent, and an oversized tool response is the host's
+    # spillover problem rather than something the plugin trims on the caller's behalf.
     _non_strict(recall_engine)
     node = _add_summary(
         recall_engine,
@@ -974,10 +982,9 @@ def test_answer_ready_enforces_complete_response_cap_and_marks_query_truncation(
     )
     payload = json.loads(raw)
 
-    assert len(raw) <= 64_000
-    assert len(payload["query"]) == 4_096
+    assert len(payload["query"]) == 70_000
     assert len(payload["hits"]) == 1
-    assert payload["provenance"]["answer_ready"]["query_truncated"] is True
+    assert "query_truncated" not in payload["provenance"]["answer_ready"]
 
 
 def test_answer_ready_hydration_uses_exact_reads_without_an_extra_search(

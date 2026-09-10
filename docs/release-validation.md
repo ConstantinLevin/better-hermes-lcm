@@ -1,6 +1,17 @@
 # Release validation
 
-Use `scripts/validate_release.sh` as the local release-confidence lane before tagging or publishing hermes-lcm. The script is offline by default: it does not call model providers, does not mutate live Hermes config, routes Python bytecode/cache artifacts under the validation output directory, and writes validation artifacts under a fresh output directory.
+Use `scripts/validate_release.sh` as the local release-confidence lane before tagging or publishing. The script is offline by default: it does not call model providers, does not mutate live Hermes config, routes Python bytecode/cache artifacts under the validation output directory, and writes validation artifacts under a fresh output directory.
+
+**This script is not the fork's evidence.** A green suite is a regression guard. The executable
+form of this fork's no-loss doctrine is the two end-to-end anchors in
+[`CLAUDE.md`](../CLAUDE.md#verification--what-counts-as-evidence), and both must report 0
+unreachable rows, 0 missing facts and 0 facts never offered to the summariser before a release is
+a release:
+
+```bash
+python3 scripts/e2e_no_loss.py 262144 400
+python3 scripts/e2e_no_loss.py 1000000 3000
+```
 
 ## Command
 
@@ -9,7 +20,7 @@ Prerequisites:
 - Run from the repository checkout.
 - Use a Python environment with `pytest` installed. If `python` on `PATH` is not the intended interpreter, set `PYTHON=/path/to/python`.
 - The benchmark and stress gates are standalone-checkout safe: they provide the minimal Hermes Agent `ContextEngine` base class needed for deterministic local validation when Hermes Agent is not importable.
-- On a PR branch with `origin/main` available, the whitespace/conflict-marker gate checks `origin/main...HEAD` instead of only uncommitted working-tree changes, then also checks the local working tree and staged diff. Override with `LCM_RELEASE_DIFF_BASE=<rev-or-range>` when validating against another base. If no changed `origin/main...HEAD` range is available but `HEAD` has a parent, the gate checks `HEAD^...HEAD` so a detached release checkout still validates the committed release diff.
+- The whitespace/conflict-marker gate resolves its range in this order: `LCM_RELEASE_DIFF_BASE` if set, else `origin/main...HEAD` when `origin/main` exists and differs from `HEAD`, else `HEAD^...HEAD`. It then also checks the local working tree and staged diff. **This fork's branch is `better-hermeslcm`, not `main`**, so on a clone that has no `origin/main` the gate silently falls back to a single-commit range — set `LCM_RELEASE_DIFF_BASE=<rev-or-range>` (for example `origin/better-hermeslcm...HEAD`) to validate the whole release diff.
 - Python validation runs with `PYTHONPYCACHEPREFIX` under the output directory and pytest cache disabled, then records git status before and after validation so release runs do not silently dirty the checkout.
 - The low-file-descriptor full gate lowers the limit to 1024 only when the current shell allows it; locked-down hosts keep their existing lower limit instead of failing before pytest starts.
 
@@ -19,10 +30,11 @@ scripts/validate_release.sh
 
 Default smoke mode runs the local gates that should be cheap enough for routine operator use:
 
-- adaptive `git diff --check` over `origin/main...HEAD` on PR branches or `HEAD^...HEAD` in detached/no-base release checkouts, plus local working-tree and staged diff checks
+- adaptive `git diff --check` over the resolved range above, plus local working-tree and staged diff checks
+- `scripts/validate_dependency_contract.py --report-environment` (see [Dependency assurance](dependency-assurance.md))
 - Python compile checks for the plugin and release scripts
-- shell syntax checks for maintained shell scripts
-- focused pytest coverage for core, command, packaging, benchmark, and stress surfaces
+- shell syntax checks for `scripts/install.sh`, `scripts/update.sh` and the validator itself
+- focused pytest over `test_lcm_core`, `test_lcm_command`, `test_packaging_install`, `test_benchmarking_cli`, `test_stress_release_check` and `test_historical_externalization_backfill`
 - deterministic benchmark smoke with a synthetic fixture
 - deterministic stress smoke
 
@@ -64,12 +76,14 @@ The checklist is safe to paste into a release note or PR validation section afte
 
 ### Gates
 - [ ] git diff/whitespace check passed
+- [ ] dependency contract validated
 - [ ] Python compile checks passed
 - [ ] shell syntax checks passed
 - [ ] focused or full pytest passed
 - [ ] deterministic benchmark smoke passed
 - [ ] deterministic stress smoke/release passed
 - [ ] git status before/after validation reviewed
+- [ ] `scripts/e2e_no_loss.py` clean at both anchors (262144 and 1000000)
 
 ### Doctor triage
 - [ ] `lcm_doctor` warnings were classified as `safe/ignore`, `inspect`, or `backup-first cleanup`

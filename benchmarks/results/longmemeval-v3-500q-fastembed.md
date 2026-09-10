@@ -56,9 +56,9 @@ top-1 picks.
 - SCALE (v3 storage options): session-level retrieval quality on the local fastembed
   floor is unchanged by the int8/Matryoshka/binary-prescreen storage options — those
   are additive and default-off, and this 500q harness's per-question temp stores are
-  far smaller than the real-archive scale they target. See the operator guide's
-  [vector storage scale options](../../docs/operator-guide.md#vector-storage-scale-options-v3)
-  for the C1 real-data bench (92,997-chunk archive) these options were built for.
+  far smaller than the real-archive scale they target. They were built for a C1 real-data
+  bench (92,997-chunk archive); the walkthrough that described them was an upstream
+  subsystem guide and is no longer in this fork.
 - PRODUCTION ARM: `lcm_recall`'s 50q result (R@5 0.98, R@10 1.00) tracks
   `chunk_vectors`' session-level strength; R@1 0.42 is the recency-prior/FTS-noise
   cost of scoring the real tool end-to-end rather than a bare vector arm.

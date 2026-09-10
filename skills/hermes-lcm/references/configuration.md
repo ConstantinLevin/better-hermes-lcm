@@ -31,8 +31,9 @@ It refuses conflicting paths rather than overwriting an existing install.
 
 ## High-impact controls
 
-Use `docs/operator-guide.md` as the complete current source, and `FORK.md` for the
-window-weighted defaults this build resolves.
+`README.md` is the complete current source for settings, `FORK.md` for the window-weighted
+defaults this build resolves, and `docs/operator-guide.md` for what silently suppresses the
+curve.
 
 **Most sizes are derived, not configured.** Threshold, fresh tail, leaf chunk, pass cap, drain
 stop, condensation budget, depth, timeouts, concurrency and several caps slide with the model's

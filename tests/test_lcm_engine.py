@@ -27398,7 +27398,11 @@ class TestHandleLoadSession:
         assert result["messages"][0]["content_truncated"] is True
         assert result["messages"][0]["next_content_offset"] == 3
 
-    def test_load_session_clamps_max_content_chars(self, engine):
+    def test_load_session_honours_max_content_chars_as_given(self, engine):
+        # fork: better-hermeslcm — this asserted the request was clamped to a hard 20,000 and
+        # reported as max_content_chars_clamped_from. The clamp is gone: the argument is the
+        # caller's contract, and the plugin overriding how much the agent asked for is the
+        # plugin deciding for the agent.
         store_id = engine._store.append(
             "large-session",
             {"role": "user", "content": "x" * 25_000},
@@ -27411,11 +27415,11 @@ class TestHandleLoadSession:
             )
         )
 
-        assert result["max_content_chars"] == 20_000
-        assert result["max_content_chars_clamped_from"] == 50_000
+        assert result["max_content_chars"] == 50_000
+        assert "max_content_chars_clamped_from" not in result
         assert result["messages"][0]["store_id"] == store_id
-        assert len(result["messages"][0]["content"]) == 20_000
-        assert result["messages"][0]["content_truncated"] is True
+        assert len(result["messages"][0]["content"]) == 25_000
+        assert result["messages"][0]["content_truncated"] is False
 
     def test_load_session_rejects_missing_session_id_and_invalid_filters(self, engine):
         missing = json.loads(engine.handle_tool_call("lcm_load_session", {}))
