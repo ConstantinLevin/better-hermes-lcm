@@ -65,7 +65,7 @@ retrieval tools → operator, backup and maintenance.
 > intersect the upstream-changed symbols with the ones carrying a `# fork: better-hermes-lcm`
 > marker, re-read those functions **in the merged tree, whole**, confirm every marker is still
 > reached and not merely still present, and ask of every change *does this (re)introduce loss?* The ten failure modes and the full procedure are
-> standing task **R1** in [`docs/TASKS.md`](docs/TASKS.md); merge early and often, because a
+> standing task **R1**; merge early and often, because a
 > merge deferred until upstream has moved hundreds of commits is a rewrite, not a merge.
 
 ```
@@ -85,10 +85,11 @@ d["hermes-lcm"]["revision"] = subprocess.check_output(["git","-C",str(pathlib.Pa
 p.write_text(json.dumps(d, indent=2)+"\n")
 PY
 ```
-Then, before calling the upgrade done: both e2e anchors clean against the DEPLOYED plugin
+Then, before calling the upgrade done: both e2e anchors clean
 (`python3 scripts/e2e_no_loss.py 262144 400` and `... 1000000 3000`), update `.upstream-base`,
-record the merge as a pass in `docs/TASKS.md`, and re-run audit **V1** — an upstream merge is
-exactly when "strictly better than upstream" can silently stop being true.
+and re-run audit **V1** — an upstream merge is exactly when "strictly better than upstream" can
+silently stop being true.
+What the merge decided lives in its commit message; anything it leaves open becomes an issue.
 
 `plugin.yaml` keeps upstream's version string (four upstream tests pin it; the fork is
 identified by this file and `git log`). The live `lcm.db` gains the
@@ -104,8 +105,8 @@ under `tests/fork/`.
 ## Tracking lossless-claw (the second maintenance duty)
 The fork was inspired by [lossless-claw](https://github.com/Martian-Engineering/lossless-claw)
 (OpenClaw, TypeScript). Watch **commits, not only tags** — the last version analysed in depth is
-**v1.0.0**; what that round decided is recorded in `docs/TASKS.md` (sections C and G), not as a
-report in this repository. On every release *or* meaningful commit past it:
+**v1.0.0**; what that round left undecided is two open issues labelled `ported-capability`, not
+a report in this repository. On every release *or* meaningful commit past it:
 1. Clone the release tag to a temp dir (`git clone --depth 1 --branch vX.Y.Z … /tmp/lossless-claw-vX.Y.Z`).
 2. Compare it deeply against this fork, one agent per aspect, code-level with citations on both
    sides: (1) compaction/DAG algorithm, (2) loss avoidance/provenance/recovery, (3) summariser
@@ -114,9 +115,9 @@ report in this repository. On every release *or* meaningful commit past it:
 3. Keep only findings where claw is genuinely better *for this fork's purpose* (no loss; 1M
    without degrading 256k) or fixes something the hermes-lcm base does badly. Port them into
    the fork modules, with tests under `tests/fork/`, and record each ported item (and each
-   rejected one, with the reason) as a backlog entry in `docs/TASKS.md`. Ported work lives in the
-   code; rejected work lives in the backlog with its reason. A separate findings document is
-   neither, and does not ship.
+   rejected one, with the reason) as an issue. Ported work lives in the code; rejected work
+   lives in a closed issue with its reason. A separate findings document is neither, and does
+   not ship.
 4. **Treat a claw BUGFIX as a lead, not only as a port candidate.** Both projects solve the same
    problem, so a bug claw fixed very often exists here in an analogous shape — different code,
    same mistake. For each fix, find the corresponding place in this fork and prove by probe
@@ -127,7 +128,7 @@ report in this repository. On every release *or* meaningful commit past it:
 
 The full procedure, its trigger and the two outstanding audits (is the fork strictly superior to
 upstream mainline; did we miss anything the current claw does better) are written up as standing
-tasks R1/R2 and V1/V2 in [`docs/TASKS.md`](docs/TASKS.md) under "WHAT IS LEFT TO DO".
+tasks R1/R2/R3 and V1/V2, open issues labelled `standing` and `verification`.
 
 ## Every anchor, classified: preference or quality?
 

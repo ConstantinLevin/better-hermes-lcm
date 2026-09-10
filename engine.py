@@ -2136,7 +2136,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         Only messages carrying a host-supplied id are considered, so a position that merely
         MOVED (the active context legitimately reshapes after a compaction) can never be
         mistaken for an edit — that mistake produced duplicate rows when it was tried against
-        list positions (see docs/TASKS.md). The superseded row is kept; the new row records
+        list positions. The superseded row is kept; the new row records
         which one it replaces, so the archive holds both versions and the correction is the
         newer of them.
         """

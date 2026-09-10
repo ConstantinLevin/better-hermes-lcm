@@ -31,7 +31,7 @@ Three goals, in priority order:
    better**, with *strictly superior to upstream* as the bar.
 
 Working on this? Read [`CLAUDE.md`](CLAUDE.md) first, then [`FORK.md`](FORK.md) (maintenance
-contract) and [`docs/TASKS.md`](docs/TASKS.md) → "WHAT IS LEFT TO DO".
+contract). The open work is the [issue tracker](https://github.com/ConstantinLevin/better-hermes-lcm/issues).
 
 `hermes-lcm` replaces one-shot active-context compression with a SQLite-backed,
 DAG-based context engine. It keeps the live prompt bounded, preserves raw
@@ -1134,7 +1134,7 @@ inspired by. The contract, in full, is in [`FORK.md`](FORK.md); the short form:
    summariser prompts and index quality, retrieval tools and operability — and port everything
    it does better for this fork's purpose (no loss; 1M windows without degrading 256k). The
    audit prompts are under `docs/claw-comparison/prompts/`; what each round decided is recorded
-   as a pass entry in `docs/TASKS.md`, and ported work lives in the code.
+   in its commit and in the issues it opens or closes, and ported work lives in the code.
 3. Never merge anything that drops content without a marker, coarsens the index, or makes a
    bounded result read as a complete one. Upstream is the floor — never worse than it — not the
    target: matching its number at 256k is only correct where the value is a preference.
@@ -1148,8 +1148,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for branch, validation, and PR guidance.
 See [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for project conduct expectations
 and [SECURITY.md](SECURITY.md) for vulnerability reporting.
 Upstream's [releases page](https://github.com/stephenschoettler/hermes-lcm/releases) carries
-the base project's changelog; this fork's history is its commit log and the pass ledger in
-[`docs/TASKS.md`](docs/TASKS.md).
+the base project's changelog; this fork's history is its commit log, and its open work is the
+[issue tracker](https://github.com/ConstantinLevin/better-hermes-lcm/issues).
 
 ## License
 

@@ -2,9 +2,15 @@
 
 **This repository is `better-hermes-lcm`, a fork of [`stephenschoettler/hermes-lcm`](https://github.com/stephenschoettler/hermes-lcm)** (the LCM context-engine plugin for Hermes Agent — Python, SQLite-backed message store plus a summary DAG). Upstream base commit is in `.upstream-base`. The fork branch is `better-hermes-lcm`.
 
-Read this before touching anything. Then [`FORK.md`](FORK.md) (the maintenance contract) and [`docs/TASKS.md`](docs/TASKS.md) (the backlog — open work only; what was done is in the code and `git log`).
+Read this before touching anything. Then [`FORK.md`](FORK.md) (the maintenance contract). The backlog is the **GitHub issue tracker** — open work only; what was done is in the code and `git log`.
 
-**Do not write anything down that is not code, the README, this file, or the backlog.** No design docs, no pass logs, no notes-to-self. A finding is implemented, in the backlog, or nonsense.
+**Do not write anything down that is not code, the README, this file, or an issue.** No design docs, no pass logs, no notes-to-self, no ledger files. A finding is implemented, an open issue, or nonsense.
+
+Three rules that keep the backlog honest, carried over from the file it used to live in:
+
+- Every task gets an adversarial check ("how can the index still lie after this?"), not a plan-conformance check.
+- No task is closed with a run that was started before its last edit.
+- Nothing is written in an issue that is already in the code or in `git log`.
 
 **Answer from the code, never from a document — this one and the backlog included.** Not read it yet? Then read it, then answer.
 
@@ -21,7 +27,7 @@ Read this before touching anything. Then [`FORK.md`](FORK.md) (the maintenance c
 
 **b) Optimise for large context windows** (up to 1M tokens) without degrading small ones. Every value that is a *preference* is a smooth weighted interpolation between two anchors — 256k and 1M — resolved through `window_scaling.py`. **Never a band switch, never an `if window > X` branch.**
 
-**c) Take what lossless-claw does better.** [lossless-claw](https://github.com/Martian-Engineering/lossless-claw) (TypeScript, OpenClaw) solves the same problem; where it is better *for this fork's purpose*, port it. **The goal is to be strictly superior to upstream hermes-lcm** — better on the no-loss axis without being worse on any other. Audit prompts are in `docs/claw-comparison/prompts/`; what a round finds is either fixed in the code or an entry in `docs/TASKS.md` — audit reports are not kept.
+**c) Take what lossless-claw does better.** [lossless-claw](https://github.com/Martian-Engineering/lossless-claw) (TypeScript, OpenClaw) solves the same problem; where it is better *for this fork's purpose*, port it. **The goal is to be strictly superior to upstream hermes-lcm** — better on the no-loss axis without being worse on any other. Audit prompts are in `docs/claw-comparison/prompts/`; what a round finds is either fixed in the code or an open issue — audit reports are not kept.
 
 ## The rule that is most often gotten wrong
 
@@ -113,10 +119,11 @@ Audits (Codex astra, prompts in `docs/claw-comparison/prompts/`) want a **stable
 
 ## Standing tasks — these never complete
 
-Both are written up in `docs/TASKS.md` §E, with the outstanding audits in §F:
+Each is an open issue labelled `standing` or `verification`, written out in full there:
 
 - **R1 — upstream changed.** Analysis first, merge second. Textual conflicts are the *easy* case; the hazard is everything git merges cleanly while upstream changed something where the fork had already changed something. Ten named failure modes (M1–M10) with what actually catches each.
 - **R2 — lossless-claw moved past the analysed v1.0.0.** Diff it; sort changes into capability / behaviour / **bugfix**; treat every claw bugfix as a *lead*, because the same bug very likely exists here in an analogous shape.
+- **R3 — real sessions exist.** The day one does, its `lcm.db` is evidence no scripted run can produce; hunt bugs in it structurally.
 - **V1 — is the fork strictly superior to upstream mainline?** Not re-run since audit D. Re-run after every upstream merge.
 - **V2 — did we miss anything the current claw does better?** 37 items from the v1.0.0 sweep are still undecided.
 
@@ -126,5 +133,5 @@ Both are written up in `docs/TASKS.md` §E, with the outstanding audits in §F:
 |---|---|
 | [`README.md`](README.md) | user-facing; "What the fork changes" is the upstream-vs-fork comparison |
 | [`FORK.md`](FORK.md) | maintenance contract: the two rules, the configured exceptions to no-loss, upgrade and claw-tracking procedures, the fork config reference |
-| [`docs/TASKS.md`](docs/TASKS.md) | the backlog: open work only, **"WHAT IS LEFT TO DO"** first |
-| `docs/claw-comparison/` | the lossless-claw analyses, the audit reports, and the audit prompts |
+| [the issue tracker](https://github.com/ConstantinLevin/better-hermes-lcm/issues) | the backlog: open work only |
+| `docs/claw-comparison/prompts/` | the four standing lossless-claw comparison prompts |
