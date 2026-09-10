@@ -369,6 +369,7 @@ ENV_FIELD_SPECS: tuple[_EnvFieldSpec, ...] = (
     _EnvFieldSpec("large_output_transcript_gc_enabled", "LCM_LARGE_OUTPUT_TRANSCRIPT_GC_ENABLED", bool),
     _EnvFieldSpec("persisted_output_recovery_copy_enabled", "LCM_PERSISTED_OUTPUT_RECOVERY_COPY_ENABLED", bool),  # fork
     _EnvFieldSpec("summary_model", "LCM_SUMMARY_MODEL", str),
+    _EnvFieldSpec("summary_reasoning_effort", "LCM_SUMMARY_REASONING_EFFORT", str),
     _EnvFieldSpec("summary_circuit_breaker_failure_threshold", "LCM_SUMMARY_CIRCUIT_BREAKER_FAILURE_THRESHOLD", int),
     _EnvFieldSpec("summary_circuit_breaker_cooldown_seconds", "LCM_SUMMARY_CIRCUIT_BREAKER_COOLDOWN_SECONDS", int),
     _EnvFieldSpec("summary_spend_max_calls", "LCM_SUMMARY_SPEND_MAX_CALLS", int),
@@ -633,6 +634,14 @@ class LCMConfig:
 
     # -- Models ---
     summary_model: str = ""       # empty = use Hermes auxiliary model
+    # Reasoning effort for every summariser call. Empty = send nothing, so the route decides,
+    # which is what happened before this existed. A reasoning model summarising a chunk is the
+    # one place in this plugin where thinking budget buys index quality directly: the summary
+    # IS the index, and a shallow pass over 40k tokens produces a topic list where a deeper one
+    # names decisions, identifiers and outcomes. The host clamps the level per route
+    # (agent/reasoning_effort.py), so an unsupported level degrades to the nearest weaker one
+    # rather than failing. Levels: none, minimal, low, medium, high, xhigh, max, ultra.
+    summary_reasoning_effort: str = ""
     # Optional fallback summary models tried after summary_model/task default.
     summary_fallback_models: list[str] = field(default_factory=list)
     # Consecutive failed summary calls before a route is skipped temporarily.

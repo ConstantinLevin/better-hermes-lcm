@@ -190,6 +190,7 @@ Every fork setting has a dataclass field, an env var and (for the weighted ones)
 | `LCM_TOOL_RESPONSE_CHAR_SCALE` | `0.0` | `tool_response_char_scale` (curve: 1 → 4) |
 | `LCM_SQLITE_CACHE_KIB` | `0` | `sqlite_cache_kib` (curve: 2048 → 65536) |
 | `LCM_TOKEN_CACHE_SIZE` | `0` | `token_cache_size` (curve: 2048 → 8192) |
+| `LCM_SUMMARY_REASONING_EFFORT` | `""` | `summary_reasoning_effort` — sent as `extra_body.reasoning` on every summariser call; empty sends nothing, which is what happened before it existed |
 | `LCM_SUMMARY_FAILURE_COOLDOWN_SECONDS` | `600.0` | `summary_failure_cooldown_seconds` |
 | `LCM_ASSEMBLY_MAX_NODES_PER_DEPTH` | `100000` | `assembly_max_nodes_per_depth` (cap hit is marked in the prefix) |
 | `LCM_SWEEP_MAX_PASSES` | `12` | `sweep_max_passes` (upstream's constant) |

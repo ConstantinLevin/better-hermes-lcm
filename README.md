@@ -695,7 +695,8 @@ moved back to that assistant even when doing so exceeds a configured bound.
 
 | Variable | Default | Use |
 |----------|---------|-----|
-| `LCM_SUMMARY_MODEL` | auxiliary | Override summarization model |
+| `LCM_SUMMARY_MODEL` | auxiliary | Override summarization model. `provider/model` routes to a named custom provider the host can resolve; anything else is passed through as a model name |
+| `LCM_SUMMARY_REASONING_EFFORT` | empty | Reasoning effort for every summariser call — `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, `ultra`. Empty sends nothing and lets the route decide. On a reasoning model this is the one knob that buys index quality directly: the summary *is* the index, and a shallow pass over a 40k chunk yields a topic list where a deeper one names decisions, identifiers and outcomes. The host clamps an unsupported level to the nearest weaker one rather than failing |
 | `LCM_SUMMARY_FALLBACK_MODELS` | empty | Comma-separated summarization models tried after `LCM_SUMMARY_MODEL` or the auxiliary task default fails |
 | `LCM_SUMMARY_CIRCUIT_BREAKER_FAILURE_THRESHOLD` | `2` → `4` at 1M | Consecutive failed summarization calls before a route is skipped temporarily |
 | `LCM_SUMMARY_CIRCUIT_BREAKER_COOLDOWN_SECONDS` | `300` | Seconds to skip an open summary route before retrying it |

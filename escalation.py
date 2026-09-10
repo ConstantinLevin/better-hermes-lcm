@@ -255,7 +255,8 @@ def _sanitize_reasoning_summary(text: str) -> str:
 
 
 def _call_llm_for_summary(prompt: str | list[dict[str, str]], max_tokens: int,
-                           model: str = "", timeout: float | None = None) -> Optional[str]:
+                           model: str = "", timeout: float | None = None,
+                           reasoning_effort: str = "") -> Optional[str]:
     """Call the Hermes auxiliary LLM for summarization."""
     try:
         from agent.auxiliary_client import call_llm
@@ -284,6 +285,22 @@ def _call_llm_for_summary(prompt: str | list[dict[str, str]], max_tokens: int,
         apply_lcm_model_route(call_kwargs, model)
         if timeout is not None:
             call_kwargs["timeout"] = timeout
+        effort = str(reasoning_effort or "").strip().lower()
+        if effort:
+            # The host reads the level from two places depending on the wire it ends up on:
+            # ``extra_body["reasoning"]`` for the OpenAI/Codex Responses path, and
+            # ``_reasoning_config`` for the Anthropic messages path — which falls back to this
+            # same dict when the explicit key is absent. Setting the one covers both, and the
+            # host clamps the level per route, so an unsupported one degrades to the nearest
+            # weaker level instead of failing the call.
+            #
+            # ``effort`` ALONE, deliberately. The host's own reasoning config also carries an
+            # ``enabled`` flag, but a route that forwards ``extra_body`` verbatim hands the dict
+            # to the provider, and OpenAI-compatible endpoints reject an unknown
+            # ``reasoning.enabled`` with a 400 — every summariser call fails and compaction
+            # stops. The interpreting paths only test ``enabled is not False``, so leaving it
+            # out keeps them switched on.
+            call_kwargs["extra_body"] = {"reasoning": {"effort": effort}}
         response = call_llm(**call_kwargs)
         choice = response.choices[0]
         # a summary that stopped at the generation limit is an UNFINISHED
@@ -337,17 +354,25 @@ def _call_llm_for_summary(prompt: str | list[dict[str, str]], max_tokens: int,
 
 
 def _invoke_summary_llm(prompt: str | list[dict[str, str]], max_tokens: int,
-                        model: str = "", timeout: float | None = None) -> Optional[str]:
+                        model: str = "", timeout: float | None = None,
+                        reasoning_effort: str = "") -> Optional[str]:
     kwargs = {"model": model} if model else {}
-    if timeout is not None:
-        try:
-            sig = inspect.signature(_call_llm_for_summary)
-            if "timeout" in sig.parameters or any(
-                p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
-            ):
-                kwargs["timeout"] = timeout
-        except Exception:
-            pass
+    optional = {"timeout": timeout, "reasoning_effort": reasoning_effort or None}
+    # A caller may have replaced _call_llm_for_summary with a narrower stand-in (the e2e
+    # harness and every test do). Pass an optional argument only when the target actually
+    # accepts it, so adding one here can never break a substitute that predates it.
+    try:
+        sig = inspect.signature(_call_llm_for_summary)
+        accepts_anything = any(
+            p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+        )
+        for name, value in optional.items():
+            if value is None:
+                continue
+            if accepts_anything or name in sig.parameters:
+                kwargs[name] = value
+    except Exception:
+        pass
     return _call_llm_for_summary(prompt, max_tokens, **kwargs)
 
 
@@ -427,6 +452,7 @@ def _invoke_summary_llm_chain(
     accepts_result: Callable[[str], bool] | None = None,
     route_errors: list[BaseException] | None = None,  # see ES03
     deadline: float | None = None,  # see CP05
+    reasoning_effort: str = "",
 ) -> Optional[str]:
     chain = _summary_model_chain(model, fallback_models)
     skipped = 0
@@ -465,6 +491,7 @@ def _invoke_summary_llm_chain(
                 max_tokens,
                 model=candidate_model,
                 timeout=call_timeout,
+                reasoning_effort=reasoning_effort,
             )
         except Exception as exc:
             logger.warning("LLM summarization failed: %s", exc)
@@ -791,6 +818,7 @@ def summarize_with_escalation(
     spend_guard: "SummarySpendGuard | None" = None,
     source_provenance: Mapping[str, Any] | None = None,
     deadline: float | None = None,  # one END TIME for L1+L2+fallbacks
+    reasoning_effort: str = "",
 ) -> tuple[str, int]:
     """Run L1/L2 escalation. Returns (summary, level_used).
 
@@ -842,6 +870,7 @@ def summarize_with_escalation(
         accepts_result=_accepts,
         route_errors=route_errors,
         deadline=deadline,
+        reasoning_effort=reasoning_effort,
     )
 
     if l1_result:
@@ -870,6 +899,7 @@ def summarize_with_escalation(
         accepts_result=_accepts,
         route_errors=route_errors,
         deadline=deadline,
+        reasoning_effort=reasoning_effort,
     )
 
     if l2_result:
