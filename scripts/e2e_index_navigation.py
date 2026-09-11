@@ -65,7 +65,12 @@ from hermes_lcm import coverage_doctor, escalation, tokens as lcm_tokens  # noqa
 from hermes_lcm.config import LCMConfig  # noqa: E402
 from hermes_lcm.engine import LCMEngine  # noqa: E402
 
-sys.path.insert(0, _ROOT)
+# APPENDED, never inserted. The plugin root holds a top-level ``tools.py`` and the host holds a
+# top-level ``tools`` package; putting the plugin root first makes the host's own
+# ``from tools.hook_output_spill import ...`` resolve to the plugin's module, which then dies on
+# its relative import. That silently cost this script the host's normalize_tool_schema, and it
+# would shadow the host for any other module that imports ``tools`` mid-run.
+sys.path.append(_ROOT)
 from benchmarking.nav_fidelity import (  # noqa: E402
     NavigationCase,
     ReaderTrace,
@@ -141,7 +146,7 @@ def pin_tokenizer() -> dict[str, Any]:
 
 def environment_block(args, corpus_digest: str, input_digest: str,
                       tokenizer: dict[str, Any], engine: LCMEngine,
-                      messages_total: int) -> dict[str, Any]:
+                      messages_total: int, tool_surface: dict[str, Any]) -> dict[str, Any]:
     status: dict[str, Any] = {}
     try:
         status = json.loads(engine.handle_tool_call("lcm_status", {}))
@@ -177,10 +182,7 @@ def environment_block(args, corpus_digest: str, input_digest: str,
         "input_messages": messages_total,
         "effective_config": effective,
         "window_scaling": status.get("window_scaling"),
-        "tool_surface": [
-            schema.get("name") or schema.get("function", {}).get("name")
-            for schema in engine.get_tool_schemas()
-        ],
+        "tool_surface": tool_surface,
         "live_turn_ingest_on_tool_call": bool(args.dispatch_messages),
     }
 
@@ -870,7 +872,19 @@ def main(argv: Optional[list[str]] = None) -> int:
     input_digest = _digest(turns)
     messages_total = sum(len(turn) for turn in turns)
 
-    env = environment_block(args, corpus_digest, input_digest, tokenizer, engine, messages_total)
+    # Resolved before the run and printed with the environment: a navigation score is only
+    # about the tool surface the agent actually has, so where that surface came from is part
+    # of the pinned environment, not an implementation detail.
+    try:
+        tool_schemas, tool_surface = resolve_tool_surface(engine)
+    except ToolSurfaceDrift as exc:
+        print("=== e2e_index_navigation: NOT RUN ===")
+        print(str(exc))
+        engine.shutdown()
+        return 4
+
+    env = environment_block(args, corpus_digest, input_digest, tokenizer, engine,
+                            messages_total, tool_surface)
     env["summariser_route_probe"] = route_probe or "(no real route used)"
     env["reader_route"] = reader_route or "(no model route used)"
     _print_block("environment (pinned before the run)", env)
@@ -1004,7 +1018,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     # ── the reader stage ────────────────────────────────────────────────────────────────────
     reader = (ModelReader(args) if args.reader == "model"
               else LexicalReader(args.max_tool_calls, args.max_pages))
-    tool_schemas = _normalized_tool_schemas(engine) if args.reader == "model" else []
+    if args.reader != "model":
+        tool_schemas = []  # the scripted reader dispatches directly; nothing is offered to it
     traces: list[ReaderTrace] = []
     reader_detail: list[dict[str, Any]] = []
     for case in cases:
@@ -1087,31 +1102,78 @@ def main(argv: Optional[list[str]] = None) -> int:
     return 0 if not problems else 1
 
 
-def _normalized_tool_schemas(engine: LCMEngine) -> list[dict]:
-    """The tool surface Hermes really injects. Handing the reader anything else would
-    measure a surface no operator has.
+def _mirror_normalize_tool_schema(schema: Any) -> Optional[dict]:
+    """The two rules ``agent.memory_manager.normalize_tool_schema`` applies, and no others.
+
+    Used only when the host module cannot be imported at all. When it CAN be imported, the
+    host's own function is what builds the surface and this is run beside it purely to prove
+    the two still agree — see :func:`resolve_tool_surface`.
+    """
+    if not isinstance(schema, dict):
+        return None
+    if schema.get("type") == "function" and isinstance(schema.get("function"), dict):
+        schema = schema["function"]
+    name = schema.get("name", "")
+    # a nameless tool makes strict providers 400, so the host drops it and so does this
+    return schema if name and isinstance(name, str) else None
+
+
+class ToolSurfaceDrift(RuntimeError):
+    """The mirror no longer matches the host's normaliser. Never scored through."""
+
+
+def resolve_tool_surface(engine: LCMEngine) -> tuple[list[dict], dict[str, Any]]:
+    """The tool surface Hermes really injects, plus where it came from.
 
     ``agent_init.py::_inject_context_engine_tools`` appends exactly
     ``engine.get_tool_schemas()`` — gated on the ``context_engine`` toolset — after passing
-    each through ``agent.memory_manager.normalize_tool_schema``, which does two things and
-    nothing else: unwrap a ``{"type": "function", "function": {...}}`` schema, and drop one
-    with no resolvable name. Those two rules are applied here rather than imported, because
-    importing them would add a host API to ``dependency-contract.json``, a repository-level
-    file this harness does not own. Every schema in ``schemas.py`` is already in the bare
-    ``{"name", "description", "parameters"}`` form the host wants, so the two are identical
-    on this input; if that ever stops being true, the assertion below is what says so.
+    each through ``agent.memory_manager.normalize_tool_schema``. Scoring navigation against a
+    surface the agent does not have would measure the wrong thing, so the host's function is
+    used whenever it is importable, and the local mirror is only a fallback for a host-less
+    checkout.
+
+    When both are available they are compared, and a disagreement raises rather than being
+    resolved in either direction. A mirror that has silently drifted from the host is exactly
+    the after-an-upstream-merge failure this fork's standing merge task exists to catch, and a
+    harness that scores through it would report a confident number about a surface nobody runs.
     """
-    out: list[dict] = []
-    for raw in engine.get_tool_schemas():
-        if not isinstance(raw, dict):
-            continue
-        schema = raw["function"] if (raw.get("type") == "function"
-                                     and isinstance(raw.get("function"), dict)) else raw
-        name = schema.get("name", "")
-        if not name or not isinstance(name, str):
-            continue  # a nameless tool makes strict providers 400 and the host skips it too
-        out.append({"type": "function", "function": schema})
-    return out
+    raw = list(engine.get_tool_schemas())
+    mirrored = [_mirror_normalize_tool_schema(item) for item in raw]
+    try:
+        from agent.memory_manager import normalize_tool_schema
+    except Exception as exc:
+        provenance = {
+            "source": "local mirror of agent.memory_manager.normalize_tool_schema",
+            "host_importable": False,
+            "reason": f"{type(exc).__name__}: {exc}",
+            "mirror_checked_against_host": False,
+        }
+        normalized = mirrored
+    else:
+        normalized = [normalize_tool_schema(item) for item in raw]
+        drift = [
+            {"index": index,
+             "name": (item or {}).get("name") if isinstance(item, dict) else None,
+             "host": host, "mirror": mirror}
+            for index, (item, host, mirror) in enumerate(zip(raw, normalized, mirrored))
+            if host != mirror
+        ]
+        if drift:
+            raise ToolSurfaceDrift(
+                "the local mirror of agent.memory_manager.normalize_tool_schema no longer "
+                f"agrees with the host on {len(drift)} schema(s): "
+                f"{json.dumps(drift[:3], default=str)[:600]}. Refusing to score a navigation "
+                "run against a tool surface that may not be the one Hermes offers."
+            )
+        provenance = {
+            "source": "agent.memory_manager.normalize_tool_schema (host)",
+            "host_importable": True,
+            "mirror_checked_against_host": True,
+            "mirror_agrees": True,
+        }
+    surface = [{"type": "function", "function": schema} for schema in normalized if schema]
+    provenance["tools"] = [entry["function"]["name"] for entry in surface]
+    return surface, provenance
 
 
 def _fidelity_texts(engine, nodes, claims, traces, cases) -> list[ScoredText]:
