@@ -86,6 +86,37 @@ def validate_patterns(entries: Sequence[tuple[str, str]]) -> None:
             ) from exc
 
 
+# Defects that are ABOUT which rows failed to come back, as opposed to the call as a whole.
+# When the tool names the exact rows, these are the same event as that naming — tools.py sets
+# ``pagination["complete"] = False`` *because* of ``missing_source_store_ids`` — so they bind
+# those rows and nothing else. Letting one of them bind node-wide defeats the exact attribution
+# sitting beside it and withdraws every other line the node holds.
+_ROW_SCOPED_DEFECTS = frozenset({
+    "evidence:source_missing",
+    "evidence:incomplete_recovery_declared",
+})
+
+
+def attribute_recovery_defects(
+    defect_labels: Sequence[str],
+    named_missing_store_ids: Sequence[int],
+) -> tuple[dict[int, tuple[str, ...]], tuple[str, ...]]:
+    """Split one tool result's defects into per-row bindings and node-wide ones.
+
+    Returns ``({store_id: labels}, node_wide_labels)``. A defect only ever withdraws a line it
+    is bound to, so the narrower the binding the fewer unrelated misses it can hide. A whole-call
+    failure has no narrower binding available and stays node-wide.
+    """
+    labels = list(dict.fromkeys(defect_labels))
+    if not named_missing_store_ids:
+        return {}, tuple(labels)
+    row_scoped = tuple(sorted(name for name in labels if name in _ROW_SCOPED_DEFECTS))
+    node_wide = tuple(name for name in labels if name not in _ROW_SCOPED_DEFECTS)
+    per_row = ({int(store_id): row_scoped for store_id in named_missing_store_ids}
+               if row_scoped else {})
+    return per_row, node_wide
+
+
 def _search(patterns: Sequence[str], text: str):
     """Return the first pattern's match object, or ``None``."""
     for pattern in patterns:

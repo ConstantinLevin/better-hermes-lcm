@@ -11,6 +11,7 @@ import pytest
 
 from benchmarking.nav_fidelity import (
     CorpusPatternError,
+    attribute_recovery_defects,
     NavigationCase,
     ReaderTrace,
     ScoredText,
@@ -240,6 +241,39 @@ def test_an_error_on_one_recovery_does_not_excuse_an_unrelated_missing_line():
     assert result["source_recall"] == {"expected": 1, "hit": 0, "fraction": 0.0}
     assert [w["store_id"] for w in result["source_recall_withdrawn"]["sample"]] == [12]
     assert result["per_case"][0]["reasons"].count("reader:incomplete_recovery") == 1
+
+
+def test_a_tool_that_names_the_missing_rows_binds_only_those_rows():
+    """`complete: false` is DOWNSTREAM of the named rows, so it must not bind the whole node.
+
+    tools.py:1746 sets `complete: false` *because* of missing_source_store_ids, so the two
+    labels are one event. Letting the companion bind node-wide defeated the exact attribution
+    sitting right beside it and withdrew every other line of that node.
+    """
+    per_row, node_wide = attribute_recovery_defects(
+        ("evidence:source_missing", "evidence:incomplete_recovery_declared"), (42,))
+
+    assert per_row == {42: ("evidence:incomplete_recovery_declared", "evidence:source_missing")}
+    assert node_wide == ()
+
+
+def test_a_whole_call_failure_still_binds_the_whole_node():
+    """A tool error returned nothing at all, so it bounds every row that call was about."""
+    per_row, node_wide = attribute_recovery_defects(
+        ("evidence:tool_error", "evidence:source_missing"), (42,))
+
+    assert per_row == {42: ("evidence:source_missing",)}
+    assert node_wide == ("evidence:tool_error",)
+
+
+def test_an_incomplete_recovery_naming_no_rows_still_binds_the_node():
+    """A corrupt payload declares incompleteness without naming a store_id; the node is all
+    the attribution available, and losing it would charge the reader for the corruption."""
+    per_row, node_wide = attribute_recovery_defects(
+        ("evidence:incomplete_recovery_declared",), ())
+
+    assert per_row == {}
+    assert node_wide == ("evidence:incomplete_recovery_declared",)
 
 
 def test_a_node_id_the_reader_could_not_have_seen_is_not_credited_as_navigation():

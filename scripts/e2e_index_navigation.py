@@ -74,6 +74,7 @@ sys.path.append(_ROOT)
 from benchmarking.nav_fidelity import (  # noqa: E402
     BOUNDED_OBSERVATIONS,
     CorpusPatternError,
+    attribute_recovery_defects,
     NavigationCase,
     ReaderTrace,
     ScoredText,
@@ -691,15 +692,14 @@ class LexicalReader:
                 results.append(page)
                 found_defects, found_observations = label_evidence(page, piece)
                 defects.extend(found_defects)
-                # A defect is attributed to the recovery it actually broke — the rows this node
-                # holds, or the exact rows the tool named as unreadable. A trace-level defect
+                # A defect is attributed to the recovery it actually broke: the exact rows the
+                # tool named, or failing that the rows this node holds. A trace-level defect
                 # cannot say which line it broke, so it may not excuse any of them.
-                named_missing = _store_ids_named_as_missing(page)
-                for store_id in named_missing:
-                    bounded_direct.setdefault(store_id, set()).add("evidence:source_missing")
-                for name in found_defects:
-                    if name == "evidence:source_missing" and named_missing:
-                        continue  # already attributed exactly, above
+                per_row, node_wide = attribute_recovery_defects(
+                    found_defects, _store_ids_named_as_missing(page))
+                for store_id, labels in per_row.items():
+                    bounded_direct.setdefault(store_id, set()).update(labels)
+                for name in node_wide:
                     bounded_nodes.setdefault(node_id, set()).add(name)
                 # Bounds are attributed to THIS NODE, not to the whole trace. A marker in one
                 # page of one node used to bound every line of every node the reader touched.
@@ -877,14 +877,13 @@ class ModelReader:
                     # clears the bound, and a marker in one node's page never bounds another's.
                     # DEFECTS are attributed the same way — a trace-level label cannot say
                     # which line it broke, so it may not excuse any of them.
-                    named_missing = _store_ids_named_as_missing(result)
-                    for missing_id in named_missing:
-                        bounded_direct.setdefault(missing_id, set()).add(
-                            "evidence:source_missing")
+                    per_row, node_wide = attribute_recovery_defects(
+                        found_defects, _store_ids_named_as_missing(result))
+                    for missing_id, labels in per_row.items():
+                        bounded_direct.setdefault(missing_id, set()).update(labels)
                     bounds = {name for name in found_observations
                               if name in BOUNDED_OBSERVATIONS}
-                    bounds |= {name for name in found_defects
-                               if not (name == "evidence:source_missing" and named_missing)}
+                    bounds |= set(node_wide)
                     paged = "evidence:paged_result"
                     if node_id is not None:
                         current = bounded_nodes.setdefault(node_id, set())
