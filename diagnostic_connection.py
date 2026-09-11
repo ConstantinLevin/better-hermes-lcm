@@ -42,7 +42,7 @@ import sqlite3
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable, Iterator, Optional
+from typing import Any, Callable, Iterator, NamedTuple, Optional
 
 from .db_bootstrap import SQLITE_BUSY_TIMEOUT_MS, _database_path_for_connection
 from .sqlite_util import _temporary_sqlite_busy_timeout
@@ -90,7 +90,20 @@ CALLER_READ_ONLY = "read-only"
 CALLER_UNDETERMINED = "undetermined"
 
 
-def caller_connection_access(conn: sqlite3.Connection) -> str:
+class CallerAccess(NamedTuple):
+    """What was established about the caller's access, AND how.
+
+    ``CALLER_UNDETERMINED`` has more than one producer, so the cause travels
+    with the state. Asserting a single cause for a multi-producer state prints a
+    confident diagnosis that is not the reason -- the same defect as a receipt
+    that is right about what happened and wrong about why.
+    """
+
+    state: str
+    reason: str = ""
+
+
+def caller_connection_access(conn: sqlite3.Connection) -> CallerAccess:
     """Whether the caller opened this connection read-only, and say so honestly.
 
     Python's sqlite3 exposes no ``sqlite3_db_readonly``, so ask SQLite with the
@@ -130,38 +143,62 @@ def caller_connection_access(conn: sqlite3.Connection) -> str:
             freelist and int(freelist[0]) == 0
         )
         if not inert:
-            return CALLER_UNDETERMINED
+            return CallerAccess(
+                CALLER_UNDETERMINED,
+                "this database uses incremental auto_vacuum with pages on its freelist, "
+                "the one configuration where the read-only probe would itself modify the "
+                "file",
+            )
         with _temporary_sqlite_busy_timeout([conn], DIAGNOSTIC_BUSY_TIMEOUT_MS):
             conn.execute("PRAGMA incremental_vacuum(0)").fetchall()
     except sqlite3.DatabaseError as exc:
         lowered = str(exc).lower()
         if "readonly" in lowered or "read-only" in lowered:
-            return CALLER_READ_ONLY
-        return CALLER_WRITABLE
-    except Exception:  # pragma: no cover - a probe must never break the doctor
-        return CALLER_UNDETERMINED
-    return CALLER_WRITABLE
+            return CallerAccess(CALLER_READ_ONLY, str(exc))
+        return CallerAccess(CALLER_WRITABLE, str(exc))
+    except Exception as exc:
+        # A probe must never break the doctor -- and must never claim the
+        # freelist was the reason when it was not.
+        return CallerAccess(
+            CALLER_UNDETERMINED, f"the read-only probe failed: {exc}"
+        )
+    return CallerAccess(CALLER_WRITABLE)
 
 
-def undeterminable_access_result(spec_name: str) -> dict:
-    """The honest answer when the caller's access mode could not be established."""
+def undeterminable_access_result(spec_name: str, reason: str) -> dict:
+    """The honest answer when the caller's access mode could not be established.
+
+    ``reason`` is the cause this particular probe ran into, not a fixed one.
+    """
     return {
         "status": "unchecked",
         "detail": (
-            f"deep FTS integrity-check for '{spec_name}' was not run: this database uses "
-            "incremental auto_vacuum with pages on its freelist, which is the one "
-            "configuration where the read-only probe would itself modify the file, so "
-            "whether the caller opened it read-only could not be established -- and a "
+            f"deep FTS integrity-check for '{spec_name}' was not run: whether the caller "
+            f"opened this database read-only could not be established ({reason}), and a "
             "diagnostic must not write to a database that may have been opened read-only"
         ),
     }
+
+
+def reopenable_database_path(conn: Optional[sqlite3.Connection]) -> str:
+    """The file a private handle can be opened on, or ``""`` when there is none.
+
+    ``""`` means a closed store, or an in-memory/anonymous database, where
+    ``sqlite3.connect`` would open a DIFFERENT, empty one. Callers test this
+    BEFORE probing the caller's access: a database that cannot be reopened at
+    all must be told that, not told about its auto_vacuum settings.
+    """
+    db_path = _database_path_for_connection(conn) if conn is not None else ""
+    if not db_path or db_path == ":memory:" or not Path(db_path).exists():
+        return ""
+    return db_path
 
 
 @contextmanager
 def private_diagnostic_connection(
     conn: Optional[sqlite3.Connection],
     *,
-    access: Optional[str] = None,
+    access: Optional[CallerAccess] = None,
 ) -> Iterator[Optional[sqlite3.Connection]]:
     """Yield a handle on ``conn``'s database that the caller owns outright.
 
@@ -174,13 +211,16 @@ def private_diagnostic_connection(
     The handle is closed on the way out, which rolls back anything still open on
     it. **Nothing the diagnostic runs on the handle touches the caller's
     transaction** -- that is the guarantee this module exists for, and it holds.
-    What the caller's connection DOES see, once, before the handle is opened, is
-    the access probe in ``caller_connection_access`` (pass ``access`` to skip
-    it), and it is worth being exact about what that costs, because a future
-    caller will decide from this paragraph whether this module is safe to use
-    somewhere new:
+    What the caller's connection DOES see is worth being exact about, because a
+    future caller will decide from this paragraph whether this module is safe to
+    use somewhere new:
 
-    - it runs ``PRAGMA auto_vacuum`` and ``PRAGMA freelist_count`` (reads), and
+    - ``PRAGMA database_list``, through ``_database_path_for_connection``, on
+      EVERY call -- including when ``access`` is supplied and the probe below is
+      skipped. It is a read;
+    - the access probe in ``caller_connection_access``, once, unless ``access``
+      is supplied. It runs ``PRAGMA auto_vacuum`` and ``PRAGMA freelist_count``
+      (reads), and
       a ``PRAGMA incremental_vacuum`` that is inert but is still a WRITE, so it
       asks SQLite for the write lock and blocks (returning ``database is
       locked``) while another writer holds it;
@@ -200,8 +240,8 @@ def private_diagnostic_connection(
       the tree is in a default-off subsystem on its own connection. Keep it that
       way on purpose rather than by luck.
     """
-    db_path = _database_path_for_connection(conn) if conn is not None else ""
-    if not db_path or db_path == ":memory:" or not Path(db_path).exists():
+    db_path = reopenable_database_path(conn)
+    if not db_path:
         yield None
         return
     # Match the caller's access. Reopening read-write what the operator opened
@@ -213,7 +253,7 @@ def private_diagnostic_connection(
     resolved = access if access is not None else caller_connection_access(conn)
     # Anything short of a positive "writable" opens read-only: never write to a
     # database on a guess about whether the operator closed it to writes.
-    read_only = resolved != CALLER_WRITABLE
+    read_only = resolved.state != CALLER_WRITABLE
     target = f"{Path(db_path).as_uri()}?mode=ro" if read_only else db_path
     probe = sqlite3.connect(
         target,
@@ -264,11 +304,15 @@ def run_isolated_fts_check(
     as ``fail`` would flag corruption that was never observed, and reporting it
     as ``pass`` is the clause this fork exists to remove.
     """
-    access = caller_connection_access(conn) if conn is not None else CALLER_UNDETERMINED
-    if conn is not None and access == CALLER_UNDETERMINED:
+    # No-second-handle first: a database that cannot be reopened at all must be
+    # told that, not told about its auto_vacuum settings.
+    if not reopenable_database_path(conn):
+        return unavailable_check_result(spec.table_name)
+    access = caller_connection_access(conn)
+    if access.state == CALLER_UNDETERMINED:
         # Refuse before opening anything: the honest answer beats a check run
         # against a database whose access mode nobody established.
-        return undeterminable_access_result(spec.table_name)
+        return undeterminable_access_result(spec.table_name, access.reason)
 
     with private_diagnostic_connection(conn, access=access) as probe:
         if probe is None:
@@ -345,17 +389,29 @@ def unchecked_fts_remedy(reason: str) -> str:
     when no write is in flight -- is never printed.
     """
     lowered = (reason or "").lower()
+    # ORDER MATTERS, and it is not the order these were written in. Every
+    # "could not be established" reason also contains the words "read-only" --
+    # it is a sentence about not knowing whether the caller opened it read-only
+    # -- so testing for the read-only refusal first made this whole branch dead
+    # and handed the operator the one remedy that cannot work: obtain write
+    # access they already have. The undetermined tests come first.
+    if "could not be established" in lowered:
+        if "freelist" in lowered:
+            return (
+                "empty this database's freelist (`VACUUM`, or `PRAGMA "
+                "incremental_vacuum`) or set `PRAGMA auto_vacuum=NONE`, if a deep FTS "
+                "integrity result is needed: until then LCM cannot tell whether this "
+                "connection was opened read-only, and will not write to it to find out"
+            )
+        return (
+            "LCM could not tell whether this connection was opened read-only and will "
+            "not write to the database to find out; the detail above names what stopped "
+            f"it ({reason})"
+        )
     if "readonly" in lowered or "read-only" in lowered:
         return (
             "rerun `/lcm doctor` with read-write SQLite access if a deep FTS "
             "integrity result is needed"
-        )
-    if "could not be established" in lowered:
-        return (
-            "empty this database's freelist (`VACUUM`, or `PRAGMA incremental_vacuum`) or "
-            "set `PRAGMA auto_vacuum=NONE`, if a deep FTS integrity result is needed: "
-            "until then LCM cannot tell whether this connection was opened read-only, and "
-            "will not write to it to find out"
         )
     if "no second handle" in lowered or "in-memory" in lowered:
         return (

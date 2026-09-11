@@ -27,6 +27,8 @@ from .db_bootstrap import (
     repair_external_content_fts,
 )
 from .diagnostic_connection import (
+    CALLER_UNDETERMINED,
+    caller_connection_access,
     private_diagnostic_connection,
     run_isolated_fts_check,
     unchecked_fts_remedy,
@@ -1051,7 +1053,27 @@ def _doctor_repair_apply_text(engine) -> str:
     # repair takes a handle it owns. SQLite's single-writer rule serializes it
     # against live ingest: losing that race fails the command below with the
     # backup already taken, and changes nothing.
-    with private_diagnostic_connection(engine._store.connection) as conn:
+    # Probe the access once and hand it down. Without this the repair opened the
+    # handle read-only whenever the mode could not be determined -- the right
+    # call -- and then reported SQLite's `readonly` refusal, blaming the
+    # operator's database for LCM's own decision not to find out.
+    store_access = caller_connection_access(engine._store.connection)
+    if store_access.state == CALLER_UNDETERMINED:
+        return "\n".join([
+            "LCM doctor repair apply",
+            "status: error",
+            f"database_path: {backup['db_path']}",
+            f"backup_path: {backup['backup_path']}",
+            f"backup_size: {_fmt_size(int(backup['backup_size']))}",
+            "error: LCM could not determine whether this database was opened read-only "
+            f"({store_access.reason}), and will not write to one that may have been",
+            f"note: {unchecked_fts_remedy(store_access.reason + ' could not be established')}",
+            "note: no FTS tables were repaired",
+        ])
+
+    with private_diagnostic_connection(
+        engine._store.connection, access=store_access
+    ) as conn:
         if conn is None:
             return "\n".join([
                 "LCM doctor repair apply",

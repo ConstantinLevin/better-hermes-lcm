@@ -707,7 +707,9 @@ def test_a_read_only_caller_is_detected_under_incremental_auto_vacuum(tmp_path):
     db_path = _auto_vacuum_database(tmp_path, "INCREMENTAL", freelist=False)
     ro_conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     try:
-        assert caller_connection_access(ro_conn) == CALLER_READ_ONLY
+        # `.state`: the probe carries its cause alongside the state, because
+        # CALLER_UNDETERMINED has more than one producer.
+        assert caller_connection_access(ro_conn).state == CALLER_READ_ONLY
     finally:
         ro_conn.close()
 
@@ -735,7 +737,7 @@ def test_an_undeterminable_access_mode_reports_unchecked_and_writes_nothing(tmp_
         return {"status": "pass", "detail": "ok"}
 
     try:
-        assert caller_connection_access(conn) == CALLER_UNDETERMINED
+        assert caller_connection_access(conn).state == CALLER_UNDETERMINED
         result = run_isolated_fts_check(
             conn, SimpleNamespace(table_name="messages_fts"), never_should_run
         )
@@ -746,3 +748,98 @@ def test_an_undeterminable_access_mode_reports_unchecked_and_writes_nothing(tmp_
     assert "read-only" in result["detail"], result
     assert not ran, "the check ran against a database whose access mode was unknown"
     assert db_path.read_bytes() == before, "the probe wrote to the database"
+
+
+# ---------------------------------------------------------------------------
+# the receipt must be right about WHY, not only about what
+# ---------------------------------------------------------------------------
+def test_the_undeterminable_remedy_is_not_the_read_only_one(tmp_path):
+    """The remedy that would clear this condition is emptying the freelist. An
+    operator who already has write access being told to obtain write access is
+    the exact failure `unchecked_fts_remedy` was written to prevent."""
+    from types import SimpleNamespace
+
+    from hermes_lcm.diagnostic_connection import run_isolated_fts_check, unchecked_fts_remedy
+
+    db_path = _auto_vacuum_database(tmp_path, "INCREMENTAL", freelist=True)
+    conn = sqlite3.connect(str(db_path))
+    try:
+        result = run_isolated_fts_check(
+            conn,
+            SimpleNamespace(table_name="messages_fts"),
+            lambda _c, _s: {"status": "pass", "detail": "ok"},
+        )
+    finally:
+        conn.close()
+
+    remedy = unchecked_fts_remedy(result["detail"])
+    assert "read-write SQLite access" not in remedy, remedy
+    assert "auto_vacuum" in remedy or "VACUUM" in remedy, remedy
+
+
+def test_an_undetermined_access_names_its_own_cause(tmp_path):
+    """`CALLER_UNDETERMINED` has two producers. A probe that failed for some
+    other reason must not print the freelist diagnosis, which is not its cause."""
+    from hermes_lcm.diagnostic_connection import CALLER_UNDETERMINED, caller_connection_access
+
+    class BrokenConnection:
+        def execute(self, *_args, **_kwargs):
+            raise RuntimeError("the access probe blew up")
+
+    access = caller_connection_access(BrokenConnection())
+
+    assert access.state == CALLER_UNDETERMINED
+    assert "freelist" not in access.reason, access.reason
+    assert "blew up" in access.reason, access.reason
+
+
+def test_a_database_with_no_second_handle_is_told_that_and_not_about_its_freelist(tmp_path):
+    """The no-second-handle answer comes first: an in-memory database cannot be
+    reopened at all, whatever its auto_vacuum setting says."""
+    from types import SimpleNamespace
+
+    from hermes_lcm.diagnostic_connection import run_isolated_fts_check
+
+    conn = sqlite3.connect(":memory:")
+    try:
+        conn.execute("PRAGMA auto_vacuum=INCREMENTAL")
+        conn.execute("VACUUM")
+        conn.execute("CREATE TABLE t(a)")
+        conn.executemany("INSERT INTO t VALUES(?)", [("x" * 400,)] * 800)
+        conn.execute("DELETE FROM t")
+        conn.commit()
+        assert conn.execute("PRAGMA freelist_count").fetchone()[0] > 0
+        result = run_isolated_fts_check(
+            conn,
+            SimpleNamespace(table_name="messages_fts"),
+            lambda _c, _s: {"status": "pass", "detail": "ok"},
+        )
+    finally:
+        conn.close()
+
+    assert result["status"] == "unchecked", result
+    assert "second handle" in result["detail"], result
+    assert "freelist" not in result["detail"], result
+
+
+def test_repair_apply_on_a_writable_database_never_blames_read_only(tmp_path):
+    """Round 4 opened the handle read-only whenever the access mode could not be
+    determined -- right -- and then reported SQLite's `readonly` refusal as if
+    the operator's database were read-only. It is not; LCM declined to find out."""
+    engine = _engine(tmp_path)
+    conn = engine._store.connection
+    conn.execute("PRAGMA auto_vacuum=INCREMENTAL")
+    conn.execute("VACUUM")
+    engine._store.append_batch(
+        "doctor-session", [{"role": "user", "content": "x" * 4000}] * 200, [1] * 200
+    )
+    conn.execute("DELETE FROM messages WHERE store_id > 1")
+    conn.commit()
+    assert conn.execute("PRAGMA freelist_count").fetchone()[0] > 0, "no freelist to trip the probe"
+
+    text = handle_lcm_command("doctor repair apply", engine)
+
+    assert "status: error" in text, text
+    assert "readonly" not in text.lower(), text
+    assert "could not determine" in text.lower(), text
+    assert "PARTIAL" not in text, text
