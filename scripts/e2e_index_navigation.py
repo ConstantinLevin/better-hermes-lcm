@@ -1088,21 +1088,29 @@ def main(argv: Optional[list[str]] = None) -> int:
 
 
 def _normalized_tool_schemas(engine: LCMEngine) -> list[dict]:
-    """The tool surface Hermes really injects, through the host's own normaliser.
+    """The tool surface Hermes really injects. Handing the reader anything else would
+    measure a surface no operator has.
 
-    agent_init.py injects exactly engine.get_tool_schemas() (gated on the context_engine
-    toolset) after normalize_tool_schema. Handing the reader anything else would measure a
-    surface no operator has.
+    ``agent_init.py::_inject_context_engine_tools`` appends exactly
+    ``engine.get_tool_schemas()`` — gated on the ``context_engine`` toolset — after passing
+    each through ``agent.memory_manager.normalize_tool_schema``, which does two things and
+    nothing else: unwrap a ``{"type": "function", "function": {...}}`` schema, and drop one
+    with no resolvable name. Those two rules are applied here rather than imported, because
+    importing them would add a host API to ``dependency-contract.json``, a repository-level
+    file this harness does not own. Every schema in ``schemas.py`` is already in the bare
+    ``{"name", "description", "parameters"}`` form the host wants, so the two are identical
+    on this input; if that ever stops being true, the assertion below is what says so.
     """
-    try:
-        from agent.memory_manager import normalize_tool_schema
-    except Exception:
-        normalize_tool_schema = None
     out: list[dict] = []
     for raw in engine.get_tool_schemas():
-        schema = normalize_tool_schema(raw) if normalize_tool_schema else raw
-        if schema:
-            out.append({"type": "function", "function": schema})
+        if not isinstance(raw, dict):
+            continue
+        schema = raw["function"] if (raw.get("type") == "function"
+                                     and isinstance(raw.get("function"), dict)) else raw
+        name = schema.get("name", "")
+        if not name or not isinstance(name, str):
+            continue  # a nameless tool makes strict providers 400 and the host skips it too
+        out.append({"type": "function", "function": schema})
     return out
 
 
