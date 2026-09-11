@@ -12,6 +12,7 @@ here" cursor it advertises is the only thing it really delivers.
 Every test here FAILS on the tree it was written against.
 """
 import json
+import os
 import sys
 import time
 from types import ModuleType, SimpleNamespace
@@ -21,6 +22,7 @@ import pytest
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.dag import SummaryNode
 from hermes_lcm.engine import LCMEngine
+from hermes_lcm.externalize import maybe_externalize_payload
 from hermes_lcm.schemas import LCM_DESCRIBE, LCM_EXPAND
 from hermes_lcm.tokens import count_tokens
 
@@ -107,6 +109,109 @@ def test_a_last_child_summary_cut_at_the_budget_is_not_reported_complete(tmp_pat
         )
         assert pagination.get("complete") is not True, (
             "a cut child summary was returned inside a response reported as complete"
+        )
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.beta_target("#50")
+def test_a_requested_hydration_that_could_not_read_its_payload_is_not_complete(tmp_path):
+    """50c, and the triage calls it one of the two HARD blockers.
+
+    `_get_externalized_payload` returns None when the archive file is gone, and
+    `_expand_message_sources` distinguishes only "payload present" from "payload corrupt" — so
+    "ref present, file missing" falls through to ordinary message content. The caller asked for
+    the full bytes with `hydrate=true`, got the reference marker instead, and the response says
+    `complete: true` over it.
+
+    The missing file is an injected integrity fault, not a claim that this handler deletes
+    archives. What is being asserted is fail-closed: a hydration that could not read what it was
+    asked to read must not be reported as one that did.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    os.chmod(home, 0o700)
+    config = LCMConfig(database_path=str(tmp_path / "hydrate50c.db"))
+    engine = LCMEngine(config=config, hermes_home=str(home))
+    try:
+        engine.on_session_start("hydrate50c", platform="cli", context_length=262_144)
+        body = "HYDRATE_NEEDLE_50C " + ("the full tool result. " * 1_000)
+        # the archive the fork keeps of output HERMES spilled — `ignore_enabled_flag` is that
+        # path, not the ingest-side externalization this fork does not enable
+        archived = maybe_externalize_payload(
+            body, kind="tool_result", tool_call_id="c1", session_id="hydrate50c", role="tool",
+            config=config, hermes_home=str(home), force=True, ignore_enabled_flag=True)
+        store_id = engine._store.append(
+            "hydrate50c",
+            {"role": "tool", "tool_call_id": "c1", "content": archived["placeholder"]},
+            source="cli")
+        engine._store.commit()
+        node_id = _node(engine, "hydrate50c", 0, "A tool result was archived.",
+                        [store_id], "messages")
+
+        intact = json.loads(engine.handle_tool_call(
+            "lcm_expand", {"node_id": node_id, "hydrate": True, "max_tokens": 200_000}))
+        assert "HYDRATE_NEEDLE_50C" in json.dumps(intact), (
+            "the fixture never hydrated anything, so its negative half proves nothing"
+        )
+
+        os.remove(archived["path"])
+        payload = json.loads(engine.handle_tool_call(
+            "lcm_expand", {"node_id": node_id, "hydrate": True, "max_tokens": 200_000}))
+
+        assert "HYDRATE_NEEDLE_50C" not in json.dumps(payload), (
+            "the payload came back after its file was removed; the fixture is wrong"
+        )
+        assert payload["pagination"].get("complete") is not True, (
+            "a hydration that returned the reference marker instead of the bytes it was asked "
+            "for reported itself complete"
+        )
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.beta_target("#50")
+def test_a_missing_row_under_a_descendant_is_not_silently_dropped(tmp_path):
+    """50d, the other hard blocker, and the one that disappears rather than lying quietly.
+
+    The top-level expansion keeps an error-only block, but the recursive walk appends a block
+    only `if messages or has_more`. A descendant leaf whose source row does not exist produces
+    neither, so its error block is filtered out and the answer is synthesised from a summary and
+    a child manifest with no mention that a source could not be read — `complete: true`, no
+    `missing_source_store_ids`.
+
+    Every node and edge here exists; only the raw row is missing, which is the injected fault.
+    The synthesis route is stubbed as explicitly finished so the claim under test is about
+    evidence and nothing else.
+    """
+    config = LCMConfig(database_path=str(tmp_path / "descendant50d.db"))
+    engine = LCMEngine(config=config, hermes_home=str(tmp_path))
+    try:
+        engine.on_session_start("desc50d", platform="cli", context_length=262_144)
+        # a leaf that points at a store_id nobody ever wrote
+        leaf_id = _node(engine, "desc50d", 0, "A leaf over a row that is gone.",
+                        [987_654_321], "messages")
+        parent_id = _node(engine, "desc50d", 1, "A parent over that leaf.",
+                          [leaf_id], "nodes")
+
+        direct = json.loads(engine.handle_tool_call(
+            "lcm_expand", {"node_id": leaf_id, "max_tokens": 100_000}))
+        assert direct["pagination"].get("complete") is False, (
+            "the fixture's missing row is not even detected directly, so it proves nothing"
+        )
+
+        _install_finished_auxiliary_client("Nothing could be read.")
+        try:
+            payload = json.loads(engine.handle_tool_call("lcm_expand_query", {
+                "prompt": "What is under this node?",
+                "node_ids": [parent_id],
+            }))
+        finally:
+            _restore_auxiliary_client()
+
+        assert payload.get("complete") is not True, (
+            "a source row that could not be read vanished from the walk and the answer over it "
+            "reported itself complete"
         )
     finally:
         engine.shutdown()

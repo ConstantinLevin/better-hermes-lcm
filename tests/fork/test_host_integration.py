@@ -11,8 +11,11 @@ Two modes, and the difference is the point of #14:
   instead proved nothing must not report success — a green skip is the dishonest-empty-result
   this fork forbids, wearing a test runner's colours.
 
-The gate is checked at the point of failure rather than at collection so the reason is specific:
-"no checkout", "not importable, <exc>" and a body error are different facts and say so.
+Only the host IMPORTS are excused, in either mode. The `try` that used to catch `ImportError`
+wrapped the `yield` too, so an `ImportError` raised anywhere in a test body — a real failure of
+the integration — came back as "host not importable" and skipped; the body now runs outside it.
+The gate is checked at the point of failure rather than at collection, so "no checkout" and "not
+importable, <exc>" stay two different facts and each says which it is.
 """
 import contextlib
 import importlib

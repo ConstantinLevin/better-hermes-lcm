@@ -184,6 +184,11 @@ def _consistent_snapshot(source: Path, destination: Path) -> None:
     copied after the main file holds at least the frames that copy is missing. The `-shm` is
     deliberately not copied — it is a scratch index SQLite rebuilds from the `-wal`, and a stale
     copy of it is worse than no copy at all.
+
+    The remaining hole, said rather than hidden: if a checkpoint restarts the log between the two
+    copies, the `-wal` picks up new salt values and SQLite will ignore it against the main file we
+    already copied — so the snapshot is as of the main file alone. That degrades to what this test
+    did before rather than to something wrong, and it is the price of never writing to the source.
     """
     shutil.copy2(source, destination)
     log = Path(f"{source}-wal")

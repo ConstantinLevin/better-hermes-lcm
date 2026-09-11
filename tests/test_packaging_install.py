@@ -639,6 +639,14 @@ def test_pre_llm_hook_disabled_toolset_is_identical_and_routed_adds_exact_sessio
         {"role": "user", "content": current_text, "timestamp": 1_712_275_260},
     )
 
+    # fork: better-hermes-lcm — this call is UNIT COVERAGE OF THE LOCAL DISABLE BRANCH, not of
+    # its native delivery, and the label matters because the two read alike. Hermes'
+    # `_collect_pre_llm_call_context` does not pass `enabled_toolsets` at all, and neither the
+    # lifecycle dispatcher nor the plugin dispatcher adds it; `__init__.py` treats an ABSENT list
+    # as enabled, so the branch this exercises is the one the current host never takes. What it
+    # proves is that the branch behaves correctly when something does pass the field — worth
+    # keeping, and not evidence that the host delivers it (#16). Entry-to-effect coverage of what
+    # the host really produces is in tests/fork/test_host_entrypoints.py.
     disabled = hook(
         session_id="active-session",
         user_message="Where do I live now?",

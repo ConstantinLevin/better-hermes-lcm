@@ -13,6 +13,8 @@ never a marker in their place. An assertion a convincing receipt could satisfy i
 contract — the one this fork exists to remove — and is the wrong assertion.
 """
 import json
+import time
+from datetime import datetime, timezone
 
 import pytest
 
@@ -22,10 +24,17 @@ from hermes_lcm.message_content import normalize_content_value
 from hermes_lcm.store import MessageStore, message_envelope_fingerprint
 
 
-def _engine(tmp_path, name, **cfg):
+# Every value in this fork that is a preference is a smooth interpolation between these two
+# anchors, and the fork's whole thesis is that a cut which fires at one of them and not the other
+# is a defect. A preservation fix built against one window can therefore regress at the other
+# with nothing red, so the byte-preservation assertions run at both.
+WINDOWS = (262_144, 1_000_000)
+
+
+def _engine(tmp_path, name, window=262_144, **cfg):
     config = LCMConfig(database_path=str(tmp_path / f"{name}.db"), **cfg)
     engine = LCMEngine(config=config, hermes_home=str(tmp_path))
-    engine.on_session_start(name, platform="cli", context_length=262_144)
+    engine.on_session_start(name, platform="cli", context_length=window)
     return engine
 
 
@@ -45,9 +54,10 @@ def _wrapped_data_uri_message() -> str:
 
 
 @pytest.mark.beta_target("#56")
-def test_a_line_wrapped_data_uri_reaches_the_summariser_source_byte_identical(tmp_path):
+@pytest.mark.parametrize("window", WINDOWS)
+def test_a_line_wrapped_data_uri_reaches_the_summariser_source_byte_identical(tmp_path, window):
     content = _wrapped_data_uri_message()
-    engine = _engine(tmp_path, "wrapped56")
+    engine = _engine(tmp_path, "wrapped56", window)
     try:
         serialized = engine._serialize_messages([{"role": "user", "content": content}])
         assert content in serialized, (
@@ -58,7 +68,8 @@ def test_a_line_wrapped_data_uri_reaches_the_summariser_source_byte_identical(tm
 
 
 @pytest.mark.beta_target("#56")
-def test_a_json_argument_string_is_not_reinterpreted_before_the_summariser(tmp_path):
+@pytest.mark.parametrize("window", WINDOWS)
+def test_a_json_argument_string_is_not_reinterpreted_before_the_summariser(tmp_path, window):
     """A decimal a provider really sent must not be rounded on the way to the source.
 
     `sanitize_pre_compaction_tool_arguments` round-trips every parseable argument string through
@@ -68,7 +79,7 @@ def test_a_json_argument_string_is_not_reinterpreted_before_the_summariser(tmp_p
     """
     exact = "0.123456789012345678901234567890"
     arguments = '{"amount":' + exact + ',"note":"exact decimal"}'
-    engine = _engine(tmp_path, "decimal56")
+    engine = _engine(tmp_path, "decimal56", window)
     try:
         serialized = engine._serialize_messages([
             {"role": "assistant", "content": "paying", "tool_calls": [
@@ -83,7 +94,8 @@ def test_a_json_argument_string_is_not_reinterpreted_before_the_summariser(tmp_p
 
 
 @pytest.mark.beta_target("#56")
-def test_the_raw_row_reader_returns_the_argument_string_it_stored(tmp_path):
+@pytest.mark.parametrize("window", WINDOWS)
+def test_the_raw_row_reader_returns_the_argument_string_it_stored(tmp_path, window):
     """The same transformation helper sits on `lcm_expand(store_id=…)`.
 
     Summary input and direct raw expansion share `_sanitized_tool_calls_for_response`, so fixing
@@ -92,7 +104,7 @@ def test_the_raw_row_reader_returns_the_argument_string_it_stored(tmp_path):
     """
     exact = "0.123456789012345678901234567890"
     arguments = '{"amount":' + exact + ',"note":"exact decimal"}'
-    engine = _engine(tmp_path, "reader56")
+    engine = _engine(tmp_path, "reader56", window)
     try:
         store_id = engine._store.append("reader56", {
             "role": "assistant", "content": "paying",
@@ -114,7 +126,8 @@ def test_the_raw_row_reader_returns_the_argument_string_it_stored(tmp_path):
 # ── #67 — semantic envelope values must reach the summariser AS VALUES ───────────────────────
 
 @pytest.mark.beta_target("#67")
-def test_a_semantic_envelope_value_reaches_the_summariser_as_a_value(tmp_path):
+@pytest.mark.parametrize("window", WINDOWS)
+def test_a_semantic_envelope_value_reaches_the_summariser_as_a_value(tmp_path, window):
     """`api_content` is what the host actually substitutes as the API text for a turn.
 
     Today the serialiser inventories it as `api_content (N chars)`. A name and a length are not
@@ -122,7 +135,7 @@ def test_a_semantic_envelope_value_reaches_the_summariser_as_a_value(tmp_path):
     field of that size exists in the store.
     """
     note = "MUST_DELIVER_NOTE_ALPHA: deployment revoked."
-    engine = _engine(tmp_path, "envelope67")
+    engine = _engine(tmp_path, "envelope67", window)
     try:
         serialized = engine._serialize_messages([
             {"role": "user", "content": "Proceed with the rollout.",
@@ -157,14 +170,15 @@ def test_two_opposite_envelope_values_do_not_serialise_identically(tmp_path):
 
 
 @pytest.mark.beta_target("#67")
-def test_reasoning_carriers_reach_the_summariser_as_values(tmp_path):
+@pytest.mark.parametrize("window", WINDOWS)
+def test_reasoning_carriers_reach_the_summariser_as_values(tmp_path, window):
     """`reasoning` and `reasoning_content` are inventoried by the same branch as `api_content`.
 
     The issue does not claim every provider's continuation semantics are covered; it claims the
     stored value is withheld from the model. These are the two carriers the host's own assistant
     builder produces.
     """
-    engine = _engine(tmp_path, "reasoning67")
+    engine = _engine(tmp_path, "reasoning67", window)
     try:
         serialized = engine._serialize_messages([
             {"role": "assistant", "content": "Done.",
@@ -231,7 +245,21 @@ def test_an_unknown_source_time_is_not_substituted(tmp_path):
     The store already separates `observed_at` (the host's stamp) from `ingested_at` (LCM's write
     time) and records which is which; the summariser source must keep that separation rather than
     letting the write time stand in for an event time nobody recorded.
+
+    `unstamped != stamped` alone is not enough, and an earlier version of this test asserted only
+    that: a fix rendering `observed_at or ingested_at` — substituting LCM's write time for an
+    event time nobody recorded, which is precisely what #37 forbids — makes the two differ and
+    passes. So the write time must not appear at all. Today's date and the current epoch second
+    are what a substitution would put there; neither may show up beside a turn whose source time
+    is unknown.
+
+    Caveat, stated rather than hidden: a fix that renders the ingest time as its OWN labelled
+    field alongside "source time unknown" would also trip this, and would arguably be compliant.
+    Nothing in the code does that today; if a fix chooses to, this assertion is the one to revisit
+    — not the contract.
     """
+    now = time.time()
+    today_iso = datetime.fromtimestamp(now, tz=timezone.utc).strftime("%Y-%m-%d")
     engine = _engine(tmp_path, "unknown37")
     try:
         unstamped = engine._serialize_messages([
@@ -243,6 +271,38 @@ def test_an_unknown_source_time_is_not_substituted(tmp_path):
         assert unstamped != stamped, (
             "a turn with no source time is indistinguishable from one that has one"
         )
+        assert today_iso not in unstamped, (
+            "the write time was substituted for a source time the host never recorded"
+        )
+        assert str(int(now)) not in unstamped, (
+            "the write time was substituted for a source time the host never recorded"
+        )
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.beta_target("#37")
+def test_the_source_time_is_labelled_as_the_source_time(tmp_path):
+    """...and the instant that IS offered has to say which of the two times it is.
+
+    Source time, LCM's ingest time and a node's bounds are three different things, and #37's
+    whole point is that they must not collapse into one unqualified `timestamp`. A bare instant
+    beside a turn is exactly that collapse: the reader cannot tell whether it is when the user
+    said this or when the plugin happened to write it down.
+
+    The label vocabulary below is a floor, not a specification — any of those words is accepted,
+    because naming the field would be pinning an implementation the fix group has not chosen yet.
+    """
+    engine = _engine(tmp_path, "labelled37")
+    try:
+        serialized = engine._serialize_messages([
+            {"role": "user", "content": "The meeting is tomorrow.", "timestamp": _MILLENNIUM},
+        ])
+        assert "2000-01-01" in serialized or str(int(_MILLENNIUM)) in serialized
+        lowered = serialized.lower()
+        assert any(label in lowered for label in ("source", "observed", "sent", "host time")), (
+            "an instant reached the summariser with nothing saying which time it is"
+        )
     finally:
         engine.shutdown()
 
@@ -250,7 +310,8 @@ def test_an_unknown_source_time_is_not_substituted(tmp_path):
 # ── #31 MA01 — a real acknowledgement is not synthetic noise ─────────────────────────────────
 
 @pytest.mark.beta_target("#31 MA01")
-def test_a_genuine_acknowledgement_survives_into_the_source_byte_identical(tmp_path):
+@pytest.mark.parametrize("window", WINDOWS)
+def test_a_genuine_acknowledgement_survives_into_the_source_byte_identical(tmp_path, window):
     """The host's ordinary assistant builder produces exactly this shape.
 
     `content="Acknowledged"` with `finish_reason="stop"` is a real provider reply. The serialiser
@@ -259,7 +320,7 @@ def test_a_genuine_acknowledgement_survives_into_the_source_byte_identical(tmp_p
     Identifying synthetic origin needs a host signal the plugin does not have; guessing it from
     words deletes real text.
     """
-    engine = _engine(tmp_path, "ack31")
+    engine = _engine(tmp_path, "ack31", window)
     try:
         serialized = engine._serialize_messages([
             {"role": "assistant", "content": "Acknowledged",
@@ -300,6 +361,16 @@ def test_a_structured_content_list_and_its_json_text_stay_distinguishable(tmp_pa
         rows = {int(row["store_id"]): row for row in store.get_session_messages("t")}
         native, text = rows[int(native_id)], rows[int(text_id)]
 
+        # The TYPE is what MC01 loses, so the roundtrip is what has to hold. An inequality of
+        # (content, fingerprint) alone would pass if only the fingerprint differed while both
+        # rows still stored the same flattened canonical JSON — the two would be told apart by a
+        # hash nobody can read back into a content list.
+        assert native.get("content") == structured, (
+            "a native content list does not read back as a list"
+        )
+        assert text.get("content") == literal, (
+            "a literal JSON string does not read back as the string the user typed"
+        )
         assert (native.get("content"), message_envelope_fingerprint(native)) != (
             text.get("content"), message_envelope_fingerprint(text)
         ), "a native content list and a quoted copy of it roundtrip to the same row identity"

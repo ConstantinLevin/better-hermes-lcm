@@ -151,6 +151,11 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}/hermes-agent
         working-directory: plugin
         run: |
+          # scripts/test.sh sets this and bare pytest does not: the plugin refuses a SQLite file
+          # whose parent directory is group- or other-writable, and a runner whose default umask
+          # is 002 would fail every test that opens a store — for a reason that has nothing to do
+          # with the host. Set it rather than depending on the runner's default being 022.
+          umask 077
           python -m pytest tests/fork/test_host_integration.py \
                            tests/fork/test_host_entrypoints.py -q -rs
 
@@ -207,6 +212,7 @@ jobs:
         env:
           LCM_REQUIRE_HOST: "1"
         run: |
+          umask 077   # same reason as the positive lane above
           set +e
           python -m pytest tests/fork/test_host_integration.py \
                            tests/fork/test_host_entrypoints.py -q -rs > control.log 2>&1

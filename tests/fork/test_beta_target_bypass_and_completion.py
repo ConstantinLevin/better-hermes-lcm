@@ -21,6 +21,10 @@ from types import ModuleType, SimpleNamespace
 import pytest
 
 from hermes_lcm import escalation
+from hermes_lcm.errors import (
+    ExtractionUnavailableError,
+    SummaryUnavailableError,
+)
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.dag import SummaryNode
 from hermes_lcm.engine import LCMEngine
@@ -28,10 +32,16 @@ from hermes_lcm.engine import LCMEngine
 
 # ── #62 — the bypass path must not transform what it does not store ──────────────────────────
 
-def _bypassed_engine(tmp_path, name):
+# Both anchors, because a cut that fires at one window and not the other is a defect in this fork
+# and the bypass path's target size is window-derived. 200_000 — what this fixture used at first —
+# is neither anchor.
+WINDOWS = (262_144, 1_000_000)
+
+
+def _bypassed_engine(tmp_path, name, window):
     config = LCMConfig(database_path=str(tmp_path / f"{name}.db"))
     engine = LCMEngine(config=config, hermes_home=str(tmp_path))
-    engine.on_session_start("bypassed", platform="cli", context_length=200_000)
+    engine.on_session_start("bypassed", platform="cli", context_length=window)
     engine._session_stateless = True   # the operator policy that selects this path
     engine.threshold_tokens = 10
     return engine
@@ -54,12 +64,31 @@ def _bypass_history():
     ]
 
 
+def _call_bypass(engine, messages):
+    """Run the bypass and return its list, or None if it REFUSED.
+
+    The bound method is resolved before the try, and only a named refusal counts as one. An
+    earlier version caught bare `Exception` around the call itself, which meant that if the #62
+    fix renamed or re-signatured `_compress_lcm_bypassed_session` — the most likely shape of a
+    fix to that very function — the resulting AttributeError or TypeError became "it refused"
+    and both assertions below passed over nothing at all. A gate that stops checking has to say
+    so, not go quiet.
+    """
+    call = engine._compress_lcm_bypassed_session  # AttributeError here fails the test
+    try:
+        return call(messages, current_tokens=100_000, force=True)
+    except (SummaryUnavailableError, ExtractionUnavailableError):
+        # fail-before-loss, which both #62 and the fork's own rule prefer to a success that
+        # shortened the session
+        return None
+
+
 def _assert_nothing_was_shortened(returned, snapshot, live, *, what):
     """Either every message came back with its fields intact, or the call refused.
 
-    `returned` is None when the call raised: a clear, named failure that keeps the originals is
-    the outcome both #62 and the fork's own rule prefer over a success that shortened them. What
-    is never acceptable is a shorter list, a truncated body, or a receipt standing in for either.
+    `returned` is None only when the call raised one of the fork's own named unavailability
+    errors. What is never acceptable is a shorter list, a truncated body, or a receipt standing
+    in for either.
     """
     assert [dict(m) for m in live] == snapshot, "the call mutated the caller's own list"
     if returned is None:
@@ -72,7 +101,8 @@ def _assert_nothing_was_shortened(returned, snapshot, live, *, what):
 
 
 @pytest.mark.beta_target("#62")
-def test_a_bypassed_session_comes_back_unchanged_when_no_native_compressor_exists(tmp_path):
+@pytest.mark.parametrize("window", WINDOWS)
+def test_a_bypassed_session_comes_back_unchanged_when_no_native_compressor_exists(tmp_path, window):
     """With no native compressor the plugin builds its own head/tail context.
 
     `_fallback_tail_compaction` deletes whole messages out of the middle and truncates the
@@ -82,15 +112,11 @@ def test_a_bypassed_session_comes_back_unchanged_when_no_native_compressor_exist
     """
     messages = _bypass_history()
     snapshot = [dict(m) for m in messages]
-    engine = _bypassed_engine(tmp_path, "nonative62")
+    engine = _bypassed_engine(tmp_path, "nonative62", window)
     try:
         engine._get_host_fallback_compressor = lambda: None
         engine._bypass_compaction_target_tokens = lambda **_kwargs: 300  # real cap pressure
-        try:
-            returned = engine._compress_lcm_bypassed_session(
-                messages, current_tokens=100_000, force=True)
-        except Exception:
-            returned = None
+        returned = _call_bypass(engine, messages)
         _assert_nothing_was_shortened(
             returned, snapshot, messages,
             what="the bypass deleted or truncated a session it does not store")
@@ -99,7 +125,8 @@ def test_a_bypassed_session_comes_back_unchanged_when_no_native_compressor_exist
 
 
 @pytest.mark.beta_target("#62")
-def test_an_explicit_native_abort_is_not_overridden_by_the_local_trim(tmp_path):
+@pytest.mark.parametrize("window", WINDOWS)
+def test_an_explicit_native_abort_is_not_overridden_by_the_local_trim(tmp_path, window):
     """An abort is a decision to PRESERVE, not a failed attempt.
 
     When the host's compressor returns the list unchanged with `_last_compress_aborted=True` and
@@ -117,18 +144,14 @@ def test_an_explicit_native_abort_is_not_overridden_by_the_local_trim(tmp_path):
         def compress(self, msgs, **_kwargs):
             return msgs
 
-    engine = _bypassed_engine(tmp_path, "abort62")
+    engine = _bypassed_engine(tmp_path, "abort62", window)
     try:
         compressor = _AbortingCompressor()
         engine._host_fallback_compressor = compressor
         engine._host_fallback_session_id = engine._bypass_lcm_session_id()
         engine._get_host_fallback_compressor = lambda: compressor
         engine._bypass_compaction_target_tokens = lambda **_kwargs: 300
-        try:
-            returned = engine._compress_lcm_bypassed_session(
-                messages, current_tokens=100_000, force=True)
-        except Exception:
-            returned = None
+        returned = _call_bypass(engine, messages)
         _assert_nothing_was_shortened(
             returned, snapshot, messages,
             what="the host's explicit abort was overridden by the local trim")
