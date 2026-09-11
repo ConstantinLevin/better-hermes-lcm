@@ -1095,10 +1095,17 @@ def _doctor_repair_apply_text(engine) -> str:
                 lines.append(f"{label}_rebuilt: {_fmt_bool(done['rebuilt'])}")
                 lines.append(f"{label}_triggers_recreated: {_fmt_bool(done['triggers_recreated'])}")
                 lines.append(f"{label}_degraded: {_fmt_bool(done['degraded'])}")
-            lines.append(
-                "note: this repair was PARTIAL — the indexes listed above with results are "
-                "already committed; the ones listed as not repaired were never touched"
-            )
+            if applied:
+                lines.append(
+                    "note: this repair was PARTIAL — the indexes listed above with results are "
+                    "already committed; the ones listed as not repaired were never touched"
+                )
+            else:
+                # A receipt is a claim. The first index failing means nothing was
+                # committed, and announcing a PARTIAL repair there claims a change
+                # that never happened -- the same defect as hiding one, pointing the
+                # other way.
+                lines.append("note: no FTS tables were repaired")
             lines.append("note: backup was created before repair apply")
             return "\n".join(lines)
         messages_result = applied["messages_fts"]

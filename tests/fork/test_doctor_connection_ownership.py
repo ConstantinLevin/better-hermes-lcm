@@ -657,3 +657,92 @@ def test_doctor_repair_on_a_read_only_database_reports_unchecked(tmp_path):
     assert "messages_fts: unchecked" in text, text
     assert "status: ok" not in text, text
     assert "read-write SQLite access" in text, text
+
+
+# ---------------------------------------------------------------------------
+# a receipt for a repair that changed nothing is a false claim
+# ---------------------------------------------------------------------------
+def test_repair_apply_does_not_claim_a_partial_when_nothing_was_repaired(tmp_path, monkeypatch):
+    """A read-only caller fails on the FIRST index, so nothing is committed.
+    Announcing a PARTIAL repair there claims a change that never happened --
+    the same defect as hiding one, pointing the other way."""
+    engine = _engine(tmp_path)
+
+    def always_refused(conn, spec, **kwargs):
+        raise sqlite3.OperationalError("attempt to write a readonly database")
+
+    monkeypatch.setattr(command_mod, "repair_external_content_fts", always_refused)
+
+    text = handle_lcm_command("doctor repair apply", engine)
+
+    assert "status: error" in text, text
+    assert "PARTIAL" not in text, text
+    assert "no FTS tables were repaired" in text, text
+
+
+# ---------------------------------------------------------------------------
+# the access probe must not go silent on a database it cannot probe
+# ---------------------------------------------------------------------------
+def _auto_vacuum_database(tmp_path, mode: str, *, freelist: bool):
+    db_path = tmp_path / f"av_{mode.lower()}_{int(freelist)}.db"
+    builder = sqlite3.connect(str(db_path))
+    builder.execute(f"PRAGMA auto_vacuum={mode}")
+    builder.execute("VACUUM")
+    builder.execute("PRAGMA journal_mode=WAL")
+    builder.execute("CREATE TABLE t(a)")
+    builder.executemany("INSERT INTO t VALUES(?)", [("x" * 400,)] * 800)
+    builder.commit()
+    if freelist:
+        builder.execute("DELETE FROM t")
+        builder.commit()
+    builder.close()
+    return db_path
+
+
+def test_a_read_only_caller_is_detected_under_incremental_auto_vacuum(tmp_path):
+    """auto_vacuum other than NONE used to skip the probe entirely, so a
+    read-only caller read as writable and the diagnostic wrote to it."""
+    from hermes_lcm.diagnostic_connection import CALLER_READ_ONLY, caller_connection_access
+
+    db_path = _auto_vacuum_database(tmp_path, "INCREMENTAL", freelist=False)
+    ro_conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        assert caller_connection_access(ro_conn) == CALLER_READ_ONLY
+    finally:
+        ro_conn.close()
+
+
+def test_an_undeterminable_access_mode_reports_unchecked_and_writes_nothing(tmp_path):
+    """The one configuration the probe is unsafe in -- incremental auto_vacuum
+    with pages on the freelist, where the probe would really free one. Refusing
+    to guess is the honest answer; guessing `writable` writes to a database the
+    caller may have opened read-only and then reports `ok`."""
+    from types import SimpleNamespace
+
+    from hermes_lcm.diagnostic_connection import (
+        CALLER_UNDETERMINED,
+        caller_connection_access,
+        run_isolated_fts_check,
+    )
+
+    db_path = _auto_vacuum_database(tmp_path, "INCREMENTAL", freelist=True)
+    before = db_path.read_bytes()
+    conn = sqlite3.connect(str(db_path))
+    ran: list[bool] = []
+
+    def never_should_run(_conn, _spec):
+        ran.append(True)
+        return {"status": "pass", "detail": "ok"}
+
+    try:
+        assert caller_connection_access(conn) == CALLER_UNDETERMINED
+        result = run_isolated_fts_check(
+            conn, SimpleNamespace(table_name="messages_fts"), never_should_run
+        )
+    finally:
+        conn.close()
+
+    assert result["status"] == "unchecked", result
+    assert "read-only" in result["detail"], result
+    assert not ran, "the check ran against a database whose access mode was unknown"
+    assert db_path.read_bytes() == before, "the probe wrote to the database"

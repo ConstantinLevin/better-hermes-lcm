@@ -85,44 +85,83 @@ DIAGNOSTIC_BUDGET_SECONDS = SQLITE_BUSY_TIMEOUT_MS / 1000.0 / 2
 _PROGRESS_INSTRUCTIONS = 1000
 
 
-def caller_connection_is_read_only(conn: sqlite3.Connection) -> bool:
-    """True when the caller opened this connection read-only.
+CALLER_WRITABLE = "writable"
+CALLER_READ_ONLY = "read-only"
+CALLER_UNDETERMINED = "undetermined"
+
+
+def caller_connection_access(conn: sqlite3.Connection) -> str:
+    """Whether the caller opened this connection read-only, and say so honestly.
 
     Python's sqlite3 exposes no ``sqlite3_db_readonly``, so ask SQLite with the
-    one statement that is refused on a read-only connection and provably does
-    nothing on a writable one. With ``auto_vacuum`` NONE -- SQLite's default,
-    which this plugin never changes -- ``PRAGMA incremental_vacuum`` has no
-    freelist to work on: it leaves the database file and the WAL byte-identical
-    and neither starts nor joins a transaction (measured: inside a foreign
+    one statement that is refused on a read-only connection and that can be
+    shown to do nothing on a writable one: ``PRAGMA incremental_vacuum``. It is
+    inert exactly when there is nothing for it to free, which is either
+    ``auto_vacuum`` NONE (it does nothing in that mode at all) or an empty
+    freelist. Measured across every mode, comparing the sha256 of the database,
+    the ``-wal`` and the ``-shm`` before and after:
+
+        auto_vacuum=NONE        freelist=0    identical   ro refuses
+        auto_vacuum=NONE        freelist=88   identical   ro refuses
+        auto_vacuum=FULL        freelist=0    identical   ro refuses
+        auto_vacuum=INCREMENTAL freelist=0    identical   ro refuses
+        auto_vacuum=INCREMENTAL freelist=88   CHANGED     ro refuses
+
+    It also neither starts nor joins a transaction: inside a foreign write
     transaction the pending row stays pending and the owner's rollback still
-    discards it). Under any other ``auto_vacuum`` setting it WOULD free pages,
-    so that case skips the probe and the connection counts as writable.
+    discards it.
 
-    Only SQLite's own read-only refusal answers ``True``. Anything else -- a
-    busy database, a locked one -- is not evidence about the caller's intent.
+    The last row is the one configuration where the probe would really free a
+    page, so it is not run there and the answer is ``CALLER_UNDETERMINED``.
+    Callers must treat that as "do not write", not as "probably writable": this
+    plugin never sets ``auto_vacuum``, so reaching it takes an operator who set
+    it themselves, and guessing ``writable`` there is a silent write to a
+    database they may have opened read-only, reported as ``ok``.
 
-    The probe is a (no-op) write, so it still asks for SQLite's write lock and
-    would otherwise wait out the caller connection's full 30 s for it. It is
-    bounded to the diagnostic's own backoff and restored afterwards: a diagnostic
-    must not stall on a question about permissions.
+    Only SQLite's own read-only refusal answers ``CALLER_READ_ONLY``. Anything
+    else -- a busy database, a locked one -- is not evidence about the caller's
+    intent, and the refusal wins over the busy lock, so a read-only caller under
+    contention still answers read-only.
     """
     try:
         auto_vacuum = conn.execute("PRAGMA auto_vacuum").fetchone()
-        if not auto_vacuum or int(auto_vacuum[0]) != 0:
-            return False
+        freelist = conn.execute("PRAGMA freelist_count").fetchone()
+        inert = (auto_vacuum and int(auto_vacuum[0]) == 0) or (
+            freelist and int(freelist[0]) == 0
+        )
+        if not inert:
+            return CALLER_UNDETERMINED
         with _temporary_sqlite_busy_timeout([conn], DIAGNOSTIC_BUSY_TIMEOUT_MS):
             conn.execute("PRAGMA incremental_vacuum(0)").fetchall()
     except sqlite3.DatabaseError as exc:
         lowered = str(exc).lower()
-        return "readonly" in lowered or "read-only" in lowered
+        if "readonly" in lowered or "read-only" in lowered:
+            return CALLER_READ_ONLY
+        return CALLER_WRITABLE
     except Exception:  # pragma: no cover - a probe must never break the doctor
-        return False
-    return False
+        return CALLER_UNDETERMINED
+    return CALLER_WRITABLE
+
+
+def undeterminable_access_result(spec_name: str) -> dict:
+    """The honest answer when the caller's access mode could not be established."""
+    return {
+        "status": "unchecked",
+        "detail": (
+            f"deep FTS integrity-check for '{spec_name}' was not run: this database uses "
+            "incremental auto_vacuum with pages on its freelist, which is the one "
+            "configuration where the read-only probe would itself modify the file, so "
+            "whether the caller opened it read-only could not be established -- and a "
+            "diagnostic must not write to a database that may have been opened read-only"
+        ),
+    }
 
 
 @contextmanager
 def private_diagnostic_connection(
     conn: Optional[sqlite3.Connection],
+    *,
+    access: Optional[str] = None,
 ) -> Iterator[Optional[sqlite3.Connection]]:
     """Yield a handle on ``conn``'s database that the caller owns outright.
 
@@ -133,7 +172,33 @@ def private_diagnostic_connection(
     never into a pass.
 
     The handle is closed on the way out, which rolls back anything still open on
-    it. Nothing on the caller's connection is touched at any point.
+    it. **Nothing the diagnostic runs on the handle touches the caller's
+    transaction** -- that is the guarantee this module exists for, and it holds.
+    What the caller's connection DOES see, once, before the handle is opened, is
+    the access probe in ``caller_connection_access`` (pass ``access`` to skip
+    it), and it is worth being exact about what that costs, because a future
+    caller will decide from this paragraph whether this module is safe to use
+    somewhere new:
+
+    - it runs ``PRAGMA auto_vacuum`` and ``PRAGMA freelist_count`` (reads), and
+      a ``PRAGMA incremental_vacuum`` that is inert but is still a WRITE, so it
+      asks SQLite for the write lock and blocks (returning ``database is
+      locked``) while another writer holds it;
+    - it lowers the caller's ``busy_timeout`` to ``DIAGNOSTIC_BUSY_TIMEOUT_MS``
+      for the duration and restores it, through the tree's own
+      ``_temporary_sqlite_busy_timeout``. So for those ~2 s the caller's own
+      lock waits are bounded at 2 s instead of its usual 30 s. Two overlapping
+      users of that helper on one connection could in principle restore each
+      other's value -- the other two users (``store.py``, ``engine.py``) both
+      hold the store's owner lock and this probe does not, so nothing serialises
+      them. Rigging the window did not reproduce a lost restore; it is recorded
+      as a mechanism, not as an observed defect;
+    - run inside a foreign DEFERRED read transaction, the probe upgrades that
+      transaction to a write one, and its owner then holds the write lock until
+      it commits. Not reachable today: every explicit ``BEGIN`` on the store and
+      DAG connections is ``BEGIN IMMEDIATE``, and the only ``BEGIN DEFERRED`` in
+      the tree is in a default-off subsystem on its own connection. Keep it that
+      way on purpose rather than by luck.
     """
     db_path = _database_path_for_connection(conn) if conn is not None else ""
     if not db_path or db_path == ":memory:" or not Path(db_path).exists():
@@ -145,7 +210,10 @@ def private_diagnostic_connection(
     # happened. The deep check genuinely needs a write, so on a read-only caller
     # it fails with SQLite's own readonly message and becomes ``unchecked`` --
     # which is what the read-only remedy has always told the operator.
-    read_only = caller_connection_is_read_only(conn)
+    resolved = access if access is not None else caller_connection_access(conn)
+    # Anything short of a positive "writable" opens read-only: never write to a
+    # database on a guess about whether the operator closed it to writes.
+    read_only = resolved != CALLER_WRITABLE
     target = f"{Path(db_path).as_uri()}?mode=ro" if read_only else db_path
     probe = sqlite3.connect(
         target,
@@ -196,7 +264,13 @@ def run_isolated_fts_check(
     as ``fail`` would flag corruption that was never observed, and reporting it
     as ``pass`` is the clause this fork exists to remove.
     """
-    with private_diagnostic_connection(conn) as probe:
+    access = caller_connection_access(conn) if conn is not None else CALLER_UNDETERMINED
+    if conn is not None and access == CALLER_UNDETERMINED:
+        # Refuse before opening anything: the honest answer beats a check run
+        # against a database whose access mode nobody established.
+        return undeterminable_access_result(spec.table_name)
+
+    with private_diagnostic_connection(conn, access=access) as probe:
         if probe is None:
             return unavailable_check_result(spec.table_name)
 
@@ -275,6 +349,13 @@ def unchecked_fts_remedy(reason: str) -> str:
         return (
             "rerun `/lcm doctor` with read-write SQLite access if a deep FTS "
             "integrity result is needed"
+        )
+    if "could not be established" in lowered:
+        return (
+            "empty this database's freelist (`VACUUM`, or `PRAGMA incremental_vacuum`) or "
+            "set `PRAGMA auto_vacuum=NONE`, if a deep FTS integrity result is needed: "
+            "until then LCM cannot tell whether this connection was opened read-only, and "
+            "will not write to it to find out"
         )
     if "no second handle" in lowered or "in-memory" in lowered:
         return (
