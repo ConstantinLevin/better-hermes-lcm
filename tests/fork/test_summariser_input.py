@@ -50,39 +50,67 @@ def test_the_engine_reads_the_cause_chain_when_deciding_to_retry_smaller(tmp_pat
         e.shutdown()
 
 
-def test_a_summary_cut_off_at_the_generation_limit_is_not_accepted(monkeypatch):
-    """Audit p05 ES01: the route's finish status was never read, so a summary that stopped at
-    the generation limit became a durable node — an index missing everything after the cut."""
+def _install_completion_route(monkeypatch, *, finish_reason="stop", **response_fields):
+    """A route whose return carries the fields the real host adapters carry."""
     import sys
     from types import ModuleType, SimpleNamespace
 
-    def _install(finish_reason):
-        module = ModuleType("agent.auxiliary_client")
-        module.call_llm = lambda **kwargs: SimpleNamespace(choices=[SimpleNamespace(
-            message=SimpleNamespace(content="Topic A: decided X."),
-            finish_reason=finish_reason)])
-        monkeypatch.setitem(sys.modules, "agent.auxiliary_client", module)
+    module = ModuleType("agent.auxiliary_client")
+    module.call_llm = lambda **kwargs: SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content="Topic A: decided X."),
+                                 finish_reason=finish_reason)],
+        **response_fields)
+    monkeypatch.setitem(sys.modules, "agent.auxiliary_client", module)
 
-    _install("length")
+
+def test_a_summary_cut_off_at_the_generation_limit_is_not_accepted(monkeypatch):
+    """Audit p05 ES01: the route's finish status was never read, so a summary that stopped at
+    the generation limit became a durable node — an index missing everything after the cut.
+
+    # fork: better-hermes-lcm — the `status="failed"` refusal this test grew is not here; it is
+    # the target state and lives in `test_a_failed_generation_is_not_accepted_as_a_summary`
+    # below, under the beta_target gate. Keeping them together would have taken the two refusals
+    # that already WORK — the explicit truncation reason and `status="incomplete"` — out of every
+    # run expected to be green, which is the guard for a no-loss property going quiet.
+    #
+    # What the whole file cannot prove, and what #32 is really about: every value below is
+    # hand-set on a synthetic `agent.auxiliary_client`, and the host REWRITES `finish_reason`
+    # before LCM sees it — a stream ending with no terminal frame is normalised to "stop", and
+    # the Bedrock and Anthropic adapters default an absent or unknown stop reason to "stop" as
+    # well. So the "stop" cases pin a value the plugin cannot treat as evidence of completion.
+    # They stay because accepting a finished summary is still the behaviour under test; they are
+    # not a claim that "stop" means finished.
+    """
+    _install_completion_route(monkeypatch, finish_reason="length")
     assert escalation._call_llm_for_summary("summarize this", 200) is None
 
-    _install("stop")
+    _install_completion_route(monkeypatch, finish_reason="stop")
     assert escalation._call_llm_for_summary("summarize this", 200) == "Topic A: decided X."
 
     # round-2 verify-3 #12: the RESPONSE can declare itself unfinished while the choice still
     # says "stop" — that text is just as truncated, and was being published.
-    def _install_response(**response_fields):
-        module = ModuleType("agent.auxiliary_client")
-        module.call_llm = lambda **kwargs: SimpleNamespace(
-            choices=[SimpleNamespace(message=SimpleNamespace(content="Topic A: decided X."),
-                                     finish_reason="stop")],
-            **response_fields)
-        monkeypatch.setitem(sys.modules, "agent.auxiliary_client", module)
-
-    _install_response(status="incomplete", incomplete_details={"reason": "max_output_tokens"})
+    _install_completion_route(
+        monkeypatch, status="incomplete", incomplete_details={"reason": "max_output_tokens"})
     assert escalation._call_llm_for_summary("summarize this", 200) is None
-    _install_response(status="completed", incomplete_details=None)
+
+    _install_completion_route(monkeypatch, status="completed", incomplete_details=None)
     assert escalation._call_llm_for_summary("summarize this", 200) == "Topic A: decided X."
+
+
+@pytest.mark.beta_target("#32")
+def test_a_failed_generation_is_not_accepted_as_a_summary(monkeypatch):
+    """# fork: better-hermes-lcm — the target-state half of the test above.
+
+    `escalation` checks explicit truncation reasons and `status == "incomplete"`, and nothing
+    else. A response the host hands over with `status="failed"` and an error object still carries
+    `finish_reason="stop"` on its choice, so its text is accepted, published as a leaf, and the
+    frontier moves past sources that were never summarised. A partial sentence that happens to
+    read plausibly is not a completion guarantee.
+    """
+    _install_completion_route(
+        monkeypatch, status="failed",
+        error={"code": "server_error", "message": "upstream cancelled"})
+    assert escalation._call_llm_for_summary("summarize this", 200) is None
 
 
 def test_an_acknowledgement_is_not_a_summary(monkeypatch):
@@ -220,62 +248,162 @@ def test_a_failed_tool_result_does_not_read_like_a_successful_one():
 
 def test_no_tool_argument_value_is_lost_to_a_key_collision_or_a_duplicate_key():
     """verify-4 #5: the sanitised keyspace could still collide in one insertion order, and
-    re-serialising parsed JSON dropped one of two values a provider really sent."""
-    from hermes_lcm.extraction import (
-        sanitize_pre_compaction_tool_arguments as clean_args,
-        _sanitize_json_like,
-    )
-    collided = _sanitize_json_like(
-        {"a<active_memory>x</active_memory>": "FIRST", "a": "SECOND"}
-    )
-    assert sorted(collided.values()) == ["FIRST", "SECOND"], collided
-    reversed_order = _sanitize_json_like(
-        {"a": "SECOND", "a<active_memory>x</active_memory>": "FIRST"}
-    )
-    assert sorted(reversed_order.values()) == ["FIRST", "SECOND"], reversed_order
+    re-serialising parsed JSON dropped one of two values a provider really sent.
+
+    # fork: better-hermes-lcm — this used to call `extraction._sanitize_json_like` directly, and
+    # that helper stops existing under #56. What it was protecting does not: BOTH values a
+    # provider sent must survive to the summariser, whatever the mechanism. That property is true
+    # today and stays true after the fix, so it is asserted here, ungated, at the production entry
+    # point. The stricter post-fix form — the argument string comes back byte-identical — is
+    # `test_the_argument_string_reaches_the_summariser_as_the_provider_wrote_it` below.
+    #
+    # It is the only ungated guard for either hazard: `tests/test_ingest_protection.py:1443` is the
+    # one other ungated caller of this function and it asserts the old contract.
+    """
+    from hermes_lcm.extraction import sanitize_pre_compaction_tool_arguments as clean_args
+
+    collision = clean_args('{"a<active_memory>x</active_memory>":"FIRST","a":"SECOND"}')
+    assert "FIRST" in collision and "SECOND" in collision, collision
+
+    reversed_order = clean_args('{"a":"SECOND","a<active_memory>x</active_memory>":"FIRST"}')
+    assert "FIRST" in reversed_order and "SECOND" in reversed_order, reversed_order
 
     duplicated = clean_args('{"k":"FIRST","k":"SECOND"}')
-    assert "FIRST" in duplicated and "SECOND" in duplicated
+    assert "FIRST" in duplicated and "SECOND" in duplicated, duplicated
+
+
+@pytest.mark.beta_target("#56")
+def test_the_argument_string_reaches_the_summariser_as_the_provider_wrote_it():
+    """# fork: better-hermes-lcm — the target-state half of the test above.
+
+    Under #56 there is no key rewriting and no parse/re-serialise round trip: the string a
+    provider sent IS the argument. That makes both hazards impossible rather than merely detected,
+    which is stronger than "both values survived" — a re-introduced sanitiser that handled every
+    collision correctly would still fail this, and that is the point.
+    """
+    from hermes_lcm.extraction import sanitize_pre_compaction_tool_arguments as clean_args
+
+    collision = '{"a<active_memory>x</active_memory>":"FIRST","a":"SECOND"}'
+    assert clean_args(collision) == collision, clean_args(collision)
+
+    reversed_order = '{"a":"SECOND","a<active_memory>x</active_memory>":"FIRST"}'
+    assert clean_args(reversed_order) == reversed_order, clean_args(reversed_order)
+
+    duplicated = '{"k":"FIRST","k":"SECOND"}'
+    assert clean_args(duplicated) == duplicated, clean_args(duplicated)
 
 
 def test_every_injected_removal_leaves_a_trace_including_inside_tool_arguments():
     """verify-4 #7: the recursive JSON sanitiser disabled marking for string values, and a
-    self-closing tag — which carries its content in its attributes — vanished entirely."""
+    self-closing tag — which carries its content in its attributes — vanished entirely.
+
+    # fork: better-hermes-lcm — what survives ungated is the text AROUND the removal: the words
+    # either side of a tag inside an argument VALUE, and either side of a self-closing tag in
+    # content. Both hold today and after #56, and neither branch has another ungated guard — the
+    # split at `test_the_text_around_every_removal_branch_survives_it` covers the unmatched-tag
+    # branch, and `test_no_tool_argument_value_is_lost_to_a_key_collision_or_a_duplicate_key`
+    # covers key collisions, not a tag inside a value.
+    #
+    # What the test used to demand — `"DECISION" not in inside_args`, `"CANCEL" not in
+    # self_closing`, with a marker present — made REMOVAL the success criterion and the marker
+    # what licensed it. That is in
+    # `test_the_injected_payload_inside_an_argument_and_a_tag_survives` below.
+    """
     from hermes_lcm.extraction import (
         sanitize_pre_compaction_content,
         sanitize_pre_compaction_tool_arguments as clean_args,
     )
     inside_args = clean_args('{"body": "before<active_memory>DECISION</active_memory>after"}')
-    assert "before" in inside_args and "after" in inside_args
-    assert "DECISION" not in inside_args
-    assert "[LCM-" in inside_args, inside_args
+    assert "before" in inside_args and "after" in inside_args, inside_args
 
     self_closing = sanitize_pre_compaction_content(
         'keep this <active_memory decision="CANCEL"/> and this'
     )
-    assert "CANCEL" not in self_closing
-    assert "keep this" in self_closing and "and this" in self_closing
-    assert "[LCM" in self_closing, self_closing
+    assert "keep this" in self_closing and "and this" in self_closing, self_closing
+
+
+@pytest.mark.beta_target("#56")
+def test_the_injected_payload_inside_an_argument_and_a_tag_survives():
+    """# fork: better-hermes-lcm — the target-state half of the test above.
+
+    Under #56 this source pre-processing may not remove message content at all — a marker
+    licenses nothing (and the same boundary is in #31/#35/#63). So the payload the host sent has
+    to be there, and because nothing was removed, a removal receipt in its place would be a false
+    claim of removal, which is its own defect. Re-introducing the strip to turn this green is
+    explicitly the wrong repair.
+    """
+    from hermes_lcm.extraction import (
+        sanitize_pre_compaction_content,
+        sanitize_pre_compaction_tool_arguments as clean_args,
+    )
+    inside_args = clean_args('{"body": "before<active_memory>DECISION</active_memory>after"}')
+    assert "DECISION" in inside_args, inside_args
+    # the false-receipt guard belongs on BOTH paths, and it has to name the marker the path
+    # actually emits: the compact argument form is `[LCM-39c]`, not the sentence the content
+    # form uses, so testing for the sentence here would have guarded nothing
+    assert "[LCM-" not in inside_args, inside_args
+
+    self_closing = sanitize_pre_compaction_content(
+        'keep this <active_memory decision="CANCEL"/> and this'
+    )
+    assert "CANCEL" in self_closing, self_closing
+    assert "chars of injected context removed" not in self_closing, self_closing
 
 
 def test_a_padded_data_uri_does_not_eat_the_word_after_it():
     """round-2 verify-3 #12: "=" was part of the repeated payload class, so a padded data URI
     followed immediately by prose swallowed the sentence after the padding — the summariser
-    read a media marker where a decision had been written."""
-    from hermes_lcm import extraction
-    text = "before data:image/png;base64," + "A" * 20 + "==hello world decision"
-    assert extraction._MEDIA_DATA_URI_RE.sub("<M>", text) == "before <M>hello world decision"
+    read a media marker where a decision had been written.
+
+    # fork: better-hermes-lcm — this used to assert that `_MEDIA_DATA_URI_RE.sub("<M>", …)`
+    # produced `before <M>hello world decision`, which pinned the regex's boundary and in doing so
+    # endorsed the removal: the best outcome it could describe was "the medium is gone but the
+    # word after it survived". The helper stops existing under #56. The property the test is NAMED
+    # for does not: the prose after the padding reaches the summariser, which is true today and
+    # stays true after the fix, so it is asserted here, ungated, at the production entry point.
+    # That the payload survives too is the post-fix half, in
+    # `test_the_data_uri_reaches_the_summariser_with_the_word_after_it` below.
+    """
+    from hermes_lcm.extraction import sanitize_pre_compaction_content
+
+    padded = "before data:image/png;base64," + "A" * 20 + "==hello world decision"
+    assert "hello world decision" in sanitize_pre_compaction_content(padded)
+
     spaced = "before data:image/png;base64," + "A" * 20 + " hello world"
-    assert extraction._MEDIA_DATA_URI_RE.sub("<M>", spaced) == "before <M> hello world"
+    assert "hello world" in sanitize_pre_compaction_content(spaced)
 
 
-def test_an_elision_cannot_swallow_an_earlier_receipt(tmp_path):
+@pytest.mark.beta_target("#56")
+def test_the_data_uri_reaches_the_summariser_with_the_word_after_it():
+    """# fork: better-hermes-lcm — the target-state half of the test above.
+
+    #56 takes the removal away entirely and forbids the other available direction (a wider regex,
+    which eats the adjacent words), so what has to be true is that BOTH the payload and the prose
+    arrive unchanged, not just that the prose survived the cut.
+    """
+    from hermes_lcm.extraction import sanitize_pre_compaction_content
+
+    padded = "before data:image/png;base64," + "A" * 20 + "==hello world decision"
+    assert sanitize_pre_compaction_content(padded) == padded
+
+    spaced = "before data:image/png;base64," + "A" * 20 + " hello world"
+    assert sanitize_pre_compaction_content(spaced) == spaced
+
+
+def test_an_elision_cannot_swallow_an_earlier_receipt():
     """round-2 verify-4 #13: sanitisation removes an injected block and leaves its receipt in
     the middle of the text; the serialisation cap then cut that line out and reported only the
-    characters IT removed, so the earlier removal vanished from the accounting entirely."""
+    characters IT removed, so the earlier removal vanished from the accounting entirely.
+
+    # fork: better-hermes-lcm — the engine half of this test has moved to
+    # `test_the_serialiser_does_not_remove_injected_context_from_the_source` below and is gated,
+    # because the removal it used to demand is what #56 takes away. This half is NOT gated and
+    # must stay green: it is the fork's "a marker can never itself be trimmed away" rule for
+    # `elide_text`, an operator cap may still legitimately cross an earlier removal's receipt,
+    # and `tests/fork/test_marked_loss.py` covers only the `elide_args` sibling. Gating it would
+    # have taken the rule's only guard out of every run expected to be green.
+    """
     from hermes_lcm import marked_loss
-    from hermes_lcm.config import LCMConfig
-    from hermes_lcm.engine import LCMEngine
 
     receipt = marked_loss.injected_context_marker(14_000)
     text = "head " * 100 + "\n" + receipt + "\n" + "tail " * 100
@@ -283,17 +411,33 @@ def test_an_elision_cannot_swallow_an_earlier_receipt(tmp_path):
     assert receipt in elided, elided
     assert "20031 chars before the removals" in elided
 
+
+@pytest.mark.beta_target("#56")
+def test_the_serialiser_does_not_remove_injected_context_from_the_source(tmp_path):
+    """# fork: better-hermes-lcm — the target-state half of the test above.
+
+    It used to assert `"chars of injected context removed" in serialized`: it demanded that the
+    serialiser strip a host-injected block and account for it. That receipt is the old contract —
+    under #56 this pre-processing does not remove message content, so what has to be true is that
+    the injected payload reaches the summariser's source. The artificial
+    `serialize_message_max_chars = 300` went with it: an operator cap is a legitimate cut with its
+    own marker, and leaving it set would have cut the payload for a reason unrelated to the
+    defect.
+    """
+    from hermes_lcm.config import LCMConfig
+    from hermes_lcm.engine import LCMEngine
+
     cfg = LCMConfig(database_path=str(tmp_path / "elide.db"))
     e = LCMEngine(config=cfg, hermes_home=str(tmp_path))
     try:
         e.on_session_start("el", platform="cli", context_length=262_144)
-        e._config.serialize_message_max_chars = 300
-        e._resolve_window_scaled_settings()
-        injected = ("<active_memory>" + ("m" * 14_000) + "</active_memory>")
+        payload = "INJECTED_PAYLOAD_ALPHA do not deploy " + ("m" * 14_000)
+        injected = "<active_memory>" + payload + "</active_memory>"
         serialized = e._serialize_messages([
             {"role": "user", "content": "start " * 200 + injected + " end " * 200},
         ])
-        assert "chars of injected context removed" in serialized, serialized[:400]
+        assert payload in serialized, serialized[:400]
+        assert "chars of injected context removed" not in serialized, serialized[:400]
     finally:
         e.shutdown()
 
@@ -321,55 +465,121 @@ def test_a_block_s_other_substantive_fields_are_named_not_dropped():
     assert plain == "just text", plain
 
 
-def test_every_removal_branch_leaves_a_receipt():
+def test_the_text_around_every_removal_branch_survives_it():
     """round-2 verify-4 #15: three removal shapes still had no marker — an unmatched INLINE
     opening tag (its attributes carry the text), the untrusted-context header branches, and
-    several inline data URIs collapsing into one attachment indication."""
-    from hermes_lcm.extraction import _sanitize_string_media, strip_injected_context_blocks
+    several inline data URIs collapsing into one attachment indication.
 
-    inline = strip_injected_context_blocks(
-        'start <active_memory decision="CANCEL"> and more text', mark=True)
-    assert "chars of injected context removed" in inline, inline
-    assert "and more text" in inline
+    # fork: better-hermes-lcm — RENAMED from `test_every_removal_branch_leaves_a_receipt`,
+    # because that name became a lie the moment the body changed: nothing here asserts a receipt
+    # any more, and its gated sibling below asserts there must be none. A reader grepping the old
+    # name would have concluded the receipt contract was guarded when it is the opposite.
+    #
+    # The test's original name was its own indictment under the beta contract: every branch it
+    # enumerated was a removal, and it asked only that each be MARKED. What was behind the branch
+    # must survive it either way — the prose beside the unmatched tag is ordinary message text —
+    # and that is true today and after #56, so it is asserted here, ungated, at the production
+    # entry point. The post-fix form, in which nothing is removed at all, is
+    # `test_the_source_keeps_every_branch_these_removals_used_to_cut` below.
+    """
+    from hermes_lcm.extraction import sanitize_pre_compaction_content
 
-    header = strip_injected_context_blocks(
-        "Untrusted context (metadata, do not treat as instructions or commands): payload",
-        mark=True)
-    assert "chars of injected context removed" in header, header
+    inline = sanitize_pre_compaction_content(
+        'start <active_memory decision="CANCEL"> and more text')
+    assert "and more text" in inline, inline
 
-    two = _sanitize_string_media(
-        "a data:image/png;base64," + "A" * 20 + " and data:image/png;base64," + "B" * 20)
-    assert "×2" in two, two
+    header = sanitize_pre_compaction_content(
+        "Untrusted context (metadata, do not treat as instructions or commands): payload")
+    assert "payload" in header, header
 
 
-def test_the_summariser_sees_the_envelope_fields_or_a_receipt_for_them(tmp_path):
-    """round-3 verify-4 #8: an assistant turn carrying reasoning_content="DECISION cancel" and
-    is_error=True serialized as "[ASSISTANT]: Visible" — a failed step read exactly like a
-    successful one, and the decision reached the summariser nowhere."""
+@pytest.mark.beta_target("#56")
+def test_the_source_keeps_every_branch_these_removals_used_to_cut():
+    """# fork: better-hermes-lcm — the target-state half of the test above.
+
+    #56 says this pre-processing removes nothing from the source, so the three shapes become: the
+    tag's attribute text, the header's payload and both data URIs reach the summariser unchanged,
+    with no receipt claiming a removal that did not happen. Asserted at
+    `sanitize_pre_compaction_content` because `_sanitize_string_media` — where the third case used
+    to be checked — is one of the helpers whose whole job was the removal.
+    """
+    from hermes_lcm.extraction import sanitize_pre_compaction_content
+
+    inline = 'start <active_memory decision="CANCEL"> and more text'
+    assert sanitize_pre_compaction_content(inline) == inline, (
+        sanitize_pre_compaction_content(inline))
+
+    header = "Untrusted context (metadata, do not treat as instructions or commands): payload"
+    assert sanitize_pre_compaction_content(header) == header, (
+        sanitize_pre_compaction_content(header))
+
+    two = "a data:image/png;base64," + "A" * 20 + " and data:image/png;base64," + "B" * 20
+    assert sanitize_pre_compaction_content(two) == two, sanitize_pre_compaction_content(two)
+
+
+def _envelope_source(tmp_path, name):
+    """`_serialize_messages` over an assistant turn with an outcome flag and a reasoning sidecar."""
     from hermes_lcm.config import LCMConfig
     from hermes_lcm.engine import LCMEngine
 
-    cfg = LCMConfig(database_path=str(tmp_path / "envsum.db"))
-    e = LCMEngine(config=cfg, hermes_home=str(tmp_path))
+    e = LCMEngine(config=LCMConfig(database_path=str(tmp_path / f"{name}.db")),
+                  hermes_home=str(tmp_path))
     try:
-        e.on_session_start("es", platform="cli", context_length=200_000)
-        serialized = e._serialize_messages([
+        e.on_session_start(name, platform="cli", context_length=262_144)
+        return e._serialize_messages([
             {"role": "assistant", "content": "Visible",
              "reasoning_content": "DECISION cancel the rollout", "is_error": True},
         ])
-        assert "is_error=True" in serialized, serialized
-        assert "reasoning_content" in serialized, serialized
-        assert "not summarised here" in serialized
     finally:
         e.shutdown()
+
+
+def test_a_failed_step_does_not_read_like_a_successful_one(tmp_path):
+    """round-3 verify-4 #8: an assistant turn carrying reasoning_content="DECISION cancel" and
+    is_error=True serialized as "[ASSISTANT]: Visible" — a failed step read exactly like a
+    successful one.
+
+    # fork: better-hermes-lcm — the outcome flag reaching the source is true today and after #67,
+    # and nothing else ungated asserts `is_error` rendering through `engine._serialize_messages`
+    # (the other guards are all at `sanitize_pre_compaction_content` / `_sanitize_content_block`,
+    # which is a different boundary). The half #67 changes — the sidecar arriving as a VALUE
+    # rather than a name and a length — is
+    # `test_the_summariser_sees_the_envelope_fields_or_a_receipt_for_them` below.
+    """
+    assert "is_error=True" in _envelope_source(tmp_path, "envflag"), "the outcome flag is gone"
+
+
+@pytest.mark.beta_target("#67")
+def test_the_summariser_sees_the_envelope_fields_or_a_receipt_for_them(tmp_path):
+    """# fork: better-hermes-lcm — the target-state half of the test above.
+
+    "or a receipt for them" is the old contract, and the name kept it visible: the test accepted
+    `reasoning_content (26 chars)` plus "not summarised here" as a sufficient answer. #67 says a
+    name and a length are not the value — two opposite sidecars of equal length produce the same
+    source text, and the receipt tells the model that something it will never see exists. The
+    assertion is the VALUE, and there must be no receipt claiming the field was withheld when it
+    was not.
+    """
+    serialized = _envelope_source(tmp_path, "envsum")
+    assert "DECISION cancel the rollout" in serialized, serialized
+    assert "not summarised here" not in serialized, serialized
 
 
 def test_every_rendering_branch_accounts_for_what_it_did_not_render():
     """round-3 verify-4 #9: the "accounted" key set exempted text/content globally, so the
     media branch — which renders neither — hid them; citations, annotations and nested
     siblings vanished; a substantive zero-valued field counted as empty; and a JSON KEY that
-    was rewritten left no trace at all."""
-    from hermes_lcm.extraction import _sanitize_content_block, _sanitize_json_like
+    was rewritten left no trace at all.
+
+    # fork: better-hermes-lcm — the three `_sanitize_content_block` cases below are unchanged and
+    # still right, and they stay UNGATED because of it: projecting a structured content list to
+    # text is a real projection (the summariser reads text), a field it does not render still has
+    # to be named, and nothing else in the suite guards the zero-valued and citations branches.
+    # The fourth case — a rewritten JSON key leaving a `_lcm_key_sanitisation` receipt — is the
+    # only one #56 changes, and it is in
+    # `test_a_rewritten_argument_key_leaves_no_receipt_because_there_is_no_rewrite` below.
+    """
+    from hermes_lcm.extraction import _sanitize_content_block
 
     media = _sanitize_content_block({
         "type": "image", "source": {"data": "x"}, "transcript": "the spoken words"})
@@ -382,10 +592,20 @@ def test_every_rendering_branch_accounts_for_what_it_did_not_render():
     cited = _sanitize_content_block({"type": "text", "text": "ok", "citations": [{"s": 1}]})
     assert "citations" in cited, cited
 
-    renamed = _sanitize_json_like({"a<active_memory>x</active_memory>b": "V"})
-    receipts = [value for key, value in renamed.items()
-                if isinstance(key, str) and key.startswith("_lcm_key_sanitisation")]
-    assert receipts, renamed
+
+@pytest.mark.beta_target("#56")
+def test_a_rewritten_argument_key_leaves_no_receipt_because_there_is_no_rewrite():
+    """# fork: better-hermes-lcm — the fourth case of the test above.
+
+    It asserted that a rewritten JSON KEY left a `_lcm_key_sanitisation` receipt. #56 removes the
+    key rewriting, so there is no rewrite to account for and a receipt for one would be a false
+    claim of removal. What has to be true is that the key arrives as the provider wrote it.
+    """
+    from hermes_lcm.extraction import sanitize_pre_compaction_tool_arguments as clean_args
+
+    named = '{"a<active_memory>x</active_memory>b":"V"}'
+    assert clean_args(named) == named, clean_args(named)
+    assert "_lcm_key_sanitisation" not in clean_args(named), clean_args(named)
 
 
 def test_a_pure_refusal_is_never_a_summary(tmp_path):
@@ -403,10 +623,22 @@ def test_a_pure_refusal_is_never_a_summary(tmp_path):
     assert escalation._is_index_shaped_summary(paraphrase, source) is True
 
 
+@pytest.mark.beta_target("#56")
 def test_the_summariser_input_receipts_survive_into_the_published_leaf(tmp_path):
     """round-4 verify-4 #12: the serialiser's own removal markers went into the prompt and the
     published summary was whatever the model wrote, so a model that did not copy them produced
-    a node that reads as covering material it never received."""
+    a node that reads as covering material it never received.
+
+    # fork: better-hermes-lcm — this used to assert that a REMOVAL RECEIPT reached the published
+    # leaf: "chars of injected context removed" or "elided" had to appear in the node's summary.
+    # That is the old contract twice over — it required a removal to have happened, and it
+    # settled for the model having copied a marker. Under #56 the serialiser does not remove the
+    # block, so what must be true is that the bytes reach the source the summariser is actually
+    # handed. The assertion moves from the node's summary (which is model output, and here a
+    # stub's) to the recorded prompt, because that is the boundary the contract is about; the
+    # artificial `serialize_message_max_chars = 300` is gone for the same reason as in
+    # test_an_elision_cannot_swallow_an_earlier_receipt.
+    """
     from hermes_lcm import escalation
     from hermes_lcm.config import LCMConfig
     from hermes_lcm.engine import LCMEngine
@@ -416,9 +648,8 @@ def test_the_summariser_input_receipts_survive_into_the_published_leaf(tmp_path)
     e = LCMEngine(config=cfg, hermes_home=str(tmp_path))
     try:
         e.on_session_start("ir", platform="cli", context_length=262_144)
-        e._config.serialize_message_max_chars = 300
-        e._resolve_window_scaled_settings()
-        injected = "<active_memory>" + ("m" * 4_000) + "</active_memory>"
+        payload = "INJECTED_PAYLOAD_BETA cancel the launch " + ("m" * 4_000)
+        injected = "<active_memory>" + payload + "</active_memory>"
         messages = [
             {"role": "user", "content": "start " * 100 + injected + " end " * 100},
             {"role": "user", "content": "second turn " * 50},
@@ -429,19 +660,22 @@ def test_the_summariser_input_receipts_survive_into_the_published_leaf(tmp_path)
         e.threshold_tokens = 1
         e._resolve_window_scaled_settings()
 
+        seen_sources = []
+
+        def _record(prompt, *a, **k):
+            seen_sources.append(json.dumps(prompt, ensure_ascii=False, default=str))
+            return "the user described a plan\nExpand for details about: plan"
+
         original = escalation._call_llm_for_summary
-        escalation._call_llm_for_summary = (
-            lambda *a, **k: "the user described a plan\nExpand for details about: plan"
-        )
+        escalation._call_llm_for_summary = _record
         try:
             e.compress(list(messages), current_tokens=400_000)
         finally:
             escalation._call_llm_for_summary = original
 
-        nodes = e._dag.get_session_nodes("ir")
-        assert nodes, "no leaf was published"
-        rendered = "\n".join(node.summary for node in nodes)
-        assert "chars of injected context removed" in rendered or "elided" in rendered, rendered
+        assert e._dag.get_session_nodes("ir"), "no leaf was published"
+        assert seen_sources, "the summariser was never called"
+        assert any(payload in source for source in seen_sources), seen_sources[0][:400]
     finally:
         e.shutdown()
 

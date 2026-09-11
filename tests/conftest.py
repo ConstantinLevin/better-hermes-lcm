@@ -27,9 +27,16 @@ _bootstrap_os.environ["HOME"] = str(_TEST_HOME)
 _bootstrap_os.environ["HERMES_HOME"] = str(_TEST_HOME / ".hermes")
 # LCM_TESTS_* are the harness's own controls (the real-summariser switch, the stashed home),
 # not plugin configuration: scrubbing them disabled the documented real-summary mode.
+# LCM_BETA_TARGET and LCM_REQUIRE_HOST are harness controls too — they select which tests run and
+# how strictly, and no production module reads either — but they were named without the prefix in
+# the issues and on the documented command lines, so they are exempted by name rather than
+# renamed. Adding a plugin setting here would be a mistake; adding a runner switch is not.
+_HARNESS_CONTROL_VARS = ("LCM_BETA_TARGET", "LCM_REQUIRE_HOST")
 for _inherited in [
     name for name in _bootstrap_os.environ
-    if name.startswith("LCM_") and not name.startswith("LCM_TESTS_")
+    if name.startswith("LCM_")
+    and not name.startswith("LCM_TESTS_")
+    and name not in _HARNESS_CONTROL_VARS
 ]:
     _bootstrap_os.environ.pop(_inherited, None)
 assert str(Path.home()) == str(_TEST_HOME), "tests must not resolve HOME to the live account"
@@ -62,12 +69,16 @@ if pkg_name not in sys.modules:
             continue
         sub_name = f"{pkg_name}.{py_file.stem}"
         if sub_name not in sys.modules:
-            sub_spec = importlib.util.spec_from_file_location(
-                sub_name, str(py_file),
-                submodule_search_locations=[],
-            )
+            # NO `submodule_search_locations` here. Passing it — even as [] — makes the spec a
+            # PACKAGE spec, so `spec.parent` becomes the module's own dotted name while
+            # `__package__` was being set to `hermes_lcm`; from 3.12 every relative import in such
+            # a module emits `DeprecationWarning: __package__ != __spec__.parent`. On 3.14 that
+            # was 4,941 warnings in one suite run, which buries the output the CI matrix exists to
+            # read. These are plain modules, not packages, so omitting it is also what they are.
+            sub_spec = importlib.util.spec_from_file_location(sub_name, str(py_file))
             sub_mod = importlib.util.module_from_spec(sub_spec)
-            sub_mod.__package__ = pkg_name
+            # `__package__` comes from `sub_spec.parent` via module_from_spec. Setting it by hand
+            # is what let the two disagree in the first place, so it is not set by hand.
             sys.modules[sub_name] = sub_mod
             setattr(mod, py_file.stem, sub_mod)
             try:
@@ -145,6 +156,60 @@ def _fork_mock_summary(prompt, max_tokens, model="", timeout=None):
         # tiny source: no room for the hint line, keep the shortest non-empty head
         candidate = text[: max(1, len(text) // 3)]
     return candidate
+
+
+def manifest_version() -> str:
+    """The version this checkout ships, read straight from ``plugin.yaml``.
+
+    Eight tests hardcoded ``1.0.0-rc.1`` while the manifest had moved to ``1.1.0-beta.2``, so
+    the release-identity gate had been red for two releases and nobody could cut the next one.
+    Deriving the number here is what stops that drifting again.
+
+    Deliberately NOT ``runtime_identity._plugin_metadata()``: that is the production reader
+    those tests exist to check, and comparing it against itself would assert nothing.
+    """
+    manifest = Path(__file__).resolve().parent.parent / "plugin.yaml"
+    for line in manifest.read_text(encoding="utf-8").splitlines():
+        if line.startswith("version:"):
+            return line.split(":", 1)[1].strip().strip('"').strip("'")
+    raise AssertionError(f"{manifest} declares no version")
+
+
+# ── beta target-state assertions (issue #19) ─────────────────────────────────────────────────
+# `beta_target` marks an assertion that says what a beta preservation fix MUST achieve. They are
+# written against a tree where those fixes do not exist, so they FAIL here by design and would
+# otherwise turn the default suite red for every group still working on them.
+#
+# The gate is an env var rather than a quiet deselect because a skipped one has to say what it is
+# not testing. An empty result that reads as "there is nothing" is the exact dishonesty this fork
+# forbids, and a silently deselected contract is that dishonesty inside a test runner.
+#
+#   run them:      LCM_BETA_TARGET=1 bash scripts/test.sh tests/ -m beta_target
+#   release gate:  scripts/validate_release.sh --full  (runs the selection above)
+BETA_TARGET_ENV = "LCM_BETA_TARGET"
+
+
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers",
+        "beta_target(issue): an assertion for a beta fix that is not in this tree yet. "
+        f"Runs only with {BETA_TARGET_ENV}=1; select the set with `-m beta_target`.",
+    )
+
+
+def pytest_collection_modifyitems(config, items):
+    if _os.environ.get(BETA_TARGET_ENV) == "1":
+        return
+    for item in items:
+        marker = item.get_closest_marker("beta_target")
+        if marker is None:
+            continue
+        issue = str(marker.args[0]) if marker.args else "#19"
+        item.add_marker(_pytest.mark.skip(reason=(
+            f"NOT RUN: beta target-state assertion for {issue} (tracked by #19). It encodes what "
+            f"the fix must achieve and fails until that fix lands. Run it with "
+            f"{BETA_TARGET_ENV}=1 and `-m beta_target`."
+        )))
 
 
 @_pytest.fixture(autouse=True)

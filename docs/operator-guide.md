@@ -16,7 +16,7 @@ number would only be true at one window.
 
 ```text
 Plugins (1):
-  ✓ hermes-lcm v1.0.0-rc.1 (15 tools)
+  ✓ hermes-lcm v1.1.0-beta.2 (15 tools)
 
 Provider Plugins:
   Context Engine: lcm

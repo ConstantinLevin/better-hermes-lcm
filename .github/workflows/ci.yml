@@ -1,10 +1,15 @@
 name: CI
 
+# `better-hermes-lcm` is this repository's default branch and the branch every change lands on;
+# `main` tracks upstream. Filtering on `main` alone meant no push to the fork branch and no PR
+# targeting it matched either filter, so this workflow has never run on a single fork commit —
+# GitHub does not even list it as an active workflow. A CI file that cannot be triggered is not
+# CI, and that is what #14 is about.
 on:
   push:
-    branches: [main]
+    branches: [main, better-hermes-lcm]
   pull_request:
-    branches: [main]
+    branches: [main, better-hermes-lcm]
 
 permissions:
   contents: read
@@ -41,6 +46,12 @@ jobs:
   test:
     runs-on: ubuntu-latest
     strategy:
+      # every leg reports. With the default fail-fast, 3.14 breaking cancelled 3.11, 3.12 and
+      # 3.13 mid-run, so a matrix that exists to compare interpreters produced one result and
+      # three "cancelled" — and the three it cancelled were the ones everything else is measured
+      # on. A run that hides three answers because a fourth broke is a weaker instrument than it
+      # looks, and the minutes it saves are not worth the signal.
+      fail-fast: false
       matrix:
         python-version: ["3.11", "3.12", "3.13", "3.14"]
 
@@ -87,7 +98,22 @@ jobs:
       - name: Run pytest under low file descriptor limit
         run: |
           ulimit -n 1024
-          python -m pytest tests/ -q
+          # scripts/test.sh sets this and bare pytest does not. This job runs the whole suite, so
+          # it is the one most exposed: the plugin refuses a SQLite file whose parent directory is
+          # group- or other-writable, and a runner defaulting to umask 002 would fail every test
+          # that opens a store, for a reason that has nothing to do with the change under test.
+          umask 077
+          # ONE deselection, and it buys no leniency. `test_cancellation_propagates_through_call_llm`
+          # imports the host's real `AuxiliaryExplicitCancellation`, a BaseException the plugin
+          # must not swallow — the whole point is that it is the host's class and not a local
+          # stand-in. The stub written above is `agent.context_engine` and nothing else, so the
+          # test cannot run here, and extending the stub with a fake auxiliary_client would make
+          # it assert against a hand-built copy of the thing under test (#16's complaint exactly).
+          # It is REQUIRED in the host-integration job below, against the pinned revision, so
+          # nothing is excused — only relocated. pytest reports it as "1 deselected".
+          echo "::notice::deselecting test_cancellation_propagates_through_call_llm here; it needs the real host and is required in host-integration"
+          python -m pytest tests/ -q \
+            --deselect tests/fork/test_host_cooldown.py::test_cancellation_propagates_through_call_llm
 
       - name: Run static validation
         run: |
@@ -96,3 +122,150 @@ jobs:
           python -m py_compile scripts/import_lossless_claw.py
           bash -n scripts/install.sh scripts/update.sh
           git diff --check
+
+  # The binding host lane. The `test` job above writes a 20-line `agent.context_engine` stub, so
+  # it proves the plugin is self-consistent and proves nothing about whether a real Hermes
+  # reaches its hooks. This job checks out a NAMED host revision, installs that revision's own
+  # dependencies, and runs the fork's host lane with LCM_REQUIRE_HOST=1, where a missing
+  # checkout, a missing dependency and an ImportError are failures rather than green skips.
+  #
+  # The revision is pinned, never a branch: a lane that follows a moving ref proves something
+  # different every day and cannot be re-run to reproduce a result. This SHA is the Hermes commit
+  # release tracker #69 names as the verified base for this beta.
+  host-integration:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the plugin
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          path: plugin
+
+      - name: Check out hermes-agent at the pinned revision
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: NousResearch/hermes-agent
+          ref: d15ed4445207dda418b984e8bda0f68f48b8c6f3
+          path: hermes-agent
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          # the host's own requires-python is ">=3.11,<3.14"; this lane runs the
+          # oldest of those rather than the matrix, because its subject is reachability
+          # through one named host, not interpreter coverage.
+          python-version: "3.11"
+
+      - name: Materialise the host revision's own environment from its lock
+        working-directory: hermes-agent
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install uv
+          # `uv sync`, not `pip install ./hermes-agent`. The first attempt used pip and CI proved
+          # it cannot work: this revision's setup.py overrides `bdist_wheel`/`sdist` to raise
+          # outside a Nix build, and pip's PEP 517 path calls exactly that
+          # ("Building wheels or sdists for hermes-agent is not supported"). The same file says
+          # which paths ARE supported — "Editable installs (uv sync, pip install -e ., nix
+          # develop) use build_editable, which does NOT call bdist_wheel" — and the revision ships
+          # a 722 KB uv.lock for it.
+          #
+          # `--frozen` uses that lock exactly and refuses to re-resolve, so the lane installs what
+          # the pinned revision pins rather than whatever PyPI offers today. A lane whose
+          # dependency set drifts is a lane that proves something different every run.
+          uv sync --frozen --python 3.11
+
+      - name: Run the fork host lane, binding
+        env:
+          LCM_REQUIRE_HOST: "1"
+          # `_host_root()` finds the checkout by looking for run_agent.py + tools/ beside the
+          # interpreter or on sys.path, so putting the source tree on PYTHONPATH is what makes
+          # the pinned checkout the host under test.
+          PYTHONPATH: ${{ github.workspace }}/hermes-agent
+          # scripts/test.sh's two overridable inputs: the uv binary and the interpreter that has
+          # the host's dependencies. Locally those default to the operator's install; here they
+          # are the runner's uv and the venv uv sync just built from the pinned lock.
+          HERMES_PYTHON: ${{ github.workspace }}/hermes-agent/.venv/bin/python
+        working-directory: plugin
+        run: |
+          # test_host_cooldown.py is in this list deliberately. It imports the host's real
+          # AuxiliaryExplicitCancellation — a BaseException the plugin must not swallow — and
+          # cannot run in the stub job, which is why that job deselects it. This is where it is
+          # required, so the deselection there costs no coverage.
+          #
+          # scripts/test.sh rather than bare pytest: it sets `umask 077` itself (the plugin
+          # refuses a SQLite file whose parent directory is group- or other-writable, and a
+          # runner defaulting to 002 would fail every test that opens a store) and it is the
+          # command the fork is actually developed against.
+          UV="$(command -v uv)" bash scripts/test.sh \
+              tests/fork/test_host_integration.py \
+              tests/fork/test_host_entrypoints.py \
+              tests/fork/test_host_cooldown.py -rs
+
+  # The negative control, and it is not optional: a lane nobody has watched fail is not a lane.
+  # This job is deliberately the host lane WITHOUT a host — same checkout, same command, same
+  # LCM_REQUIRE_HOST=1, no hermes-agent anywhere — and it is green only when that run fails for
+  # the stated reason. It is a separate job rather than a step in the one above because a host
+  # installed into site-packages is still a host: the only way to prove the gate fires is to run
+  # somewhere it genuinely is not.
+  host-integration-negative-control:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.11"
+
+      - name: Install test dependencies
+        run: pip install pytest numpy
+
+      - name: Stub hermes-agent ABC
+        run: |
+          # enough for the plugin to import, and nothing like a host: no run_agent.py and no
+          # tools/ package, so `_host_root()` finds nothing and the strict gate is what fires
+          # rather than an unrelated collection error.
+          mkdir -p agent
+          : > agent/__init__.py
+          cat > agent/context_engine.py <<'STUB'
+          """Minimal stub of hermes-agent ContextEngine ABC for CI."""
+          class ContextEngine:
+              def __init__(self, **kwargs):
+                  self.compression_count = 0
+                  self.last_prompt_tokens = 0
+              def compress(self, messages, current_tokens=None, **kwargs):
+                  raise NotImplementedError
+              def on_session_start(self, session_id, **kwargs):
+                  pass
+              def on_session_end(self, **kwargs):
+                  pass
+              def on_session_reset(self):
+                  self.compression_count = 0
+                  self.last_prompt_tokens = 0
+              def get_tool_schemas(self):
+                  return []
+              def handle_tool_call(self, name, args, **kwargs):
+                  raise NotImplementedError
+              def get_status(self):
+                  return {}
+          STUB
+
+      - name: The binding lane must be red with no host present
+        env:
+          LCM_REQUIRE_HOST: "1"
+        run: |
+          umask 077   # same reason as the positive lane above
+          set +e
+          python -m pytest tests/fork/test_host_integration.py \
+                           tests/fork/test_host_entrypoints.py -q -rs > control.log 2>&1
+          status=$?
+          set -e
+          cat control.log
+          if [ "$status" -eq 0 ]; then
+            echo "::error::LCM_REQUIRE_HOST=1 passed with no host available; the gate is inert"
+            exit 1
+          fi
+          if ! grep -q "LCM_REQUIRE_HOST=1 and the host lane could not run" control.log; then
+            echo "::error::the lane failed, but not through the strict-host gate"
+            exit 1
+          fi
+          echo "negative control OK: the binding lane fails, and fails for the stated reason"

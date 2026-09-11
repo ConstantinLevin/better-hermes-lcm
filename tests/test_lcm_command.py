@@ -18,6 +18,7 @@ from hermes_lcm.db_bootstrap import check_external_content_fts_integrity
 from hermes_lcm.diagnostics import doctor_guidance_for_check
 from hermes_lcm.engine import LCMEngine
 from hermes_lcm.store import build_message_fts_spec
+from tests.conftest import manifest_version
 
 
 @pytest.fixture
@@ -417,7 +418,9 @@ def test_lcm_status_reports_runtime_identity(engine):
     repo_root = Path(__file__).resolve().parent.parent
 
     assert "plugin_name: hermes-lcm" in result
-    assert "plugin_version: 1.0.0-rc.1" in result
+    # fork: better-hermes-lcm — was the literal "1.0.0-rc.1", which plugin.yaml stopped
+    # declaring two releases ago; derived so the pin cannot go stale again.
+    assert f"plugin_version: {manifest_version()}" in result
     assert f"plugin_path: {repo_root}" in result
     assert "module_path:" in result
     assert "database_path_source: config.database_path" in result
@@ -457,7 +460,8 @@ def test_lcm_doctor_reports_health_checks(engine):
     assert "messages_fts: ok" in result
     assert "nodes_fts: ok" in result
     assert "plugin_name: hermes-lcm" in result
-    assert "plugin_version: 1.0.0-rc.1" in result
+    # fork: better-hermes-lcm — was the literal "1.0.0-rc.1"; see the note above.
+    assert f"plugin_version: {manifest_version()}" in result
     assert f"plugin_path: {repo_root}" in result
     assert "plugin_git_commit:" in result
     assert "triage_guidance:\n- none" in result

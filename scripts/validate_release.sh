@@ -185,6 +185,18 @@ raise SystemExit(pytest.main(sys.argv[1:]))
 PY
 }
 
+run_beta_target_pytest() {
+  # The `beta_target` selection (issue #19) is the set of assertions that say what the beta's
+  # preservation fixes must achieve. It is skipped in an ordinary run — those fixes are landing
+  # one at a time and a red default suite would block every group branching from it — so the
+  # release gate is the one place it is not optional: a beta cannot be cut while one of them is
+  # still red. The subshell keeps the variable off every other gate.
+  (
+    export LCM_BETA_TARGET=1
+    run_pytest tests/ -m beta_target -q
+  )
+}
+
 run_low_fd_pytest() {
   local current_limit
   current_limit="$(ulimit -n 2>/dev/null || true)"
@@ -216,6 +228,7 @@ run_gate "stress smoke" "$PYTHON_BIN" scripts/lcm_stress_check.py --output "$OUT
 if [[ "$MODE" == "full" ]]; then
   run_gate "pytest full" run_pytest -q
   run_gate "pytest low fd" run_low_fd_pytest
+  run_gate "beta target-state assertions (#19)" run_beta_target_pytest
   run_gate "stress release" "$PYTHON_BIN" scripts/lcm_stress_check.py --output "$OUTPUT_DIR/stress-release" --tier release --json
 fi
 
