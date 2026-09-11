@@ -55,7 +55,13 @@ from .search_query import (
     AGE_DECAY_RATE,
     should_apply_directness_rank_adjustment,
 )
-from .message_content import normalize_content_value as _normalize_content_value
+from .message_content import (
+    CONTENT_KIND_KEY,
+    CONTENT_KIND_UNKNOWN,
+    content_kind as _content_kind,
+    normalize_content_value as _normalize_content_value,
+    text_is_ambiguously_typed as _text_is_ambiguously_typed,
+)
 from .sqlite_util import (
     _prepare_private_sqlite_file,
     _restrict_existing_sqlite_artifacts,
@@ -112,13 +118,52 @@ def is_revision_row(row: Dict[str, Any]) -> bool:
     return bool(isinstance(envelope, dict) and envelope.get(REVISION_SUPERSEDES_KEY))
 
 
+def stored_content_kind(row: Dict[str, Any]) -> str:
+    """The content type recorded with a stored row, or ``unknown`` when no build recorded one.
+
+    Reads the row-level field ``_row_to_dict`` publishes, falling back to the envelope key for
+    a row dict assembled some other way. Never derived from the text.
+    """
+    if not isinstance(row, dict):
+        return CONTENT_KIND_UNKNOWN
+    envelope = row.get("envelope")
+    recorded = row.get(CONTENT_KIND_KEY) or (
+        envelope.get(CONTENT_KIND_KEY) if isinstance(envelope, dict) else None
+    )
+    return str(recorded or CONTENT_KIND_UNKNOWN)
+
+
+def message_envelope_changed(incoming: Dict[str, Any], stored_row: Dict[str, Any]) -> bool:
+    """Did the host EDIT this already-stored message? Tolerant about a type nobody recorded.
+
+    A straight fingerprint comparison calls a stored row whose content type was never recorded
+    different from its own unchanged incoming message, because one side says ``unknown`` and
+    the other says what it is. That is not evidence of an edit, and the caller does not merely
+    archive an extra row for it: the summary text then tells the reader that some of the
+    messages summarised there "were later CORRECTED by the host" — a correction that never
+    happened, which is a false receipt reaching the model, not a bookkeeping wart.
+
+    So a row carrying no record is compared as if it had held whatever the incoming message
+    holds. Two rows whose types ARE both recorded still separate, which is the point of
+    recording them: an edit that changed only the content type is still archived.
+    """
+    if message_envelope_fingerprint(incoming) == message_envelope_fingerprint(stored_row):
+        return False
+    if stored_content_kind(stored_row) != CONTENT_KIND_UNKNOWN:
+        return True
+    return message_envelope_fingerprint(incoming) != message_envelope_fingerprint({
+        **stored_row, CONTENT_KIND_KEY: _content_kind(incoming.get("content")),
+    })
+
+
 def message_envelope_fingerprint(msg: Dict[str, Any]) -> str:
     """Everything a host sent, for change detection: content, calls and the rest.
 
     comparing content alone missed an edit that changed only tool arguments
     or reasoning metadata (round-3 verify-4 #3), so a changed command was never archived.
     """
-    if "store_id" in (msg or {}) or isinstance((msg or {}).get("envelope"), dict):
+    stored_row = "store_id" in (msg or {}) or isinstance((msg or {}).get("envelope"), dict)
+    if stored_row:
         # a STORED row: its un-projected fields live in "envelope"
         source_fields = (msg.get("envelope") or {}).items()
     else:
@@ -160,6 +205,16 @@ def message_envelope_fingerprint(msg: Dict[str, Any]) -> str:
         ),
         "envelope": envelope,
     }
+    # the content column is a TEXT projection, so a structured content list and a
+    # string holding that list's canonical JSON normalise to the same bytes and produced the
+    # same fingerprint: two different originals, one identity (#31 MC01). The recorded type
+    # separates them. It is added only where the text itself leaves the type open — for every
+    # other content the payload is byte-identical to what it was, so digests already stored on
+    # rows by an earlier build still compare equal.
+    if _text_is_ambiguously_typed(payload["content"]):
+        payload["content_kind"] = (
+            stored_content_kind(msg) if stored_row else _content_kind(msg.get("content"))
+        )
     try:
         return json.dumps(payload, ensure_ascii=False, default=str, sort_keys=True)
     except Exception:  # pragma: no cover - default=str covers the usual cases
@@ -190,7 +245,12 @@ def host_message_id_of(msg: Dict[str, Any]) -> Optional[str]:
 
 
 def _envelope_extra_json(msg: Dict[str, Any]) -> Optional[str]:
-    """Serialise the host fields the columns do not hold. ``None`` when there are none."""
+    """Serialise the host fields the columns do not hold, plus the content type.
+
+    Never ``None`` any more: the type record below is written on every row, and a row without
+    it is precisely a row an older build wrote. ``_row_to_dict`` takes the record back out, so
+    a message that carried nothing extra still reads back with no envelope at all.
+    """
     extra = {
         key: value for key, value in msg.items()
         if isinstance(key, str)
@@ -203,8 +263,13 @@ def _envelope_extra_json(msg: Dict[str, Any]) -> Optional[str]:
     supplied_timestamp = msg.get("timestamp")
     if supplied_timestamp not in (None, "") and _normalize_observed_at(supplied_timestamp) is None:
         extra.setdefault("timestamp_raw", supplied_timestamp)
-    if not extra:
-        return None
+    # what the content WAS. The column holds the normalised text, so a structured
+    # list and a string of that list's JSON are stored identically and the original type was
+    # gone for good (#31 MC01). It is written on EVERY row, including plain strings: a row
+    # that simply lacks the record is one an older build wrote, and that has to stay
+    # distinguishable from a row known to have held a string. Host keys with this prefix are
+    # filtered out above, so the record cannot be spoofed or overwritten by what the host sent.
+    extra[CONTENT_KIND_KEY] = _content_kind(msg.get("content"))
     try:
         return json.dumps(extra, ensure_ascii=False, default=str, sort_keys=True)
     except Exception:  # pragma: no cover - default=str already covers the usual cases
@@ -2306,6 +2371,26 @@ class MessageStore:
                 d["envelope_raw"] = raw_envelope
                 d["envelope_raw_chars"] = len(raw_envelope)
         d.pop("envelope_extra", None)
+        # the store's record of what `content` WAS comes out as a field of its own, not
+        # as part of the host envelope: "envelope" is what the HOST sent, and `to_openai_msg`
+        # replays every key of it. It keeps the `_lcm` prefix at row level too, because that
+        # prefix is the one every generic consumer of a message dict already skips — the
+        # envelope writer above, `to_openai_msg`, `LCMEngine._message_envelope_fields` and the
+        # active cleaner. Named plainly, it read as a field the HOST sent on any row with no
+        # envelope of its own: the summariser's envelope receipt named it as content it had
+        # not summarised, and a non-empty envelope is also what decides whether an
+        # acknowledgement-shaped turn gets the marker that exists for it or is blanked to
+        # empty content instead.
+        # A row that carries no record was written before the type was kept, and its type is
+        # UNKNOWN — never inferred from the text, because valid JSON syntax is not evidence of
+        # having been JSON (#31 MC01).
+        envelope = d.get("envelope")
+        if isinstance(envelope, dict) and CONTENT_KIND_KEY in envelope:
+            d[CONTENT_KIND_KEY] = str(envelope.pop(CONTENT_KIND_KEY) or CONTENT_KIND_UNKNOWN)
+            if not envelope and not d.get("envelope_corrupt"):
+                d.pop("envelope", None)  # a message with nothing extra still stores nothing extra
+        else:
+            d[CONTENT_KIND_KEY] = CONTENT_KIND_UNKNOWN
         d["source"] = _normalize_source_value(d.get("source"))
         d["conversation_id"] = _normalize_conversation_id_value(d.get("conversation_id"))
         # Deserialize tool_calls JSON
