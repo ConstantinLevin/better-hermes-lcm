@@ -2,7 +2,17 @@
 (`agent.turn_context.build_turn_context`) must not kill the turn: the context comes back
 intact, the engine's cooldown is armed and the host reports the block as `cooldown:<s>`.
 
-Needs hermes-agent importable (it is in the plugin's venv); skipped otherwise.
+Two modes, and the difference is the point of #14:
+
+* **optional** (the default, for a developer box): a missing hermes-agent checkout or a missing
+  host dependency skips. That is deliberate and stays.
+* **binding** (``LCM_REQUIRE_HOST=1``, which the CI host lane sets): the same conditions are
+  FAILURES. A run that was supposed to prove the plugin works against a named host revision and
+  instead proved nothing must not report success — a green skip is the dishonest-empty-result
+  this fork forbids, wearing a test runner's colours.
+
+The gate is checked at the point of failure rather than at collection so the reason is specific:
+"no checkout", "not importable, <exc>" and a body error are different facts and say so.
 """
 import contextlib
 import importlib
@@ -17,6 +27,21 @@ import pytest
 from hermes_lcm import escalation
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.engine import LCMEngine
+
+REQUIRE_HOST_ENV = "LCM_REQUIRE_HOST"
+
+
+def host_is_required() -> bool:
+    """True when this run was promised to exercise the host, so not doing so is a failure."""
+    return os.environ.get(REQUIRE_HOST_ENV) == "1"
+
+
+def host_unavailable(reason: str):
+    """Skip, or fail if the run was binding. Never returns."""
+    if host_is_required():
+        pytest.fail(f"{REQUIRE_HOST_ENV}=1 and the host lane could not run: {reason}")
+    pytest.skip(f"{reason} (set {REQUIRE_HOST_ENV}=1 to make this a failure)")
+
 
 def _host_root() -> Path | None:
     """Locate the hermes-agent checkout WITHOUT importing it.
@@ -55,7 +80,7 @@ def _host_modules():
     """
     root = _host_root()
     if root is None:
-        pytest.skip("hermes-agent checkout not found next to the interpreter or on sys.path")
+        host_unavailable("hermes-agent checkout not found next to the interpreter or on sys.path")
     host_root = str(root)
     plugin_dir = str(Path(__file__).resolve().parent.parent)
     saved_path = list(sys.path)
@@ -77,16 +102,28 @@ def _host_modules():
         host_tools = importlib.util.module_from_spec(spec)
         sys.modules["tools"] = host_tools
         spec.loader.exec_module(host_tools)
-    try:
-        yield (importlib.import_module("run_agent"),
-               importlib.import_module("agent.turn_context"),
-               importlib.import_module("agent.conversation_loop"))
-    except ImportError as exc:  # pragma: no cover - host not importable here
-        pytest.skip(f"hermes-agent host not importable: {exc}")
-    finally:
+
+    def _restore():
         sys.path[:] = saved_path
         os.environ.clear()
         os.environ.update(saved_env)
+
+    # the import is the only thing excused. This `try` used to wrap the `yield` as
+    # well, so an ImportError raised anywhere in the TEST BODY — a real failure of the host
+    # integration — was reported as "host not importable" and skipped. (Code before the `try`
+    # was never covered by it, so "any error was swallowed" would overstate it.) The body now
+    # runs outside the excuse; only the three host imports can end this lane early.
+    try:
+        modules = (importlib.import_module("run_agent"),
+                   importlib.import_module("agent.turn_context"),
+                   importlib.import_module("agent.conversation_loop"))
+    except ImportError as exc:  # pragma: no cover - host not importable here
+        _restore()
+        host_unavailable(f"hermes-agent host not importable: {exc}")
+    try:
+        yield modules
+    finally:
+        _restore()
         # The host's `tools` package STAYS in sys.modules: its background/atexit cleanup
         # imports it after this block, and swapping the plugin's module back made that resolve
         # to a non-package (`from .externalize import ...` with no parent). Nothing in this
@@ -178,6 +215,11 @@ def test_summariser_failure_through_build_turn_context_keeps_the_turn(tmp_path, 
 
 # round-3 verify-4 #21 (binding failures counted as ingest failures) is covered by the fix in
 # __init__.py: the post_llm_call hook records a failure that happens BEFORE ingest() through
-# _record_ingest_failure. It has no fork test here because the plugin's __init__ module body
-# does not execute under this suite's import shim (only its submodules do), so the registered
-# hook is not reachable from a test process.
+# _record_ingest_failure.
+#
+# The claim that used to stand here — that the registered hook is unreachable from a test
+# process because the plugin's `__init__` body does not execute under this suite's import shim —
+# is wrong, and was wrong when it was written. The shim does not run the body, but
+# tests/test_host_capability.py loads the real entrypoint by path and calls `register(ctx)`, and
+# tests/test_packaging_install.py invokes the callbacks that registration produced. The hook is
+# reachable; tests/fork/test_host_entrypoints.py now drives it from the host's own producers.
