@@ -13,10 +13,21 @@ recognised way, and nothing in it contradicts that. Absent evidence, an unrecogn
 state, a failure or non-terminal status, an error object, and a completion that consumed the
 whole requested cap while claiming to have stopped on its own are all refusals.
 
-What this cannot see, and what no code in this plugin can: a host that fabricates one of the
-recognised terminal states. Closing that needs the adapter to carry the provider's own
-terminal event through unaltered — a host contract, not a plugin check. Until it does, the
-refusals below are the part of the contract this side can enforce.
+One fabrication IS visible from this side, and is refused here. The host asks for a usage
+record on every streamed call (``stream_options={"include_usage": True}``), its accumulator
+fills that field only from a usage chunk, and it fabricates ``stop`` when the stream ended
+without a terminal one — so a response that carries a usage field and has emptied it, beside a
+terminal claim, is the aborted stream. A shape that never had a usage concept at all is a
+different matter and says nothing either way; it is not refused on the strength of a field it
+does not have. The cost of this rule is that a route whose adapter genuinely never fills usage
+would be refused wholesale — loudly, with the sources kept, which is the direction this fork
+errs in.
+
+What remains invisible is the Codex/Responses adapter: it rebuilds the response as chat
+choices with a fabricated ``stop``, drops ``status``, ``incomplete_details`` and ``error`` on
+the way, and DOES carry usage — so an ``incomplete`` or ``failed`` run reaches us looking
+exactly like a finished one. Closing that needs the adapter to carry the provider's own
+terminal event through unaltered: a host contract, not a plugin check.
 
 Refusing is safe: every consumer treats it as "the summariser was unavailable", which in this
 fork means the sources stay raw and nothing is published.
@@ -56,6 +67,9 @@ class GenerationOutcome(NamedTuple):
     cut: bool = False
 
 
+_MISSING = object()
+
+
 def _read(obj: Any, name: str) -> Any:
     """Attribute or mapping key.
 
@@ -82,6 +96,18 @@ def _first_choice(response: Any) -> Any:
 
 def _text(value: Any) -> str:
     return str(value or "").strip().lower()
+
+
+def _usage_field(response: Any) -> Any:
+    """The response's usage field, or ``_MISSING`` when it has none.
+
+    "the field is there and empty" and "there is no such field" are different facts: the first
+    is what the host's stream accumulator produces when no usage chunk ever arrived, the second
+    is a shape that does not model usage at all.
+    """
+    if isinstance(response, Mapping):
+        return response["usage"] if "usage" in response else _MISSING
+    return getattr(response, "usage", _MISSING)
 
 
 def _completion_tokens(response: Any) -> int:
@@ -127,6 +153,17 @@ def evaluate_generation(response: Any, *, requested_max_tokens: int = 0) -> Gene
     if finish_reason not in TERMINAL_FINISH_REASONS:
         return GenerationOutcome(
             f"finish_reason={finish_reason} is not a recognised terminal state"
+        )
+
+    # an EMPTIED usage record beside a terminal claim is the host's fabricated stop: the
+    # accumulator sets usage only from a usage chunk, which the host always asks for, and then
+    # fabricates the terminal state when the stream ended without one. A response that carries
+    # no usage field at all is saying nothing, and is not refused for it.
+    usage = _usage_field(response)
+    if usage is not _MISSING and not usage:
+        return GenerationOutcome(
+            f"finish_reason={finish_reason} with an empty usage record: the stream carried no "
+            "usage frame, so this terminal state is the host's fallback, not the provider's"
         )
 
     # the response's own accounting can contradict its terminal claim: a generation that used

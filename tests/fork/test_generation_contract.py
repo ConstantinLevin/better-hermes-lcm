@@ -81,6 +81,27 @@ def test_a_generation_that_used_its_whole_cap_is_not_terminal_even_saying_stop(m
     assert escalation._call_llm_for_summary("summarize this", 200) == SUMMARY_TEXT
 
 
+def test_a_terminal_claim_with_an_emptied_usage_record_is_refused(monkeypatch):
+    """The host asks for a usage record on EVERY streamed call
+    (`auxiliary_client.py:6258` sets `stream_options={"include_usage": True}`) and its
+    accumulator fills the field only from a usage chunk, then fabricates `stop` when the stream
+    ended without one (`:6424`, `:6429`, `:6463`). So a response that carries a usage field and
+    has emptied it, beside a terminal claim, IS the fabricated shape — the one case where the
+    fabrication is visible from this side."""
+    _install(monkeypatch, SimpleNamespace(choices=[_choice("stop")], usage=None))
+    assert escalation._call_llm_for_summary("summarize this", 200) is None
+    assert "usage" in str(escalation._LAST_ROUTE_ERROR.error)
+
+    _install(monkeypatch, {"choices": [{"message": {"content": SUMMARY_TEXT},
+                                        "finish_reason": "stop"}], "usage": {}})
+    assert escalation._call_llm_for_summary("summarize this", 200) is None
+
+    # a shape that never had a usage concept carries no such signal, and must not be refused
+    # on the strength of a field it does not have
+    _install(monkeypatch, SimpleNamespace(choices=[_choice("stop")]))
+    assert escalation._call_llm_for_summary("summarize this", 200) == SUMMARY_TEXT
+
+
 def test_a_positively_terminal_response_is_still_accepted(monkeypatch):
     for terminal in ("stop", "end_turn", "stop_sequence", "tool_calls"):
         _install(monkeypatch, SimpleNamespace(choices=[_choice(terminal)]))
@@ -152,6 +173,10 @@ def test_the_query_route_refuses_a_fabricated_terminal_instead_of_answering(tmp_
         # the sources are untouched and still nameable by the caller
         assert payload["node_ids"] == [node_id]
         assert payload["matches"][0]["node_id"] == node_id
+        # a refusal is the path where a budget failure is most likely, so the two budget
+        # numbers must be visible here too and not only on the answered path
+        assert payload["context_tokens"] >= 0
+        assert payload["request_overhead_tokens"] > 0
     finally:
         e.shutdown()
 

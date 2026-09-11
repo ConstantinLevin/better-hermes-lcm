@@ -314,9 +314,16 @@ def test_the_context_budget_counts_what_is_actually_serialised(tmp_path, monkeyp
         e.shutdown()
 
 
-def test_both_accountants_agree_on_a_message_with_calls_envelope_and_an_index_block(tmp_path):
+def test_the_counter_and_the_declared_overhead_equal_what_synthesis_actually_sends(tmp_path):
     """`_expand_message_sources` charged body + calls + envelope as raw text while the query
-    walk charged a different, smaller thing. Two accountants in one file, disagreeing."""
+    walk charged a different, smaller thing. Two accountants in one file, disagreeing.
+
+    The check is against `build_untrusted_data_messages` — the thing that is really sent — and
+    not against a copy of the counter's own arithmetic, which would prove only that the
+    implementation equals itself."""
+    from hermes_lcm.prompt_boundary import build_untrusted_data_messages
+    from hermes_lcm.tokens import count_messages_tokens
+
     e = _engine(tmp_path, incremental_max_depth=0)
     try:
         e.on_session_start("ac", platform="cli", context_length=200_000)
@@ -325,20 +332,32 @@ def test_both_accountants_agree_on_a_message_with_calls_envelope_and_an_index_bl
             "content": "deploying now",
             "tool_calls": [{"id": "c1", "type": "function", "function": {
                 "name": "deploy", "arguments": json.dumps({"target": "prod"})}}],
-            "reasoning_content": "thinking about the rollout " * 20,
+            "reasoning_content": "thinking about the rollout " * 200,
         }, source="cli")
         e._store.commit()
-        node_id = _leaf(e, "ac", [store_id])
-        e._dag.node_meta.write(node_id, level=1, summary="a leaf",
-                               index_block="- topic one\n- topic two\n" * 50)
+        leaf = _leaf(e, "ac", [store_id])
+        e._dag.node_meta.write(leaf, level=1, summary="a leaf",
+                               index_block="- topic one\n- topic two\n" * 120)
+        root = _parent(e, "ac", [leaf])
 
-        node = e._dag.get_node(node_id)
-        messages, pagination = lcm_tools._expand_message_sources(e, node, max_tokens=100_000)
-        block = {"type": "messages", "node_id": node_id, "messages": messages,
-                 "pagination": pagination}
-        assert lcm_tools._context_content_token_count([block]) == _serialized([block])
-        # and the inner loop's own charge for that message is the same measurement
-        assert lcm_tools._serialized_token_count(messages[0]) == _serialized(messages[0])
+        blocks = lcm_tools._collect_context_blocks_for_node(
+            e, e._dag.get_node(root), max_tokens=100_000, hydrate_externalized_content=True)
+        rendered = json.dumps(blocks)
+        # the calls, the envelope and the index block are all really in there
+        assert "index_block" in rendered and "tool_calls" in rendered and "envelope" in rendered
+
+        prompt = "what was deployed?"
+        emitted = count_messages_tokens(build_untrusted_data_messages(
+            operation="lcm_expand_query",
+            system_instructions=lcm_tools._EXPANSION_SYSTEM_PROMPT,
+            request={"question": prompt},
+            sources=[{"provenance": {"source_type": "expanded_lcm_context",
+                                     "block_count": len(blocks)},
+                      "content": blocks}],
+        ))
+        counted = lcm_tools._context_content_token_count(blocks)
+        overhead = lcm_tools._synthesis_request_overhead_tokens(prompt)
+        assert abs(emitted - (counted + overhead)) <= 4, (emitted, counted, overhead)
     finally:
         e.shutdown()
 
@@ -415,6 +434,89 @@ def test_a_walk_that_finished_everything_claims_no_omission(tmp_path):
         e.shutdown()
 
 
+def _roots_emission(engine, monkeypatch, roots, budget):
+    captured = _capture_blocks(monkeypatch)
+    payload = json.loads(engine.handle_tool_call("lcm_expand_query", {
+        "prompt": "what was decided?", "node_ids": roots,
+        "max_results": len(roots), "context_max_tokens": budget,
+    }))
+    return payload, captured["blocks"], _serialized(captured["blocks"])
+
+
+def test_roots_the_budget_never_reached_cost_only_their_names(tmp_path, monkeypatch):
+    """The receipt for unread work may not be trimmed away — so it must not have to compete for
+    the budget in the first place. Emitting a per-root block plus a per-root receipt made the
+    context grow with the caller's own node list, far past the budget it was given, and an
+    oversized request is a request a host may truncate mid-JSON."""
+    e = _engine(tmp_path, incremental_max_depth=0)
+    try:
+        e.on_session_start("mr", platform="cli", context_length=200_000)
+        roots = []
+        for index in range(40):
+            store_id = e._store.append(
+                "mr", {"role": "user", "content": f"decision {index}: " + "detail " * 200},
+                source="cli")
+            roots.append(_leaf(e, "mr", [store_id], summary=f"leaf {index} " * 40))
+        e._store.commit()
+
+        payload_few, _, emitted_few = _roots_emission(e, monkeypatch, roots[:4], 1)
+        payload_many, blocks_many, emitted_many = _roots_emission(e, monkeypatch, roots, 1)
+
+        # 36 further roots the budget cannot reach cost their ids in one receipt, not a block
+        # and a receipt each
+        assert emitted_many - emitted_few < 300, (emitted_few, emitted_many)
+        named = {
+            node_id
+            for block in blocks_many if block.get("type") == "unread_evidence"
+            for node_id in block["pagination"]["unread_node_ids"]
+        }
+        assert len(named) >= 30, sorted(named)
+        assert payload_many["complete"] is False
+        assert payload_few["complete"] is False
+    finally:
+        e.shutdown()
+
+
+def test_a_receipt_is_not_emitted_for_a_node_that_holds_nothing(tmp_path):
+    """A receipt is a claim that something was not read. A node with no children below it has
+    nothing unread, and `unread_node_ids: []` would be a false claim of the same family."""
+    e = _engine(tmp_path, incremental_max_depth=0)
+    try:
+        e.on_session_start("empty", platform="cli", context_length=200_000)
+        childless = _parent(e, "empty", [], summary="a parent with no recorded children")
+        node = e._dag.get_node(childless)
+        assert lcm_tools._collect_descendant_evidence_blocks(e, node, max_tokens=0) == []
+        assert lcm_tools._collect_descendant_evidence_blocks(
+            e, node, max_tokens=100, remaining_node_visits=[0]) == []
+    finally:
+        e.shutdown()
+
+
+def test_a_requested_window_and_a_budget_cut_do_not_give_the_same_reason(tmp_path):
+    """Both leave the page short of what the node holds, and both are honest — but one is the
+    caller's own instruction and the other is a limit they did not choose."""
+    e = _engine(tmp_path, incremental_max_depth=0)
+    try:
+        e.on_session_start("rw", platform="cli", context_length=200_000)
+        store_ids = [e._store.append("rw", {"role": "user", "content": f"body {i}: " + "x" * 400},
+                                     source="cli") for i in range(3)]
+        e._store.commit()
+        node_id = _leaf(e, "rw", store_ids)
+
+        asked = json.loads(lcm_tools.lcm_expand(
+            {"node_id": node_id, "source_limit": 1, "max_tokens": 100_000}, engine=e))
+        cut = json.loads(lcm_tools.lcm_expand(
+            {"node_id": node_id, "max_tokens": 20}, engine=e))
+
+        assert asked["pagination"]["complete"] is False
+        assert cut["pagination"]["complete"] is False
+        assert "requested" in asked["pagination"]["incomplete_reason"]
+        assert "budget" not in asked["pagination"]["incomplete_reason"]
+        assert "budget" in cut["pagination"]["incomplete_reason"]
+    finally:
+        e.shutdown()
+
+
 def test_several_explicit_roots_report_the_ones_the_budget_never_reached(tmp_path, monkeypatch):
     e = _engine(tmp_path, incremental_max_depth=0)
     try:
@@ -432,8 +534,12 @@ def test_several_explicit_roots_report_the_ones_the_budget_never_reached(tmp_pat
             "lcm_expand_query",
             {"prompt": "what was decided?", "node_ids": roots, "context_max_tokens": 30}))
 
+        # one receipt names every root the budget could not reach, rather than one empty
+        # block each: the count of receipts is not the contract, naming the nodes is
         unread_nodes = {
-            b.get("node_id") for b in captured["blocks"] if b.get("type") == "unread_evidence"
+            node_id
+            for b in captured["blocks"] if b.get("type") == "unread_evidence"
+            for node_id in b["pagination"]["unread_node_ids"]
         }
         assert roots[-1] in unread_nodes, [
             (b.get("type"), b.get("node_id")) for b in captured["blocks"]]

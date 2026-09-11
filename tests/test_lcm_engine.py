@@ -25191,11 +25191,18 @@ class TestEngineTools:
         assert "transcript_content" in context_json
         assert "SECOND_RAW_DETAIL" not in context_json
         assert result["context_truncated"] is True
+        # fork: better-hermes-lcm — this used to require the unreachable second node to appear
+        # as an empty `messages` block carrying has_more and a zero cursor. The roots loop now
+        # stops once the budget is spent and names every node it did not reach in ONE receipt:
+        # a block plus a receipt per unreachable root made the emitted context grow with the
+        # caller's own node list, far past the budget it was given, and an oversized request is
+        # one a host may cut off mid-JSON (#51). Nothing is lost by the change — the node was
+        # never read, so "resume at offset 0" and "read this node" are the same instruction,
+        # and it is still named in `matches` either way.
         assert any(
-            item["node_id"] == second_node_id
-            and item["type"] == "messages"
-            and item.get("pagination", {}).get("has_more") is True
-            and item.get("expand_args") == {"node_id": second_node_id, "source_offset": 0, "content_offset": 0}
+            item["type"] == "unread_evidence"
+            and second_node_id in item["unread_node_ids"]
+            and item["expand_args"] == {"node_id": second_node_id}
             for item in result["context_pagination"]
         )
 

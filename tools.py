@@ -1466,6 +1466,7 @@ def _expand_message_sources(
     unhydrated_refs: list[dict[str, Any]] = []  # hydration asked for and not delivered (#50c)
     has_more = source_offset < total_sources
 
+    stopped_for_budget = False  # a limit the caller did not choose, unlike their own window
     for relative_index, store_id in enumerate(source_ids):
         source_index = source_offset + relative_index
         remaining_tokens = max_tokens - budget_used
@@ -1473,6 +1474,7 @@ def _expand_message_sources(
             next_source_offset = source_index
             next_content_offset = 0
             has_more = True
+            stopped_for_budget = True
             break
         stored = stored_by_id.get(store_id)
         if not stored:
@@ -1754,6 +1756,7 @@ def _expand_message_sources(
                 else envelope_slice["content_offset"] + envelope_slice["content_returned_chars"]
             ) if envelope_slice is not None else 0
             has_more = True
+            stopped_for_budget = True
             break
         next_source_offset = source_index + 1
         next_content_offset = 0
@@ -1808,10 +1811,17 @@ def _expand_message_sources(
             "could not be read; the rows carry their ref marker, not the archived bytes"
         )
     if has_more:
+        # "you asked for a window" and "a limit you did not choose stopped us" are both honest
+        # and are not the same fact; one string for both made an explicitly requested page read
+        # like a budget cut.
         incomplete_reasons.append(
-            "this page stopped before the end of what this node holds; continue with "
-            "next_source_offset / next_content_offset / next_tool_calls_offset / "
+            "this page stopped at the token budget before the end of what this node holds; "
+            "continue with next_source_offset / next_content_offset / next_tool_calls_offset / "
             "next_envelope_offset"
+            if stopped_for_budget else
+            f"this page returned the requested window (source_offset={source_offset}, "
+            f"source_limit={source_limit}) of {total_sources} source(s); continue with "
+            "next_source_offset"
         )
     pagination["complete"] = not incomplete_reasons
     if incomplete_reasons:
@@ -1863,6 +1873,7 @@ def _expand_child_nodes(
     truncated_child_summaries: list[dict[str, Any]] = []  # #50b
     budget_used = 0
     next_source_offset: int | None = None
+    stopped_for_budget = False  # see _expand_message_sources
     has_more = (source_offset + source_limit) < total_sources
     for source_index, child in children:
         summary = child.summary
@@ -1872,6 +1883,7 @@ def _expand_child_nodes(
             if remaining_tokens <= 0:
                 next_source_offset = source_index
                 has_more = True
+                stopped_for_budget = True
                 break
             summary, summary_truncated = _truncate_text_to_token_budget(summary, remaining_tokens)
         rendered_summary = summary[:1000] if max_tokens is None else summary
@@ -1919,6 +1931,7 @@ def _expand_child_nodes(
         if summary_truncated:
             next_source_offset = source_index + 1
             has_more = next_source_offset < total_sources
+            stopped_for_budget = True
             break
         next_source_offset = source_index + 1
 
@@ -1956,7 +1969,12 @@ def _expand_child_nodes(
         )
     if has_more:
         incomplete_reasons.append(
-            "this page stopped before the node's last child; continue with next_source_offset"
+            "this page stopped at the token budget before the node's last child; continue with "
+            "next_source_offset"
+            if stopped_for_budget else
+            f"this page returned the requested window (source_offset={source_offset}, "
+            f"source_limit={source_limit}) of {total_sources} child(ren); continue with "
+            "next_source_offset"
         )
     pagination["complete"] = not incomplete_reasons
     if incomplete_reasons:
@@ -1976,6 +1994,10 @@ def _bounded_source_path_payload(source_path: list[dict[str, int]]) -> dict[str,
 
 
 _UNREAD_NODE_ID_SAMPLE = 50
+# the allowance held back from the context budget for receipts about unread work, so a
+# marker that may never be trimmed never has to compete with evidence for room. Sized for a
+# receipt at its largest: _UNREAD_NODE_ID_SAMPLE ids plus its reason.
+_UNREAD_RECEIPT_RESERVE_TOKENS = 256
 
 
 def _unread_evidence_block(
@@ -2032,13 +2054,19 @@ def _collect_descendant_evidence_blocks(
 ) -> list[dict[str, Any]]:
     if node.source_type != "nodes":
         return []
+    # a node that records no children has nothing below it to leave unread, and a receipt
+    # saying `unread_node_ids: []` would be a claim that something was withheld when nothing
+    # was — a false receipt of the same family as a false completeness.
+    planned_child_ids = [int(child_id) for child_id in node.source_ids]
     if max_tokens <= 0:
         # NOT an empty walk: nothing below this node was looked at (#51c)
+        if not planned_child_ids:
+            return []
         return [_unread_evidence_block(
             int(node.node_id),
             "no context budget remained for this node's descendant evidence; none of it was "
             "read",
-            unread_node_ids=[int(child_id) for child_id in node.source_ids],
+            unread_node_ids=planned_child_ids,
             source_path=source_path,
         )]
     if visited_node_ids is None:
@@ -2052,11 +2080,13 @@ def _collect_descendant_evidence_blocks(
         # reach their leaf evidence.
         remaining_node_visits = [max(64, int(max_tokens) * 4)]
     if remaining_node_visits[0] <= 0:
+        if not planned_child_ids:
+            return []
         return [_unread_evidence_block(
             int(node.node_id),
             "the expansion's node-visit limit was already spent; none of this node's "
             "descendant evidence was read",
-            unread_node_ids=[int(child_id) for child_id in node.source_ids],
+            unread_node_ids=planned_child_ids,
             source_path=source_path,
         )]
 
@@ -6844,8 +6874,31 @@ def lcm_expand_query(args: Dict[str, Any], **kwargs) -> str:
     context_budget_used = 0
     # nodes the caller explicitly asked for that this call will not process
     unprocessed_node_ids = [int(node.node_id) for node in nodes[max_results:]]
-    for node in nodes[:max_results]:
-        remaining_context_tokens = max(0, context_max_tokens - context_budget_used)
+    # the receipt for unread work is kept back BEFORE any evidence is bought, so it
+    # never has to compete for the budget and never has to be trimmed to fit. Emitting it
+    # afterwards honoured the marker rule by breaking the budget rule: 40 explicit roots at a
+    # 1-token budget put out 8,792 tokens, because every unreachable root still cost a summary
+    # block and a receipt of its own — and an oversized request is one a host may cut off
+    # mid-JSON, which is unparseable loss. The allowance is proportional so a deliberately tiny
+    # budget is not spent entirely on the receipt.
+    # ... and only where that receipt can exist: it names roots this loop did not reach,
+    # which needs more than one root. Holding an allowance back from a single-root call would
+    # take a quarter of the caller's budget to insure against a receipt that cannot be written,
+    # and a deep chain really does spend its last tokens reaching leaf evidence.
+    selected_for_context = nodes[:max_results]
+    receipt_reserve = (
+        min(_UNREAD_RECEIPT_RESERVE_TOKENS, context_max_tokens // 4)
+        if len(selected_for_context) > 1 else 0
+    )
+    evidence_budget = max(1, context_max_tokens - receipt_reserve)
+    unreached_root_ids: list[int] = []
+    for root_index, node in enumerate(selected_for_context):
+        remaining_context_tokens = max(0, evidence_budget - context_budget_used)
+        if root_index > 0 and remaining_context_tokens <= 0:
+            # ONE receipt naming all of them, rather than an empty block each. They are
+            # named in `matches` too, so nothing about them is lost by not walking them.
+            unreached_root_ids = [int(n.node_id) for n in selected_for_context[root_index:]]
+            break
         node_blocks = _collect_context_blocks_for_node(
             engine,
             node,
@@ -6854,6 +6907,13 @@ def lcm_expand_query(args: Dict[str, Any], **kwargs) -> str:
         )
         context_blocks.extend(node_blocks)
         context_budget_used += _context_content_token_count(node_blocks)
+    if unreached_root_ids:
+        context_blocks.append(_unread_evidence_block(
+            unreached_root_ids[0],
+            f"the context budget was spent before {len(unreached_root_ids)} of the requested "
+            "nodes were read; none of their summaries or evidence is in this context",
+            unread_node_ids=unreached_root_ids,
+        ))
 
     raw_matches: list[dict[str, Any]] = []
     if raw_results:
@@ -7025,6 +7085,10 @@ def lcm_expand_query(args: Dict[str, Any], **kwargs) -> str:
             "complete": False,
             "model": model,
             "max_tokens": max_tokens,
+            # a refusal is the likeliest place for a budget failure, and the overshoot was
+            # invisible here while being reported on the answered path
+            "context_tokens": _context_content_token_count(context_blocks),
+            "request_overhead_tokens": _synthesis_request_overhead_tokens(prompt),
             "context_max_tokens": context_max_tokens,
             "context_truncated": context_truncated,
             "context_pagination": context_pagination,
