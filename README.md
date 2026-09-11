@@ -855,19 +855,32 @@ opt-out. LCM does not ingest raw messages or create DAG nodes for sessions that
 match `LCM_IGNORE_SESSION_PATTERNS`, `LCM_STATELESS_SESSION_PATTERNS`, or the
 in-process auxiliary/thread stateless marker. If those sessions cross the normal
 context threshold, LCM delegates the compaction call to Hermes' native
-`ContextCompressor` so the active request is still bounded before model overflow.
-It delegates the messages unchanged and returns the compressor's result unchanged
-— no trim, no sanitising, no receipt of its own.
+`ContextCompressor`, which is the only component that may shorten them. Whether
+the request ends up bounded is that compressor's business: LCM delegates the
+messages unchanged and returns its result unchanged — no trim, no sanitising, no
+receipt of its own. The one exception is sensitive-pattern redaction, which the
+operator opts into (`LCM_SENSITIVE_PATTERNS_ENABLED`, off by default): when it is
+on, the replay copy is redacted before delegation like any other context.
 
 Because nothing about these sessions is written to `lcm.db`, LCM has no copy to
-recover them from, and therefore never shortens one itself. If the native
-compressor is unavailable, raises, or aborts, every message is returned unchanged
-and the turn is reported as an abort: `_last_compress_aborted` is set (Hermes
-surfaces it as "Context compression aborted … No messages were dropped —
-conversation is unchanged"), `lcm_status` shows
-`last_compression_status: bypass_not_compacted` with the reason, and a warning is
-logged. A session the host's compressor bounded but not far enough is reported as
-`bypass_over_bound` rather than as a success.
+recover them from, and therefore never shortens one itself. Four outcomes, all of
+which return every message unchanged:
+
+- the native compressor is **unavailable** (a non-Hermes host) or **raises** —
+  LCM could not compact. `_last_compress_aborted` is set, which Hermes surfaces as
+  "Context compression aborted … No messages were dropped — conversation is
+  unchanged", `lcm_status` shows `last_compression_status: bypass_not_compacted`
+  with a named reason, and a warning is logged;
+- the native compressor **aborts** — its decision to preserve, and its flag, both
+  stand; LCM never overrides either;
+- the native compressor **found nothing to compact** (Hermes returns the list
+  unchanged for an insufficient or empty compressible window, and counts none of
+  those as a failure) — reported as `bypass_not_compacted` with that reason, and
+  deliberately *not* through the abort flag: it is a no-op, not an alarm.
+
+A context still over the model window after any of these — including one the
+host's compressor did shorten — is reported as `bypass_over_bound` with a warning
+rather than as a success.
 
 ### Large tool-output handling
 

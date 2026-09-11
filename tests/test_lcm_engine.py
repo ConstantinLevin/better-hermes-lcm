@@ -2773,7 +2773,7 @@ class TestEngineABC:
         finally:
             instance.shutdown()
 
-    def test_unavailable_native_fallback_sanitizes_tool_pairs(self, tmp_path, monkeypatch):
+    def test_unavailable_native_fallback_returns_the_context_unsanitized(self, tmp_path, monkeypatch):
         agent_module = sys.modules.get("agent") or ModuleType("agent")
         if not hasattr(agent_module, "__path__"):
             agent_module.__path__ = []
@@ -3645,7 +3645,7 @@ class TestEngineABC:
         finally:
             instance.shutdown()
 
-    def test_bypassed_native_result_falls_back_when_still_over_cap(self, tmp_path, monkeypatch):
+    def test_bypassed_native_abort_over_cap_is_not_answered_with_a_trim(self, tmp_path, monkeypatch):
         native_called = False
 
         class FakeContextCompressor:
@@ -3700,7 +3700,7 @@ class TestEngineABC:
         finally:
             instance.shutdown()
 
-    def test_bypassed_native_exception_uses_deterministic_fallback(self, tmp_path, monkeypatch):
+    def test_bypassed_native_exception_does_not_license_a_deterministic_trim(self, tmp_path, monkeypatch):
         native_called = False
 
         class FakeContextCompressor:

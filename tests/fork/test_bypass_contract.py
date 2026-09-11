@@ -56,14 +56,12 @@ def test_an_unchanged_native_return_is_not_counted_as_a_compression(tmp_path):
 
         e._host_fallback_compressor = _AbortingCompressor()
         e._host_fallback_session_id = e._bypass_lcm_session_id()
-        # no cap pressure: this test is about the accounting, not the assembly bound
-        e._bypass_compaction_target_tokens = lambda **_kwargs: None
         before = e.compression_count
 
         result = e._compress_lcm_bypassed_session(messages, current_tokens=100_000, force=True)
 
         blob = "\n".join(str(m.get("content")) for m in result)
-        # no cap pressure here, so the host's preservation decision stands untouched
+        # the host's preservation decision stands untouched, cap pressure or not
         assert "first decision" in blob and "second decision" in blob, "the abort was overridden"
         assert e.compression_count == before, "an unchanged return is not a compression"
         assert e._last_compress_aborted is True
