@@ -1948,6 +1948,16 @@ class TestEngineABC:
             {"role": "user", "content": "fresh bypass tail " + "z" * 400},
         ]
 
+    @staticmethod
+    def _stub_missing_native_compressor(monkeypatch):
+        """Hermes' native compressor genuinely absent, the way a non-Hermes host presents it."""
+        agent_module = sys.modules.get("agent") or ModuleType("agent")
+        if not hasattr(agent_module, "__path__"):
+            agent_module.__path__ = []
+        compressor_module = ModuleType("agent.context_compressor")
+        monkeypatch.setitem(sys.modules, "agent", agent_module)
+        monkeypatch.setitem(sys.modules, "agent.context_compressor", compressor_module)
+
     @pytest.mark.parametrize(
         ("session_id", "config_kwargs"),
         [
@@ -2790,11 +2800,19 @@ class TestEngineABC:
         ]
         try:
             instance.on_session_start("ignored:tools", platform="cli", context_length=1_000)
+            snapshot = json.loads(json.dumps(messages))
 
             result = instance.compress(messages, force=True)
 
-            assert any(msg.get("tool_call_id") == "call_head" for msg in result)
-            assert not any(msg.get("tool_call_id") == "orphan_tail" for msg in result)
+            # fork: better-hermes-lcm — this used to assert that the bypass fallback repaired
+            # tool pairing on the way out: a stub inserted for the unanswered call_head, the
+            # orphan_tail result deleted. Both are edits to a session LCM never stored and
+            # cannot restore. The host's own compressor sanitises its own output
+            # (agent/context_compressor.py), and an orphan the host put in the transcript is
+            # the host's to keep, so the list now comes back exactly as it went in.
+            assert result == snapshot
+            assert any(msg.get("tool_call_id") == "orphan_tail" for msg in result)
+            assert not any(msg.get("tool_call_id") == "call_head" for msg in result)
         finally:
             instance.shutdown()
 
@@ -2841,22 +2859,24 @@ class TestEngineABC:
         finally:
             instance.shutdown()
 
-    def test_bypassed_native_result_is_sanitized_under_cap(self, tmp_path, monkeypatch):
+    def test_bypassed_native_result_is_returned_verbatim_under_cap(self, tmp_path, monkeypatch):
+        native_result = [
+            {
+                "role": "assistant",
+                "content": "calling tool",
+                "tool_calls": [{"id": "call_1", "type": "function"}],
+            },
+            {"role": "user", "content": "interrupt before tool result"},
+            {"role": "tool", "tool_call_id": "orphan", "content": "late result"},
+        ]
+
         class FakeContextCompressor:
             def __init__(self, **kwargs):
                 self.compression_count = 0
 
             def compress(self, messages, current_tokens=None, focus_topic=None, force=False):
                 self.compression_count += 1
-                return [
-                    {
-                        "role": "assistant",
-                        "content": "calling tool",
-                        "tool_calls": [{"id": "call_1", "type": "function"}],
-                    },
-                    {"role": "user", "content": "interrupt before tool result"},
-                    {"role": "tool", "tool_call_id": "orphan", "content": "late result"},
-                ]
+                return json.loads(json.dumps(native_result))
 
         agent_module = sys.modules.get("agent") or ModuleType("agent")
         if not hasattr(agent_module, "__path__"):
@@ -2878,8 +2898,11 @@ class TestEngineABC:
 
             result = instance.compress(messages, current_tokens=600)
 
-            assert not any(msg.get("tool_call_id") == "orphan" for msg in result)
-            assert any(msg.get("tool_call_id") == "call_1" for msg in result)
+            # fork: better-hermes-lcm — this used to assert that LCM sanitised the native
+            # compressor's own result (dropping its orphan tool message). What the host's
+            # compressor decided to return is the host's decision about a session LCM does not
+            # store; LCM neither repairs nor re-cuts it, so the result arrives verbatim.
+            assert result == native_result
         finally:
             instance.shutdown()
 
@@ -3483,7 +3506,14 @@ class TestEngineABC:
         finally:
             instance.shutdown()
 
-    def test_bypass_tail_trim_makes_progress_when_first_message_has_tool_call(self, tmp_path):
+    # fork: better-hermes-lcm — the four tests below used to assert that
+    # `_trim_bypass_compacted_to_cap` converged a bypassed context under a token cap: by
+    # deleting an oversized tool-call pair, by dropping whole messages, and by cutting string
+    # and structured content down to a character budget. LCM does not store these sessions, so
+    # every one of those cuts was unrecoverable; the trim is gone and the same inputs now come
+    # back whole (the cap is reported, not enforced — see `_compress_lcm_bypassed_session`).
+    def test_bypassed_tool_call_message_is_not_trimmed_to_a_cap(self, tmp_path, monkeypatch):
+        self._stub_missing_native_compressor(monkeypatch)
         config = LCMConfig(database_path=str(tmp_path / "bypass-trim-tool-call.db"))
         instance = LCMEngine(config=config)
         messages = [
@@ -3496,13 +3526,17 @@ class TestEngineABC:
             {"role": "user", "content": "fresh tail 2"},
         ]
         try:
-            result = instance._trim_bypass_compacted_to_cap(messages, target_tokens=80)
+            instance.threshold_tokens = 80
+            snapshot = json.loads(json.dumps(messages))
 
-            assert count_messages_tokens(result) <= 80
+            result = instance._compress_lcm_bypassed_session(messages, force=True)
+
+            assert result == snapshot
         finally:
             instance.shutdown()
 
-    def test_bypass_tail_trim_preserves_live_user_when_dropping_oversized_tool_call_pair(self, tmp_path):
+    def test_bypassed_oversized_tool_call_pair_is_kept_with_the_live_user(self, tmp_path, monkeypatch):
+        self._stub_missing_native_compressor(monkeypatch)
         config = LCMConfig(database_path=str(tmp_path / "bypass-trim-tool-call-pair.db"))
         instance = LCMEngine(config=config)
         messages = [
@@ -3522,17 +3556,17 @@ class TestEngineABC:
             {"role": "tool", "tool_call_id": "call_1", "content": "result"},
         ]
         try:
-            result = instance._trim_bypass_compacted_to_cap(messages, target_tokens=80)
+            instance.threshold_tokens = 80
+            snapshot = json.loads(json.dumps(messages))
 
-            assert count_messages_tokens(result) <= 80
-            assert [(msg.get("role"), msg.get("content")) for msg in result] == [
-                ("system", "sys"),
-                ("user", "latest request"),
-            ]
+            result = instance._compress_lcm_bypassed_session(messages, force=True)
+
+            assert result == snapshot
         finally:
             instance.shutdown()
 
-    def test_bypass_tail_trim_reduces_one_or_two_oversized_messages_under_cap(self, tmp_path):
+    def test_bypassed_one_or_two_oversized_messages_keep_their_text(self, tmp_path, monkeypatch):
+        self._stub_missing_native_compressor(monkeypatch)
         config = LCMConfig(database_path=str(tmp_path / "bypass-trim-low-cap.db"))
         instance = LCMEngine(config=config)
         cases = [
@@ -3543,13 +3577,16 @@ class TestEngineABC:
             ],
         ]
         try:
+            instance.threshold_tokens = 40
             for messages in cases:
-                result = instance._trim_bypass_compacted_to_cap(messages, target_tokens=40)
-                assert count_messages_tokens(result) <= 40
+                snapshot = json.loads(json.dumps(messages))
+                result = instance._compress_lcm_bypassed_session(messages, force=True)
+                assert result == snapshot
         finally:
             instance.shutdown()
 
-    def test_bypass_tail_trim_reduces_structured_text_content_under_cap(self, tmp_path):
+    def test_bypassed_structured_text_content_keeps_every_block(self, tmp_path, monkeypatch):
+        self._stub_missing_native_compressor(monkeypatch)
         config = LCMConfig(database_path=str(tmp_path / "bypass-trim-structured-content.db"))
         instance = LCMEngine(config=config)
         messages = [
@@ -3562,8 +3599,12 @@ class TestEngineABC:
             }
         ]
         try:
-            result = instance._trim_bypass_compacted_to_cap(messages, target_tokens=80)
-            assert count_messages_tokens(result) <= 80
+            instance.threshold_tokens = 80
+            snapshot = json.loads(json.dumps(messages))
+
+            result = instance._compress_lcm_bypassed_session(messages, force=True)
+
+            assert result == snapshot
         finally:
             instance.shutdown()
 
@@ -3644,12 +3685,18 @@ class TestEngineABC:
         try:
             instance.on_session_start("ignored:over-cap", platform="cli", context_length=10_000)
             instance.threshold_tokens = 1_000
+            snapshot = json.loads(json.dumps(messages))
 
             result = instance.compress(messages, current_tokens=250)
 
             assert native_called
-            assert count_messages_tokens(result) <= config.max_assembly_tokens
-            assert instance._last_compress_aborted is False
+            # fork: better-hermes-lcm — this used to assert that an over-cap context was cut to
+            # the assembly cap and the native abort flag cleared. An abort is the host's
+            # decision to PRESERVE a session LCM holds no copy of; LCM may not answer it with
+            # its own deletion, and may not clear the flag that tells the host — and through it
+            # the user — that nothing was dropped.
+            assert result == snapshot
+            assert instance._last_compress_aborted is True
         finally:
             instance.shutdown()
 
@@ -3689,12 +3736,17 @@ class TestEngineABC:
         try:
             instance.on_session_start("ignored:native-error", platform="cli", context_length=10_000)
             instance.threshold_tokens = 1_000
+            snapshot = json.loads(json.dumps(messages))
 
             result = instance.compress(messages, current_tokens=250)
 
             assert native_called
-            assert count_messages_tokens(result) <= config.max_assembly_tokens
-            assert instance._last_compress_aborted is False
+            # fork: better-hermes-lcm — this used to assert that a native compressor exception
+            # licensed LCM's own deterministic trim down to the assembly cap. A missing
+            # capability is not permission to cut a session LCM cannot restore: the context is
+            # returned whole and the turn is reported as an abort instead.
+            assert result == snapshot
+            assert instance._last_compress_aborted is True
             assert instance._store.get_session_count("ignored:native-error") == 0
             assert instance._dag.get_session_node_count("ignored:native-error") == 0
         finally:
