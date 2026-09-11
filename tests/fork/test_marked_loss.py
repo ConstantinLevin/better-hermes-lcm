@@ -408,17 +408,32 @@ def test_rotate_leaves_marker_node(tmp_path):
 
 # ── bypass ─────────────────────────────────────────────────────────────────────────────────
 
-def test_bypass_trim_is_marked(tmp_path):
+# fork: better-hermes-lcm — this used to assert that the bypass trim marked its cuts
+# ("[LCM bypass trim" / "[LCM cut]"). #62 removed the trim itself: LCM stores no copy of an
+# ignored/stateless/auxiliary session, so it no longer shortens one at all and there is no cut
+# left to mark. The preservation contract is tests/fork/test_bypass_preservation.py.
+def test_bypass_compaction_has_nothing_to_mark(tmp_path, monkeypatch):
+    import sys
+    from types import ModuleType
+
+    # Hermes' native compressor genuinely absent: the only component allowed to shorten a
+    # bypassed session. Stubbed rather than left to whatever `agent.context_compressor`
+    # resolves to, so this asserts preservation deterministically.
+    agent_module = sys.modules.get("agent") or ModuleType("agent")
+    if not hasattr(agent_module, "__path__"):
+        agent_module.__path__ = []
+    monkeypatch.setitem(sys.modules, "agent", agent_module)
+    monkeypatch.setitem(sys.modules, "agent.context_compressor", ModuleType("agent.context_compressor"))
+
     e = _engine(tmp_path)
     try:
         messages = [
             {"role": "user", "content": "x" * 10_000},
             {"role": "assistant", "content": "y" * 10_000},
         ]
-        result = e._trim_bypass_compacted_to_cap(messages, target_tokens=400)
-        assert count_messages_tokens(result) <= 400
-        text = "\n".join(str(m.get("content")) for m in result)
-        assert "[LCM bypass trim" in text or "[LCM cut]" in text
+        original = [dict(m) for m in messages]
+        result = e._compress_lcm_bypassed_session(messages, force=True)
+        assert result == original
     finally:
         e.shutdown()
 

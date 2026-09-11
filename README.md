@@ -264,7 +264,15 @@ a preference, and there upstream's number is as good as any other.
   stubs carry a head note, assembly renders the whole frontier (both assembly caps default to
   0, so nothing is left out at all; an operator who sets one gets a receipt naming what was),
   `/new` keeps index nodes (retain depth is a carry-over filter, not a delete), `/lcm rotate`
-  writes a marker node over rotated raw, bypass trims are marked.
+  writes a marker node over rotated raw.
+- **A session LCM does not store is never shortened by LCM.** Upstream (and this fork until
+  now) answered an over-threshold ignored/stateless/auxiliary session with a head/tail delete
+  plus a character trim, and overrode the host compressor's explicit abort with the same trim.
+  There is no stored copy of those sessions, so nothing could have brought them back. The
+  context is now handed to Hermes' own compressor untouched and returned exactly as it came
+  back; when the compressor is unavailable, fails or aborts, every message is returned
+  unchanged and the turn is reported as an abort — Hermes shows the user "no messages were
+  dropped — conversation is unchanged".
 - Summaries are written as **indexes into recoverable history**: the prompts require coverage
   of decisions and rationale, rejected approaches, constraints, identifiers/paths/values,
   errors, tool-output contents, end state and open items — "exceed the target rather than omit
@@ -847,10 +855,35 @@ opt-out. LCM does not ingest raw messages or create DAG nodes for sessions that
 match `LCM_IGNORE_SESSION_PATTERNS`, `LCM_STATELESS_SESSION_PATTERNS`, or the
 in-process auxiliary/thread stateless marker. If those sessions cross the normal
 context threshold, LCM delegates the compaction call to Hermes' native
-`ContextCompressor` so the active request is still bounded before model overflow.
-If the native compressor is unavailable, LCM falls back to a deterministic
-head/tail trim as a last-resort safety net, still without writing the bypassed
-session to `lcm.db`.
+`ContextCompressor`, which is the only component that may shorten them. Whether
+the request ends up bounded is that compressor's business: LCM delegates the
+messages unchanged and returns its result unchanged — no trim, no sanitising, no
+receipt of its own. The one exception is sensitive-pattern redaction, which the
+operator opts into (`LCM_SENSITIVE_PATTERNS_ENABLED`, off by default): when it is
+on, the replay copy is redacted before delegation like any other context.
+
+Because nothing about these sessions is written to `lcm.db`, LCM has no copy to
+recover them from, and therefore never shortens one itself. Four outcomes, all of
+which return every message unchanged:
+
+- the native compressor is **unavailable** (a non-Hermes host) or **raises** —
+  LCM could not compact. `_last_compress_aborted` is set, which Hermes surfaces as
+  "Context compression aborted … No messages were dropped — conversation is
+  unchanged", `lcm_status` shows `last_compression_status: bypass_not_compacted`
+  with a named reason, and a warning is logged;
+- the native compressor **aborts** — its decision to preserve, and its flag, both
+  stand; LCM never overrides either;
+- the native compressor **found nothing to compact** (Hermes returns the list
+  unchanged for an insufficient or empty compressible window, and counts none of
+  those as a failure) — reported as `bypass_not_compacted` with that reason, and
+  deliberately *not* through the abort flag: it is a no-op, not an alarm.
+
+A context still over the model window is reported as `bypass_over_bound` with a
+warning rather than as a success — but only once the host's compressor actually
+ran: after an abort, after "nothing to compact", and after a compaction it did
+perform. The unavailable and raises paths return before that check, under
+`bypass_not_compacted` with the abort flag raised, so an operator looking for
+over-window bypassed sessions should grep for both statuses.
 
 ### Large tool-output handling
 

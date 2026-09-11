@@ -18,64 +18,14 @@ _TAIL_RATIO = 800 / 3000
 _ARGS_KEEP_RATIO = 400 / 500
 
 TRUNCATED_LITERAL = "...[truncated]..."
-BYPASS_TRIM_SUFFIX = "…[LCM bypass trim: text cut to fit the cap; full text in the host transcript]"
-BYPASS_FINAL_TRIM_SUFFIX = "…[LCM cut]"
 ROTATE_MARKER_PREFIX = "[LCM rotate marker]"
-# the receipt for a bypassed session's dropped messages. It is identified by
-# this prefix so the cap-trimming loop can refuse to remove or shorten the one message that
-# says something was removed (audit p05 BY01).
+# Older builds wrote this receipt when the bypass path deleted and cut a session LCM does not
+# store. That path is gone — nothing produces the prefix any more — but a transcript written
+# by such a build can still carry one, so the elision below keeps recognising it rather than
+# cutting an existing receipt in half. It is only ever RECOGNISED here: classifying a message
+# by this prefix is how ordinary user text that happened to begin with it was rewritten into a
+# generic receipt and a second one deleted as a duplicate (#46).
 BYPASS_OMISSION_PREFIX = "[Context omitted:"
-
-
-def bypass_omission_marker(dropped_messages: int, dropped_chars: int) -> str:
-    """Name what the deterministic bypass trim dropped from a session LCM does not store."""
-    return (
-        f"{BYPASS_OMISSION_PREFIX} this session is ignored/stateless for LCM, and Hermes native "
-        f"compression was unavailable. {dropped_messages} older message(s) (~{dropped_chars} "
-        "chars) were dropped here to keep the request inside the model context window; they "
-        "are not stored by LCM and remain only in the host transcript.]"
-    )
-
-
-_BYPASS_OMISSION_COUNTS_RE = re.compile(r"(\d+) older message\(s\) \(~(\d+) chars\)")
-_BYPASS_COMPACT_COUNTS_RE = re.compile(r"(\d+) msg / (\d+) chars dropped")
-
-
-def bypass_omission_counts(text: str) -> tuple[int, int]:
-    """The (messages, chars) a receipt records, in either of its two forms.
-
-    reading both forms makes compaction IDEMPOTENT: compacting an already
-    compact receipt used to turn the counted sentence into an uncounted one (verify-4 #17).
-    """
-    value = str(text or "")
-    for pattern in (_BYPASS_OMISSION_COUNTS_RE, _BYPASS_COMPACT_COUNTS_RE):
-        match = pattern.search(value)
-        if match:
-            return int(match.group(1)), int(match.group(2))
-    return 0, 0
-
-
-def compact_bypass_omission_marker(text: str) -> str:
-    """The shortest honest form of the receipt, for a cap nothing else can satisfy.
-
-    the receipt is never removed, but when the budget cannot hold it AND the
-    live request, the counts are what must survive, not the sentence around them.
-    """
-    messages, chars = bypass_omission_counts(text)
-    if not messages and not chars:
-        return f"{BYPASS_OMISSION_PREFIX} older messages dropped by the LCM bypass trim]"
-    return (
-        f"{BYPASS_OMISSION_PREFIX} {messages} msg / {chars} chars dropped, "
-        "host transcript only]"
-    )
-
-
-def is_bypass_omission_marker(message: Any) -> bool:
-    """is this the receipt above?"""
-    if not isinstance(message, dict):
-        return False
-    content = message.get("content")
-    return isinstance(content, str) and content.lstrip().startswith(BYPASS_OMISSION_PREFIX)
 
 _WS_RE = re.compile(r"\s+")
 

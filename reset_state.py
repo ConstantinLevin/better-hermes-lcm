@@ -31,6 +31,12 @@ class ResetStateMixin:
         self._context_probe_persistable = False
         self._last_overflow_recovery_failed = False
         self._last_condensation_suppressed_reason = ""
+        # an abort belongs to the session that earned it. The flag is what the host reads to
+        # tell the user "compression aborted — no messages were dropped" (and to record a
+        # hygiene cooldown), and the bypass path sets it whenever it declines to compact a
+        # session LCM does not store. Carried across a rebind it announced an abort that did
+        # not happen, directly after a compaction that did.
+        self._last_compress_aborted = False
         self._last_compression_status = "idle"
         self._last_compression_noop_reason = ""
         self._last_boundary_skip_time = 0

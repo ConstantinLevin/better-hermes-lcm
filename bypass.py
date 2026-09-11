@@ -2,23 +2,26 @@
 
 Extracted verbatim from :mod:`hermes_lcm.engine` as ``BypassMixin`` (WS5 seam).
 The methods manage sessions that opt out of LCM context management: detecting
-the bypass, mirroring the host's native fallback compressor, and applying the
-deterministic tail-compaction fallback. State stays on the engine (accessed via
+the bypass, mirroring the host's native fallback compressor, and delegating the
+bounding of the context to it. State stays on the engine (accessed via
 ``self``); mixing this in leaves every call site and ``self._*`` reference
 unchanged.
+
+Nothing here shortens a message. LCM writes no row and no summary node for an ignored,
+stateless or auxiliary session, so a message it dropped or cut would be reachable from
+nothing afterwards — not from an expand, not from a summary, not from a marker. Hermes' own
+compressor is therefore the only component allowed to shorten these sessions; when it is
+unavailable, fails, or decides to abort, the context is handed back whole and the turn is
+reported as an abort instead.
 """
 
 import importlib
-import json
 import inspect
 import logging
 from typing import Any, Dict, List, Optional
 
-from .message_analysis import _assistant_tool_call_ids
-from .message_content import normalize_content_value
 from .session_patterns import build_session_match_keys, matches_session_pattern
 from .tokens import count_messages_tokens
-from . import marked_loss
 
 logger = logging.getLogger(__name__)
 
@@ -151,9 +154,7 @@ class BypassMixin:
         try:
             compressor = ContextCompressor(**kwargs)
         except TypeError:
-            # Older Hermes hosts may not expose all constructor kwargs. Keep the
-            # fallback deliberately conservative rather than failing open to an
-            # unbounded ignored/stateless transcript.
+            # Older Hermes hosts may not expose all constructor kwargs.
             #
             # drop only the kwargs this host cannot take. Upstream fell back
             # to a fixed five-argument call, which silently discarded the operator's summary
@@ -172,13 +173,13 @@ class BypassMixin:
                 compressor = ContextCompressor(**supported)
             except Exception as exc:
                 logger.warning(
-                    "LCM could not initialize Hermes native ContextCompressor for bypassed session fallback; using deterministic trim: %s",
+                    "LCM could not initialize Hermes native ContextCompressor for bypassed session fallback: %s",
                     exc,
                 )
                 return None
         except Exception as exc:
             logger.warning(
-                "LCM could not initialize Hermes native ContextCompressor for bypassed session fallback; using deterministic trim: %s",
+                "LCM could not initialize Hermes native ContextCompressor for bypassed session fallback: %s",
                 exc,
             )
             return None
@@ -275,6 +276,14 @@ class BypassMixin:
         observed_tokens: Optional[int] = None,
         messages: Optional[List[Dict[str, Any]]] = None,
     ) -> Optional[int]:
+        """The hard size this context must fit in, or None when none is known.
+
+        It is a bound to REPORT against, never one to cut to: see
+        ``_compress_lcm_bypassed_session``. It is therefore the WINDOW (and an assembly cap if
+        the operator set one), not ``threshold_tokens``: the threshold is the preference for
+        when to start compacting, and a host compaction that lands above it is ordinary, so
+        measuring against it would report every delegated compaction as an overflow.
+        """
         caps: list[int] = []
         assembly_cap = self._overflow_recovery_assembly_cap(
             observed_tokens=observed_tokens,
@@ -282,354 +291,34 @@ class BypassMixin:
         )
         if assembly_cap is not None:
             caps.append(assembly_cap)
-        if self.threshold_tokens > 0:
-            caps.append(self.threshold_tokens)
-        elif self.context_length > 0:
+        if self.context_length > 0:
             caps.append(self.context_length)
         return min(caps) if caps else None
 
-    @staticmethod
-    def _truncate_bypass_content_value(content: Any, char_budget: int, *, suffix: str = "") -> Any:
-        """the cut marker is kept even at a zero budget (audit p05 BY01).
-
-        Upstream appended the suffix only while ``char_budget > 0``, so the one case where the
-        whole text disappeared was also the one case that left no trace of it.
-        """
-        if char_budget < 0:
-            char_budget = 0
-        if isinstance(content, str):
-            if len(content) <= char_budget:
-                return content
-            return content[:char_budget] + suffix
-        if isinstance(content, list):
-            truncated_parts: list[Any] = []
-            changed = False
-            for part in content:
-                if isinstance(part, str):
-                    next_part = (
-                        part if len(part) <= char_budget else part[:char_budget] + suffix
-                    )
-                    changed = changed or next_part != part
-                    truncated_parts.append(next_part)
-                    continue
-                if isinstance(part, dict):
-                    next_part = dict(part)
-                    for key in ("text", "content"):
-                        value = next_part.get(key)
-                        if isinstance(value, str) and len(value) > char_budget:
-                            next_part[key] = value[:char_budget] + suffix
-                            changed = True
-                        elif isinstance(value, dict):
-                            nested = dict(value)
-                            for nested_key in ("value", "content"):
-                                nested_value = nested.get(nested_key)
-                                if isinstance(nested_value, str) and len(nested_value) > char_budget:
-                                    nested[nested_key] = nested_value[:char_budget] + suffix
-                                    changed = True
-                            next_part[key] = nested
-                    truncated_parts.append(next_part)
-                    continue
-                truncated_parts.append(part)
-            if changed:
-                return truncated_parts
-        normalized = normalize_content_value(content)
-        if isinstance(normalized, str) and len(normalized) > char_budget:
-            return normalized[:char_budget] + suffix
-        return content
-
-    def _trim_bypass_compacted_to_cap(
-        self,
-        messages: List[Dict[str, Any]],
-        target_tokens: Optional[int],
-    ) -> List[Dict[str, Any]]:
-        compacted = self._sanitize_active_context_messages(messages)
-        if target_tokens is None or target_tokens <= 0:
-            return compacted
-
-        while len(compacted) > 2 and count_messages_tokens(compacted) > target_tokens:
-            remove_indices: list[int] = []
-            for idx, msg in enumerate(compacted):
-                if idx == 0:
-                    continue
-                # never remove the receipt that says messages were removed
-                if marked_loss.is_bypass_omission_marker(msg):
-                    continue
-                if msg.get("role") != "assistant" or not msg.get("tool_calls"):
-                    continue
-                call_ids = _assistant_tool_call_ids([msg])
-                remove_indices = [idx]
-                remove_indices.extend(
-                    follow_idx
-                    for follow_idx in range(idx + 1, len(compacted))
-                    if compacted[follow_idx].get("role") == "tool"
-                    and str(compacted[follow_idx].get("tool_call_id") or "") in call_ids
-                )
-                break
-            if not remove_indices:
-                remove_index = 1
-                if (
-                    compacted[1].get("role") == "tool"
-                    and compacted[0].get("role") == "assistant"
-                    and compacted[0].get("tool_calls")
-                ):
-                    remove_index = 0
-                if marked_loss.is_bypass_omission_marker(compacted[remove_index]):
-                    # the receipt is not a removal candidate; take the next message
-                    following = next(
-                        (
-                            index
-                            for index in range(remove_index + 1, len(compacted))
-                            if not marked_loss.is_bypass_omission_marker(compacted[index])
-                        ),
-                        None,
-                    )
-                    if following is None:
-                        break
-                    remove_index = following
-                if remove_index >= len(compacted) - 1:
-                    # protecting the receipt must never cost the NEWEST
-                    # message: skipping the receipt at index 1 made the request the agent has
-                    # to answer the next removal candidate (verify-2 regression #2). Stop
-                    # deleting whole messages here and let the character-trim stages below
-                    # shrink text instead — they mark every cut they make.
-                    break
-                remove_indices = [remove_index]
-            before_shape = [
-                (msg.get("role"), msg.get("tool_call_id"), bool(msg.get("tool_calls")))
-                for msg in compacted
-            ]
-            before_tokens = count_messages_tokens(compacted)
-            for remove_index in sorted(set(remove_indices), reverse=True):
-                if 0 <= remove_index < len(compacted):
-                    del compacted[remove_index]
-            compacted = self._sanitize_active_context_messages(compacted)
-            after_shape = [
-                (msg.get("role"), msg.get("tool_call_id"), bool(msg.get("tool_calls")))
-                for msg in compacted
-            ]
-            if after_shape == before_shape and count_messages_tokens(compacted) >= before_tokens:
-                break
-
-        if count_messages_tokens(compacted) <= target_tokens:
-            return compacted
-
-        char_budget = max(0, min(500, target_tokens * 4 // max(1, len(compacted))))
-        truncated = compacted
-        previous_budget = -1
-        for _ in range(12):
-            next_messages: list[Dict[str, Any]] = []
-            newest_index = len(compacted) - 1
-            for index, msg in enumerate(compacted):
-                if marked_loss.is_bypass_omission_marker(msg):
-                    next_messages.append(msg)  # the receipt is never shortened
-                    continue
-                if index == newest_index:
-                    # the newest message is the request the agent has to
-                    # answer; the ordered last-resort stage below shrinks it only after
-                    # everything else, including the receipt, has already given way.
-                    next_messages.append(msg)
-                    continue
-                next_msg = dict(msg)
-                content = next_msg.get("content")
-                # a cut carries a marker (marked_loss.BYPASS_TRIM_SUFFIX)
-                next_msg["content"] = self._truncate_bypass_content_value(
-                    content, char_budget, suffix=marked_loss.BYPASS_TRIM_SUFFIX
-                )
-                next_messages.append(next_msg)
-            truncated = self._sanitize_active_context_messages(next_messages)
-            token_count = count_messages_tokens(truncated)
-            if token_count <= target_tokens:
-                return truncated
-            if char_budget == 0 or char_budget == previous_budget:
-                break
-            previous_budget = char_budget
-            ratio = target_tokens / max(1, token_count)
-            char_budget = max(0, min(char_budget - 1, int(char_budget * max(0.25, ratio * 0.8))))
-
-        # drop from the front, but never the receipt and never the newest
-        # message. Upstream dropped whatever was first; keeping the receipt at the front then
-        # made the live request the thing that went (verify-2 regression #2). When only the
-        # receipt and the newest message are left, the character-trim stage below shrinks them
-        # instead — and marks every cut.
-        compacted = truncated
-        while len(compacted) > 2 and count_messages_tokens(compacted) > target_tokens:
-            droppable = next(
-                (
-                    index
-                    for index in range(0, len(compacted) - 1)
-                    if not marked_loss.is_bypass_omission_marker(compacted[index])
-                ),
-                None,
-            )
-            if droppable is None:
-                break
-            remainder = compacted[:droppable] + compacted[droppable + 1:]
-            sanitized = self._sanitize_active_context_messages(remainder)
-            if len(sanitized) >= len(compacted):
-                break
-            compacted = sanitized
-
-        # an ORDER of last resorts, because trimming every message together
-        # cut the live request to a bare marker while older context was still present
-        # (verify-2 regression #2):
-        #   1. shrink the older messages,
-        #   2. shrink the receipt to its shortest honest form (the counts survive),
-        #   3. only then shrink the newest message.
-        def _shrink(messages, budget, *, protect_newest, suffix):
-            newest_index = len(messages) - 1
-            shrunk: list[Dict[str, Any]] = []
-            for index, msg in enumerate(messages):
-                if marked_loss.is_bypass_omission_marker(msg):
-                    shrunk.append(msg)
-                    continue
-                if protect_newest and index == newest_index:
-                    shrunk.append(msg)
-                    continue
-                next_msg = dict(msg)
-                # the suffix marker is kept even at a zero char budget. Upstream dropped it
-                # exactly there, so the most destructive trim of all was the one that said
-                # nothing about itself (audit p05 BY01).
-                next_msg["content"] = self._truncate_bypass_content_value(
-                    next_msg.get("content"), budget, suffix=suffix
-                )
-                shrunk.append(next_msg)
-            return self._sanitize_active_context_messages(shrunk)
-
-        for protect_newest in (True, False):
-            char_budget = max(0, min(80, target_tokens * 4))
-            previous_budget = -1
-            while (
-                count_messages_tokens(compacted) > target_tokens
-                and char_budget != previous_budget
-            ):
-                previous_budget = char_budget
-                compacted = _shrink(
-                    compacted, char_budget,
-                    protect_newest=protect_newest,
-                    suffix=marked_loss.BYPASS_FINAL_TRIM_SUFFIX,
-                )
-                char_budget = max(0, char_budget // 2)
-            if count_messages_tokens(compacted) <= target_tokens:
-                break
-            if protect_newest:
-                # step 2: the receipt becomes its shortest honest form before the live request
-                # loses anything at all.
-                compacted = [
-                    {**msg, "content": marked_loss.compact_bypass_omission_marker(msg.get("content"))}
-                    if marked_loss.is_bypass_omission_marker(msg) else msg
-                    for msg in compacted
-                ]
-                if count_messages_tokens(compacted) <= target_tokens:
-                    break
-
-        return compacted
-
-    def _fallback_tail_compaction(
+    def _decline_bypass_compaction(
         self,
         messages: List[Dict[str, Any]],
         *,
-        target_tokens: Optional[int] = None,
+        reason: str,
+        session_id: str,
+        detail: str,
     ) -> List[Dict[str, Any]]:
-        """Last-resort size guard when Hermes' native compressor is unavailable."""
-        if len(messages) <= 2:
-            return self._trim_bypass_compacted_to_cap(messages, target_tokens)
-        head_count = max(1, min(self.protect_first_n, len(messages)))
-        tail_count = max(1, min(self.protect_last_n, len(messages) - head_count))
-        # the receipt says HOW MUCH went. Upstream's marker named neither the
-        # number of messages nor their size, so a bypassed session could lose most of its
-        # history behind a sentence that read like boilerplate (audit p05 BY01).
-        dropped = messages[head_count:len(messages) - tail_count]
-        dropped_chars = sum(self._bypass_envelope_chars(message) for message in dropped)
-        marker = {
-            "role": "user",
-            "content": marked_loss.bypass_omission_marker(len(dropped), dropped_chars),
-        }
-        compacted = list(messages[:head_count]) + [marker] + list(messages[-tail_count:])
-        trimmed = self._trim_bypass_compacted_to_cap(compacted, target_tokens)
-        # the cap loop above may remove more messages after the receipt was
-        # written, so the counts are recomputed against what actually SURVIVED. Upstream's
-        # receipt (and the fork's first version of it) claimed "8 messages dropped" while nine
-        # had gone (verify-4 #17).
-        return self._refresh_bypass_receipt(messages, trimmed)
+        """Hand the context back whole and say that nothing was compacted.
 
-    @staticmethod
-    def _bypass_envelope_chars(message: Dict[str, Any]) -> int:
-        """the size of everything a dropped message carried.
-
-        A dropped assistant turn's tool CALLS are part of what was removed; counting content
-        alone reported "~2 chars" for a message holding 10,000 characters of arguments
-        (round-2 verify-4 #29).
+        Fail-before-loss. There is no copy of this session anywhere in LCM, so no size
+        pressure can justify removing part of it: upstream answered exactly this situation
+        with a head/tail delete plus a character trim and reported it as success (audit p05
+        BY01/BY02). The outcome is announced through the flag Hermes already surfaces to the
+        user as "Context compression aborted … No messages were dropped — conversation is
+        unchanged", so a declined compaction is visible rather than silent.
         """
-        total = len(str(normalize_content_value(message.get("content")) or ""))
-        calls = message.get("tool_calls")
-        if calls:
-            try:
-                total += len(json.dumps(calls, ensure_ascii=False, default=str))
-            except Exception:  # pragma: no cover - defensive
-                total += len(str(calls))
-        return total
-
-    def _refresh_bypass_receipt(
-        self,
-        original: List[Dict[str, Any]],
-        trimmed: List[Dict[str, Any]],
-    ) -> List[Dict[str, Any]]:
-        """restate the receipt's counts from the FINAL result.
-
-        Counted in aggregate rather than by object identity: the surviving messages are
-        trimmed COPIES, and the characters the trim removed from them are gone too.
-        """
-        def _chars(messages: List[Dict[str, Any]]) -> int:
-            return sum(
-                self._bypass_envelope_chars(message)
-                for message in messages
-                if not marked_loss.is_bypass_omission_marker(message)
-            )
-
-        surviving = [
-            message for message in trimmed
-            if not marked_loss.is_bypass_omission_marker(message)
-        ]
-        original_messages = [
-            message for message in original
-            if not marked_loss.is_bypass_omission_marker(message)
-        ]
-        dropped = original_messages[:max(0, len(original_messages) - len(surviving))]
-        dropped_chars = max(0, _chars(original_messages) - _chars(surviving))
-        # the receipt is CUMULATIVE. Every surviving receipt was rewritten
-        # with counts from the latest reduction alone, so a second bypass compaction erased
-        # the record of the first: two receipts both claimed 6 messages / 3,046 characters
-        # where 10 / 5,100 had already gone (round-5 verify-6 #10). Earlier receipts state
-        # what they removed; those numbers are carried forward and this call's own reduction
-        # is added exactly once.
-        prior_messages = 0
-        prior_chars = 0
-        for message in original:
-            if not marked_loss.is_bypass_omission_marker(message):
-                continue
-            counted_messages, counted_chars = marked_loss.bypass_omission_counts(
-                str(message.get("content") or "")
-            )
-            prior_messages += counted_messages
-            prior_chars += counted_chars
-        total_messages = prior_messages + len(dropped)
-        total_chars = prior_chars + dropped_chars
-        refreshed: List[Dict[str, Any]] = []
-        receipt_written = False
-        for message in trimmed:
-            if not marked_loss.is_bypass_omission_marker(message):
-                refreshed.append(message)
-                continue
-            if receipt_written:
-                # one cumulative receipt, not several copies each restating the same total
-                continue
-            was_compact = "msg /" in str(message.get("content") or "")
-            content = marked_loss.bypass_omission_marker(total_messages, total_chars)
-            if was_compact:
-                content = marked_loss.compact_bypass_omission_marker(content)
-            refreshed.append({**message, "content": content})
-            receipt_written = True
-        return refreshed
+        error = f"LCM cannot compact a session it does not store ({reason}): {detail}"
+        self._last_compress_aborted = True
+        self._last_summary_error = error
+        self._last_compression_status = "bypass_not_compacted"
+        self._last_compression_noop_reason = f"{error}; every message is returned unchanged"
+        logger.warning("LCM declined to compact bypassed session %s: %s", session_id, error)
+        return messages
 
     def _compress_lcm_bypassed_session(
         self,
@@ -639,7 +328,12 @@ class BypassMixin:
         focus_topic: Optional[str] = None,
         force: bool = False,
     ) -> List[Dict[str, Any]]:
-        """Delegate ignored/stateless context bounding without writing to LCM."""
+        """Delegate ignored/stateless context bounding without writing to LCM.
+
+        LCM neither shortens the context on the way in nor edits what the host's compressor
+        returns: this session has no stored copy, so every such edit would be unrecoverable.
+        Delegation succeeds, or the whole context comes back and the turn is declined.
+        """
         reason = self._bypass_lcm_reason()
         session_id = self._bypass_lcm_session_id()
         self._remember_lcm_bypass_message_prefix(session_id, messages)
@@ -664,17 +358,15 @@ class BypassMixin:
         self._last_compression_status = "host_fallback"
         self._last_compression_noop_reason = f"LCM bypassed: {reason}"
         safe_messages = self._redact_active_replay_messages(messages)
-        target_tokens = self._bypass_compaction_target_tokens(
-            observed_tokens=observed_tokens,
-            messages=safe_messages,
-        )
 
         compressor = self._get_host_fallback_compressor()
         if compressor is None:
-            compacted = self._fallback_tail_compaction(safe_messages, target_tokens=target_tokens)
-            if compacted != messages:
-                self.compression_count += 1
-            return compacted
+            return self._decline_bypass_compaction(
+                safe_messages,
+                reason=reason,
+                session_id=session_id,
+                detail="Hermes' native ContextCompressor is unavailable on this host",
+            )
 
         self._sync_host_fallback_compressor(compressor)
         before_count = int(getattr(compressor, "compression_count", 0) or 0)
@@ -694,26 +386,15 @@ class BypassMixin:
                 )
         except Exception as exc:
             self._mirror_host_fallback_state(compressor)
-            logger.warning(
-                "LCM Hermes native ContextCompressor failed for bypassed %s %s; using deterministic trim: %s",
-                reason,
-                session_id,
-                exc,
-            )
             self._host_fallback_compressor = None
             self._host_fallback_session_id = ""
-            compacted = self._fallback_tail_compaction(safe_messages, target_tokens=target_tokens)
-            if compacted != safe_messages:
-                self.compression_count += 1
-                self._last_compress_aborted = False
-            return compacted
+            return self._decline_bypass_compaction(
+                safe_messages,
+                reason=reason,
+                session_id=session_id,
+                detail=f"Hermes' native ContextCompressor failed: {exc}",
+            )
         self._mirror_host_fallback_state(compressor)
-        # an abort is a decision to PRESERVE, not a failed attempt. Upstream
-        # counted every native return as at least one compression and, when the unchanged
-        # result was still over target, ran the deterministic trim over it and cleared the
-        # abort flag — so the host's explicit "do not compress this" became a destructive
-        # delete reported as success (audit p05 BY02).
-        native_aborted = bool(getattr(compressor, "_last_compress_aborted", False))
         native_changed = compacted is not safe_messages and compacted != safe_messages
         after_count = int(getattr(compressor, "compression_count", before_count) or before_count)
         if native_changed:
@@ -721,21 +402,76 @@ class BypassMixin:
         elif after_count > before_count:
             # the host counted an attempt that changed nothing; mirror its count, no more
             self.compression_count += after_count - before_count
-        compacted = self._sanitize_active_context_messages(compacted)
-        if target_tokens is not None and count_messages_tokens(compacted) > target_tokens:
-            if native_aborted and not native_changed:
-                # say plainly that the host's preservation decision is being
-                # overridden. The assembly cap is a hard provider bound for a session LCM does
-                # not store, so the deterministic trim still has to run, but upstream counted
-                # the untouched native return as a compression first and reported the whole
-                # sequence as ordinary success (audit p05 BY02).
+
+        if not native_changed:
+            if bool(getattr(compressor, "_last_compress_aborted", False)):
+                # an abort is a decision to PRESERVE, not a failed attempt. Upstream ran its
+                # own deterministic delete over the untouched result and cleared this flag, so
+                # the host's explicit "do not compress this" became a destructive delete
+                # reported as ordinary success (audit p05 BY02). The decision and the flag both
+                # stand; the host already tells the user nothing was dropped.
+                outcome = "Hermes' native compressor aborted"
                 logger.warning(
-                    "LCM native compressor aborted for bypassed %s %s but its context is still "
-                    "over the assembly cap; falling back to the deterministic trim",
+                    "LCM native compressor aborted for bypassed %s %s; returning its context "
+                    "unchanged (LCM stores no copy of this session)",
                     reason,
                     session_id,
                 )
-            compacted = self._fallback_tail_compaction(safe_messages, target_tokens=target_tokens)
-            if compacted != safe_messages:
+            else:
+                # the host RAN and had nothing to compact. Hermes returns the list unchanged
+                # for insufficient_messages, no_compressible_window and
+                # empty_post_handoff_window, and counts none of them as a failure - so this is
+                # a no-op, not an alarm. Reporting it through ``_last_compress_aborted`` would
+                # make the host warn the user and point them at their summariser configuration
+                # for a turn where there was simply nothing to compact.
+                outcome = "Hermes' native compressor found nothing to compact"
+                logger.debug(
+                    "LCM bypassed %s %s: the native compressor found nothing to compact",
+                    reason,
+                    session_id,
+                )
+        else:
+            # The host's own compaction, returned exactly as the host built it: LCM does not
+            # sanitise, re-cut or annotate it. Its own tool-pair repair already ran
+            # (``agent/context_compressor.py``), and there is no LCM copy to repair it from.
+            if not hasattr(compressor, "_last_compress_aborted"):
+                # the mirror above had no flag to copy on this host, so a compaction that
+                # really happened would otherwise inherit this turn's earlier state. A host
+                # that DOES expose the flag keeps its own answer.
                 self._last_compress_aborted = False
+            outcome = "Hermes' native compressor compacted this session"
+
+        target_tokens = self._bypass_compaction_target_tokens(
+            observed_tokens=observed_tokens,
+            messages=safe_messages,
+        )
+        if target_tokens is not None and count_messages_tokens(compacted) > target_tokens:
+            # a bounded result is never presented as a complete one - whichever of the three
+            # outcomes above got us here
+            self._last_compression_status = "bypass_over_bound"
+            self._last_compression_noop_reason = (
+                f"LCM bypassed {reason}: {outcome}, but the context is still over the "
+                f"{target_tokens}-token bound; LCM stores no copy of this session and does not "
+                "cut it"
+            )
+            logger.warning(
+                "LCM bypassed %s %s is still over the %d-token bound (%s); LCM stores no copy "
+                "of this session and will not shorten it",
+                reason,
+                session_id,
+                target_tokens,
+                outcome,
+            )
+        elif native_changed:
+            # name the actor and the absence of a copy: what the host removed here is in the
+            # host transcript and nowhere in lcm.db, so this is not the ordinary "compacted"
+            # boundary an operator reading the status would otherwise assume.
+            self._last_compression_noop_reason = (
+                f"LCM bypassed {reason}: {outcome}; LCM stores no copy of what it removed"
+            )
+        else:
+            self._last_compression_status = "bypass_not_compacted"
+            self._last_compression_noop_reason = (
+                f"LCM bypassed {reason}: {outcome}; every message is returned unchanged"
+            )
         return compacted
