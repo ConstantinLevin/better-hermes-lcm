@@ -23688,6 +23688,15 @@ class TestEngineTools:
 
         assert [item["store_id"] for item in result["expanded"]] == store_ids[1:3]
         assert [item["source_index"] for item in result["expanded"]] == [1, 2]
+        # fork: better-hermes-lcm — this used to assert `complete: True` on the same page that
+        # reports `has_more: True` and a continuation cursor. A page that stopped before the
+        # end of what the node holds is exact and resumable (every cursor below is unchanged,
+        # and the pages still reassemble the original byte for byte) but it is not COMPLETE,
+        # and reporting both let such a page enter a synthesis as fully-loaded evidence
+        # (#50a). The reason travels with the flag and is asserted separately, so this dict
+        # stays a strict check on the cursors.
+        reason = result["pagination"].pop("incomplete_reason", "")
+        assert "next_source_offset" in reason, reason
         assert result["pagination"] == {
             "source_offset": 1,
             "content_offset": 0,
@@ -23706,7 +23715,7 @@ class TestEngineTools:
             "next_envelope_offset": 0,
             "has_more": True,
             "remaining_sources": 2,
-            "complete": True,
+            "complete": False,
         }
 
     def test_handle_expand_keeps_ingest_placeholder_ref_unsliced_under_tiny_budget(self, engine):
