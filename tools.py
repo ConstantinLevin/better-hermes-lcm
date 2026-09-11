@@ -2303,7 +2303,18 @@ def _collect_raw_match_context_block(
             "session_id": row.get("session_id") or "",
             "source": row.get("source") or "",
             "role": row.get("role"),
+            # `timestamp` is the messages table's ingest clock — store.py writes the same
+            # time.time() into `timestamp` and `ingested_at` — and a search hit handed it to the
+            # synthesis unqualified, where "when LCM first saw this row" reads as "when this
+            # happened" (#37). The host's own message time is `observed_at`, and it stays NULL
+            # when the host recorded none: an unknown event time filled in from the ingest clock
+            # is indistinguishable from a recorded one, which is the worse failure. Same four
+            # key names the store_id branch of lcm_expand uses — one vocabulary per distinction.
             "timestamp": row.get("timestamp", 0),
+            "timestamp_kind": "lcm_ingest_time",
+            "ingested_at": row.get("ingested_at") or row.get("timestamp", 0),
+            "observed_at": row.get("observed_at"),
+            "observed_at_source": row.get("observed_at_source"),
             **content_slice,
             "content_source": "raw_search_hit",
             "search_rank": row.get("search_rank"),
