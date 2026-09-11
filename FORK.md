@@ -214,4 +214,5 @@ Upstream settings the curve also drives when not set explicitly: `context_thresh
 - `node_meta.py`          — sidecar table `lcm_node_meta` (escalation level + index block)
 - `leaf_pipeline.py`      — concurrent leaf summarisation as a lookahead over the serial loop; compaction lock
 - `coverage_doctor.py`    — `lcm_doctor coverage` / `/lcm doctor coverage`: index-adequacy check
+- `diagnostic_connection.py` — the private handle a diagnostic owns, the budget that bounds it, and the remedy each `unchecked` reason earns
 - `tests/fork/`           — fork tests, organised by the step that introduced them

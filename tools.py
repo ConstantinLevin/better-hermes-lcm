@@ -7681,10 +7681,10 @@ def lcm_doctor(args: Dict[str, Any], **kwargs) -> str:
 
     # 1b. FTS5 integrity, separated from generic SQLite integrity so malformed
     # inverted indexes point at the exact table and repair path.
-    from .diagnostic_connection import (  # local, like the coverage import below
-        private_diagnostic_connection,
-        unavailable_check_result,
-    )
+    # Imported here, not at module scope, only because this handler is the sole
+    # part of tools.py in scope for the fix while other work is in flight in the
+    # same file; it belongs in the top-level import block once that clears.
+    from .diagnostic_connection import run_isolated_fts_check
 
     for check_name, conn, spec in (
         ("messages_fts_integrity", engine._store.connection, build_message_fts_spec()),
@@ -7695,12 +7695,10 @@ def lcm_doctor(args: Dict[str, Any], **kwargs) -> str:
             # belongs to the connection, not to this thread: run on the live
             # store/DAG connection, a Doctor still here after the host's tool
             # deadline rolls back rows a concurrent ingest committed on it.
-            with private_diagnostic_connection(conn) as probe:
-                fts_integrity = (
-                    unavailable_check_result(spec.table_name)
-                    if probe is None
-                    else check_external_content_fts_integrity(probe, spec)
-                )
+            # Bounded, because the check holds SQLite's write lock while it runs.
+            fts_integrity = run_isolated_fts_check(
+                conn, spec, check_external_content_fts_integrity
+            )
             status = fts_integrity["status"]
             checks.append({
                 "check": check_name,

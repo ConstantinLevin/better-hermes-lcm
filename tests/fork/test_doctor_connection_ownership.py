@@ -304,9 +304,13 @@ def test_doctor_repair_apply_does_not_commit_a_pending_store_write(tmp_path, mon
         command_mod, "join_background_integrity_scans", join_then_a_writer_starts
     )
 
-    handle_lcm_command("doctor repair apply", engine)
+    text = handle_lcm_command("doctor repair apply", engine)
 
     assert opened, "the seam never ran; the test proved nothing"
+    # the absence of a side effect is also what a repair apply that silently
+    # became a no-op would produce, so pin what the command actually reported.
+    assert "LCM doctor repair apply" in text
+    assert "status: ok" in text or "error: FTS repair failed" in text, text
     opened[0].rollback()
     assert _durable_message_count(engine) == 0, (
         "repair apply committed a transaction its writer had not finished"
@@ -363,3 +367,164 @@ def test_a_diagnostic_handle_is_a_different_connection_on_the_same_database(tmp_
         probe.execute("ROLLBACK TO probe_owns_this")
         probe.execute("RELEASE probe_owns_this")
     assert not conn.in_transaction, "the diagnostic left the live connection in a transaction"
+
+
+# ---------------------------------------------------------------------------
+# an `unchecked` deep check must stay unchecked all the way to the operator
+# ---------------------------------------------------------------------------
+def test_doctor_repair_scan_never_reports_ok_for_a_check_that_did_not_run(tmp_path):
+    """`/lcm doctor repair` exists to answer whether the index needs repair, and
+    the deep check is the only thing that sees same-row-count drift. A scan whose
+    deep check did not run knows nothing, and must not headline `ok`."""
+    engine = _engine(tmp_path)
+    conn = _insert_pending_message(engine)
+    try:
+        text = handle_lcm_command("doctor repair", engine)
+    finally:
+        conn.commit()
+
+    assert "messages_fts_integrity_status: unchecked" in text, text
+    assert "status: ok" not in text, text
+    assert "messages_fts: ok" not in text, text
+    assert "status: unchecked" in text, text
+
+
+def test_the_unchecked_remedy_names_a_lock_rather_than_read_only_access():
+    """The remedy has to match the cause. After the diagnostic moved onto its own
+    handle the usual cause is a write in flight, not a read-only database, and an
+    operator who already has read-write access is told to do nothing useful."""
+    from hermes_lcm.diagnostics import doctor_guidance_for_check
+
+    guidance = doctor_guidance_for_check({
+        "check": "messages_fts_integrity",
+        "status": "warn",
+        "detail": {"status": "unchecked", "detail": "database is locked"},
+    })
+
+    assert guidance is not None
+    action = guidance["operator_action"]
+    assert "read-write SQLite access" not in action, action
+    assert "no write" in action or "not in flight" in action or "idle" in action, action
+
+
+def test_doctor_text_unchecked_action_names_the_actual_cause(tmp_path):
+    engine = _engine(tmp_path)
+    conn = _insert_pending_message(engine)
+    try:
+        text = handle_lcm_command("doctor", engine)
+    finally:
+        conn.commit()
+
+    assert "messages_fts: unchecked" in text, text
+    assert "read-write SQLite access" not in text, text
+
+
+# ---------------------------------------------------------------------------
+# the check is bounded in wall clock, not only against the lock
+# ---------------------------------------------------------------------------
+def test_an_over_budget_fts_check_reports_unchecked_with_the_reason(tmp_path, monkeypatch):
+    from hermes_lcm import diagnostic_connection
+
+    monkeypatch.setattr(diagnostic_connection, "DIAGNOSTIC_BUDGET_SECONDS", 0.0, raising=False)
+    engine = _engine(tmp_path)
+
+    report = json.loads(lcm_tools.lcm_doctor({}, engine=engine))
+    messages_fts = next(
+        check for check in report["checks"] if check["check"] == "messages_fts_integrity"
+    )
+
+    assert messages_fts["status"] == "warn", messages_fts
+    detail = messages_fts["detail"]
+    assert detail["status"] == "unchecked", detail
+    assert "budget" in detail["detail"], detail
+
+
+def test_a_host_interrupt_stops_the_fts_check_and_says_so(tmp_path, monkeypatch):
+    """The host's tool deadline sets a cooperative interrupt bit on this thread
+    and stops waiting. A diagnostic that keeps holding SQLite's write lock past
+    that point is stalling a write path nobody is waiting on any more."""
+    from hermes_lcm import diagnostic_connection
+
+    monkeypatch.setattr(
+        diagnostic_connection, "_host_is_interrupted", lambda: True, raising=False
+    )
+    engine = _engine(tmp_path)
+
+    report = json.loads(lcm_tools.lcm_doctor({}, engine=engine))
+    messages_fts = next(
+        check for check in report["checks"] if check["check"] == "messages_fts_integrity"
+    )
+
+    assert messages_fts["status"] == "warn", messages_fts
+    assert messages_fts["detail"]["status"] == "unchecked"
+    assert "interrupt" in messages_fts["detail"]["detail"], messages_fts
+
+
+# ---------------------------------------------------------------------------
+# a partial repair must name the part that already landed
+# ---------------------------------------------------------------------------
+def test_repair_apply_error_names_the_repair_that_already_committed(tmp_path, monkeypatch):
+    engine = _engine(tmp_path)
+
+    def repair_messages_then_fail(conn, spec, **kwargs):
+        if spec.table_name == "messages_fts":
+            return {"rebuilt": True, "degraded": False, "triggers_recreated": False}
+        raise sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr(command_mod, "repair_external_content_fts", repair_messages_then_fail)
+
+    text = handle_lcm_command("doctor repair apply", engine)
+
+    assert "status: error" in text, text
+    assert "messages_fts_rebuilt: yes" in text, text  # _fmt_bool renders yes/no
+    assert "nodes_fts: not repaired" in text, text
+    assert "PARTIAL" in text, text
+
+
+# ---------------------------------------------------------------------------
+# the same defect one connection over: the backup flush the doctor path reaches
+# ---------------------------------------------------------------------------
+def test_backup_flush_does_not_commit_a_pending_lifecycle_transaction(tmp_path):
+    """`flush_engine_connections` takes the store and DAG owner locks and then
+    commits the lifecycle connection with none. `prune_empty_sessions` holds
+    BEGIN IMMEDIATE across a multi-row DELETE loop and relies on rollback; a
+    flush from the `/lcm doctor repair apply` backup makes those deletes durable
+    and the rollback a no-op."""
+    from hermes_lcm.maintenance import flush_engine_connections
+
+    engine = _engine(tmp_path)
+    lifecycle = engine._lifecycle
+    lifecycle.bind_session("doomed-session", conversation_id="doomed-conversation")
+    assert lifecycle.get_by_conversation("doomed-conversation") is not None
+
+    pending = threading.Event()
+    release = threading.Event()
+
+    def deleter_that_rolls_back():
+        with lifecycle._lock:
+            conn = lifecycle._conn
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                "DELETE FROM lcm_lifecycle_state WHERE conversation_id = ?",
+                ("doomed-conversation",),
+            )
+            pending.set()
+            release.wait(5.0)
+            conn.rollback()
+
+    holder = threading.Thread(target=deleter_that_rolls_back, name="lifecycle-pruner")
+    holder.start()
+    try:
+        assert pending.wait(5.0), "the pruner never opened its transaction"
+        flusher = threading.Thread(target=flush_engine_connections, args=(engine,))
+        flusher.start()
+        release.set()
+        flusher.join(15)
+        assert not flusher.is_alive()
+    finally:
+        release.set()
+        holder.join(15)
+
+    assert lifecycle.get_by_conversation("doomed-conversation") is not None, (
+        "the backup flush committed a lifecycle deletion its owner rolled back"
+    )
