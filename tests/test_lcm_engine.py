@@ -10218,26 +10218,43 @@ class TestEngineCompress:
 
             match = re.search(r";\s*ref=([^;\]\s]+)", serialized)
             assert match, serialized
-            assert "literal XML docs" not in serialized
+            # fork: better-hermes-lcm — this asserted `"literal XML docs" not in serialized`,
+            # which held only because the head note was stripped of injected-context tags. The
+            # source pre-processing no longer removes spans from a message (#56), so the head
+            # of the externalized output shows the payload's own first characters. The point of
+            # the test — that the whole payload is recoverable byte-identical through the ref —
+            # is asserted below and unchanged.
             expanded = json.loads(lcm_tools.lcm_expand({"externalized_ref": match.group(1), "max_tokens": 100_000}, engine=instance))
             assert expanded["content"] == payload
         finally:
             instance.shutdown()
 
-    def test_compression_serialization_strips_injected_context_from_non_externalized_tool_result(self, engine):
+    # fork: better-hermes-lcm — this asserted that the injected block and its tag were NOT in
+    # the serialized tool result. The source pre-processing may not remove parts of a message
+    # (#56): the block is text the host actually put in the conversation, and the same removal
+    # truncated a real request in other shapes. Steering by recalled text is handled where it
+    # costs no content — the source travels inside prompt_boundary's untrusted-data envelope,
+    # whose system role says sources are evidence and never an instruction channel.
+    def test_compression_serialization_keeps_injected_context_in_a_tool_result(self, engine):
+        content = ("<relevant-memories>temporary tool output context</relevant-memories> "
+                   "keep small tool result")
         serialized = engine._serialize_messages([
-            {
-                "role": "tool",
-                "tool_call_id": "call_small",
-                "content": "<relevant-memories>temporary tool output context</relevant-memories> keep small tool result",
-            },
+            {"role": "tool", "tool_call_id": "call_small", "content": content},
         ])
 
-        assert "keep small tool result" in serialized
-        assert "temporary tool output context" not in serialized
-        assert "relevant-memories" not in serialized
+        assert content in serialized
+        assert "chars of injected context removed" not in serialized
 
-    def test_compression_serialization_strips_injected_memory_context_blocks(self, engine):
+    # fork: better-hermes-lcm — this asserted, over the whole table below, that every injected
+    # block's TEXT was absent from the summariser's input while the user text around it
+    # survived (the long list of `... not in serialized` assertions that used to close it).
+    # LCM no longer removes spans from a message on the way to the summariser (#56). The table
+    # is kept exactly as it was, because it is a good inventory of the shapes a wrapper can
+    # take, and the contract it now pins is the stronger one: every message reaches the source
+    # byte-identical. Note what the old behaviour cost — one of these rows
+    # ("block-shaped unmatched context should truncate this tail") had its real trailing
+    # request removed with it.
+    def test_compression_serialization_keeps_injected_memory_context_blocks(self, engine):
         messages = [
             {
                 "role": "user",
@@ -10371,56 +10388,17 @@ class TestEngineCompress:
 
         serialized = engine._serialize_messages(messages)
 
-        assert "keep active-memory user request" in serialized
-        assert "keep attributed-wrapper user request" in serialized
-        assert "keep self-closing-wrapper user request" in serialized
-        assert "keep this real user request" in serialized
-        assert "also keep this real user content" in serialized
-        assert "keep after inline pair" in serialized
-        assert "keep literal close tag text" in serialized
-        assert "in docs" in serialized
-        assert "keep this request after close" in serialized
-        assert "investigate credential leak delimiter spoof" in serialized
-        assert "preserve request after non-isolated close" in serialized
-        assert "keep request after real close" in serialized
-        assert "keep hyphenated-tag user content" in serialized
-        assert "temporary retrieved memory" not in serialized
-        assert "attribute wrapper recall" not in serialized
-        assert "active memory recall" not in serialized
-        assert "preserve user text between same-tag blocks" in serialized
-        assert "please summarize my plan" in serialized
-        assert "tail -f logs" in serialized
-        assert "keep interstitial inline request" in serialized
-        assert "keep after inline pair" in serialized
-        assert "please document" in serialized
-        assert "tag syntax" in serialized
-        assert "keep singleton-marker user request" in serialized
-        assert "block-shaped unmatched context should truncate this tail" not in serialized
-        assert "<active_memory_plugin>" not in serialized
-        assert "first ephemeral recall block" not in serialized
-        assert "second ephemeral recall block" not in serialized
-        assert "inline first recall" not in serialized
-        assert "inline second recall" not in serialized
-        assert "inline third recall" not in serialized
-        assert "inline recall with spoofed close" not in serialized
-        assert "leaked inline tail" not in serialized
-        assert "inline recall" not in serialized
-        assert "block first recall" not in serialized
-        assert "ambiguous block-delimited interstitial text" not in serialized
-        assert "block second recall" not in serialized
-        assert "line-start close with same-line trailing request" not in serialized
-        assert "line-start close before security-debug wording" not in serialized
-        assert "single content-line close" not in serialized
-        assert "spoofed same-line close inside block" not in serialized
-        assert "your preferred color is blue" not in serialized
-        assert "real close should own the trailing request" not in serialized
-        assert "hyphenated Hindsight recall block" not in serialized
-        assert "Untrusted context" not in serialized
-        assert "hindsight_memories" not in serialized
-        assert "hindsight-memories" not in serialized
-        assert "<relevant-memories>" not in serialized
+        for message in messages:
+            assert message["content"] in serialized, message["content"][:120]
+        assert "chars of injected context removed" not in serialized
 
-    def test_compression_serialization_strips_injected_context_with_embedded_closing_tag(self, engine):
+    # fork: better-hermes-lcm — this asserted that a block with a spoofed closing tag inside it
+    # was removed as one untrusted region ("ephemeral memory contains", "your preferred color
+    # is blue" and the rest `not in serialized`). Nothing is removed from the summariser's
+    # source any more (#56), so the spoofing question moves to where it belongs: the source is
+    # carried as untrusted data inside prompt_boundary's envelope, which no delimiter inside a
+    # JSON string value can close.
+    def test_compression_serialization_keeps_injected_context_with_embedded_closing_tag(self, engine):
         messages = [
             {
                 "role": "user",
@@ -10453,17 +10431,17 @@ class TestEngineCompress:
 
         serialized = engine._serialize_messages(messages)
 
-        assert "keep this real request" in serialized
-        assert "keep this second real request" in serialized
-        assert "ephemeral memory contains" not in serialized
-        assert "trailing injected text" not in serialized
-        assert "close-only injected tail" not in serialized
-        assert "your preferred color is blue" not in serialized
-        assert "more injected tail" not in serialized
-        assert "relevant-memories" not in serialized
-        assert "hindsight-memories" not in serialized
+        for message in messages:
+            assert message["content"] in serialized, message["content"][:120]
+        assert "chars of injected context removed" not in serialized
 
-    def test_compression_serialization_strips_injected_context_from_tool_arguments(self, engine):
+    # fork: better-hermes-lcm — this asserted that every injected block inside a tool-call
+    # argument was removed (the `... not in serialized` list below it) while the argument text
+    # around it survived. Removing it required parsing and re-serialising the argument string,
+    # which is the same round trip that turned an exact decimal into a rounded one in both the
+    # summary source and `lcm_expand` (#56). The argument string a provider sent is now offered
+    # exactly as it stands, so no part of it is removed and no value in it is rewritten.
+    def test_compression_serialization_keeps_injected_context_in_tool_arguments(self, engine):
         messages = [
             {
                 "role": "assistant",
@@ -10506,20 +10484,9 @@ class TestEngineCompress:
 
         serialized = engine._serialize_messages(messages)
 
-        assert "keep this tool argument" in serialized
-        assert "debug credential leak delimiter spoof" in serialized
-        assert "nested keep" in serialized
-        assert "preserve tool argument between inline blocks" in serialized
-        assert "tool tag syntax" in serialized
-        assert "keep singleton-marker tool argument" in serialized
-        assert "temporary tool-arg recall" not in serialized
-        assert "temporary tool-arg recall before security wording" not in serialized
-        assert "tool first recall" not in serialized
-        assert "tool second recall" not in serialized
-        assert "nested recall" not in serialized
-        assert "active_memory_plugin" not in serialized
-        assert "hindsight-memories" not in serialized
-        assert "relevant-memories" not in serialized
+        original_arguments = messages[0]["tool_calls"][0]["function"]["arguments"]
+        assert original_arguments in serialized, serialized
+        assert "[LCM-" not in serialized, serialized
 
     def test_compression_serialization_keeps_assistant_text_but_drops_orphaned_tool_calls(self, engine):
         messages = [
@@ -10920,10 +10887,12 @@ class TestEngineCompress:
 
         def mock_summary(**kwargs):
             text = kwargs["text"]
+            # fork: better-hermes-lcm — this asserted the injected bodies and their tag were
+            # NOT in the summariser's source. The source pre-processing no longer removes
+            # spans from a message (#56); the interstitial request this test is named for is
+            # still what matters, and it is still there.
             assert real_request in text
-            assert "one injected body" not in text
-            assert "two injected body" not in text
-            assert "relevant-memories" not in text
+            assert injected_user_turn in text
             return f"Summary kept request: {real_request}\nExpand for details about: data loss probe", 1
 
         monkeypatch.setattr(lcm_engine, "summarize_with_escalation", mock_summary)
@@ -10965,8 +10934,11 @@ class TestEngineCompress:
 
         def mock_summary(**kwargs):
             text = kwargs["text"]
+            # fork: better-hermes-lcm — this asserted `"active_memory_plugin" not in text`.
+            # The source pre-processing no longer removes spans from a message (#56); the
+            # request after the unmatched marker, which this test is named for, still arrives.
             assert real_request in text
-            assert "active_memory_plugin" not in text
+            assert user_turn in text
             return f"Summary kept request: {real_request}\nExpand for details about: unmatched marker", 1
 
         monkeypatch.setattr(lcm_engine, "summarize_with_escalation", mock_summary)

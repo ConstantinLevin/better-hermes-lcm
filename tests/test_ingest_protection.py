@@ -1439,17 +1439,18 @@ def test_ingest_externalizes_structured_content_payload_keys(tmp_path):
     assert DATA_PAYLOAD[:80] not in json.dumps(raw_message)
 
 
-def test_pre_compaction_tool_arguments_sanitize_payload_keys():
+# fork: better-hermes-lcm — this asserted that a payload-bearing KEY was rewritten to
+# "[Media attachment]" and that the rewrite carried a receipt. Rewriting a key means removing
+# text from an argument, and it was only reachable through the parse/re-serialise round trip
+# that also turned an exact decimal into a rounded one in the summary source and in
+# `lcm_expand` (#56). Arguments are rendered as they stand, so the key survives — and the
+# collision hazard the rewrite created (two keys becoming the same name) cannot arise.
+def test_pre_compaction_tool_arguments_keep_payload_bearing_keys():
     sanitized = sanitize_pre_compaction_tool_arguments({DATA_URI: "plain-value"})
 
-    assert "data:image" not in sanitized
-    assert DATA_PAYLOAD[:80] not in sanitized
     parsed = json.loads(sanitized)
-    # a rewritten KEY is a removal like any other and carries its receipt
-    # in the object it happened in (round-3 verify-4 #9)
-    assert parsed["[Media attachment]"] == "plain-value"
-    receipts = [value for key, value in parsed.items() if key.startswith("_lcm_key_sanitisation")]
-    assert receipts and "key name(s) had injected context removed" in receipts[0]
+    assert parsed[DATA_URI] == "plain-value"
+    assert "[Media attachment]" not in sanitized
 
 
 def test_payload_bearing_key_uses_neutral_child_field_path(tmp_path):
@@ -1843,7 +1844,13 @@ def test_import_lossless_claw_respects_externalization_path_env(tmp_path, monkey
     assert expanded["content"] == DATA_URI
 
 
-def test_store_id_expand_never_returns_raw_historical_tool_calls(tmp_path):
+# fork: better-hermes-lcm — this was `test_store_id_expand_never_returns_raw_historical_tool_calls`
+# and asserted `DATA_URI not in raw_message_text`. `lcm_expand(store_id=…)` is the call a reader
+# makes to get a row's exact bytes, and it was returning a transformed copy instead: the same
+# helper rewrote an exact decimal, and a continuation walk paged over the rewritten text rather
+# than over the row (#56). Size is handled by the page budget, which returns a cursor and says
+# has_more — not by rewriting what was asked for.
+def test_store_id_expand_returns_historical_tool_calls_as_stored(tmp_path):
     engine = _engine(tmp_path)
     tool_calls = json.dumps([{"function": {"arguments": DATA_URI}}])
     engine._store._conn.execute(
@@ -1869,13 +1876,13 @@ def test_store_id_expand_never_returns_raw_historical_tool_calls(tmp_path):
     raw_message_text = lcm_tools.lcm_expand({"store_id": store_id, "max_tokens": 100_000}, engine=engine)
     raw_message = json.loads(raw_message_text)
 
-    # the calls are RETURNED now (omitting them answered "this is the whole
-    # row" while hiding what the agent did, round-2 verify-4 #20), but their arguments go
-    # through the compaction argument sanitiser, so a legacy row's inline payload is a marker
-    # and never the raw bytes.
+    # the calls are RETURNED (omitting them answered "this is the whole row"
+    # while hiding what the agent did, round-2 verify-4 #20), and they are returned as the row
+    # holds them.
     assert "tool_calls" in raw_message
-    assert DATA_URI not in raw_message_text
-    assert DATA_PAYLOAD[:120] not in raw_message_text
+    assert DATA_URI in raw_message["tool_calls"]
+    assert raw_message["tool_calls"] == tool_calls
+    assert raw_message.get("has_more") is not True
 
 
 def test_lcm_doctor_reports_largest_and_suspicious_payload_rows(tmp_path):

@@ -24,19 +24,17 @@ _TRUNCATED_FINISH_REASONS = frozenset({
 
 logger = logging.getLogger(__name__)
 
-# no whitespace in the payload class. With ``\s`` in it the match ran past
-# the URI and swallowed the ordinary words after it ("…;base64,AAAA hello world decision"
-# erased the sentence), so prose vanished from the summariser input with only a media marker
-# left behind (audit p05 EX02). A line-wrapped payload now simply stops at the first newline:
-# the remainder stays in the text, which costs a little size and loses nothing.
-# the payload stops AT its padding. With "=" inside the repeated class, a
-# padded URI followed immediately by prose ("…AAAA==hello") ate the word after the padding
-# (round-2 verify-3 #12); base64 admits no data character after "=", so anchoring the padding
-# at the end gives the word back.
-_MEDIA_DATA_URI_RE = re.compile(
-    r"data:(?:image|audio|video)/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/]{16,}={0,2}",
-    re.IGNORECASE,
-)
+# An inline `data:` URI in ordinary TEXT is left alone. A regex used to delete it and put a
+# media marker in its place, and no spelling of that regex is safe: the conservative form
+# matched only as far as the first newline, so a line-wrapped payload lost one line while the
+# marker said the medium had been removed — a receipt claiming more than it took, with the
+# base64 still in the text (#56). The permissive form eats the words after the payload
+# instead (claw's does exactly that to "…AAAA\nAAAA\nSTOP\nDo not deploy."), and the earlier
+# attempts to bound it by wrap width did the same here. There is no third spelling to find:
+# LCM does not cut the source at all, and a payload the configured summary route cannot
+# process fails at that route, which is the only place that knows its real capacity.
+# Structured media BLOCKS still project to the marker below — that is a representation
+# question (#31 MC01), not this removal.
 _MEDIA_ATTACHMENT_MARKER = "[Media attachment]"
 _MEDIA_ATTACHMENT_SUFFIX = "[with media attachment]"
 _TEXT_BLOCK_TYPES = {"text", "input_text", "output_text"}
@@ -140,32 +138,6 @@ def _call_extraction_llm(prompt: "str | list[dict[str, str]]", model: str = "",
         raise ExtractionUnavailableError(f"extraction call failed: {e}") from e
 
 
-def _sanitize_string_media(text: str) -> str:
-    if not text:
-        return ""
-    if not _MEDIA_DATA_URI_RE.search(text):
-        return text
-
-    # how MANY attachments, not merely "some": two inline data URIs in one
-    # string collapsed into a single indication, so the summariser could not tell one image
-    # from six (round-2 verify-4 #15).
-    media_count = len(_MEDIA_DATA_URI_RE.findall(text))
-    without_media = _MEDIA_DATA_URI_RE.sub("", text)
-    without_media = without_media.strip()
-    without_media = re.sub(r"\n{3,}", "\n\n", without_media)
-
-    marker = _MEDIA_ATTACHMENT_MARKER
-    suffix = _MEDIA_ATTACHMENT_SUFFIX
-    if media_count > 1:
-        marker = f"{_MEDIA_ATTACHMENT_MARKER[:-1]} ×{media_count}]"
-        suffix = f"{_MEDIA_ATTACHMENT_SUFFIX[:-1]} ×{media_count}]"
-    if not without_media:
-        return marker
-    if _MEDIA_ATTACHMENT_SUFFIX in without_media:
-        return without_media
-    return f"{without_media}\n{suffix}"
-
-
 def _looks_like_media_block(block_type: str, block: Dict[str, Any]) -> bool:
     if any(hint in block_type for hint in _MEDIA_BLOCK_HINTS):
         return True
@@ -253,7 +225,7 @@ def _sanitize_content_block(content: Any) -> str:
     if content is None:
         return ""
     if isinstance(content, str):
-        return _sanitize_string_media(content)
+        return content  # text is offered as the host wrote it (#56)
     if isinstance(content, list):
         parts: List[str] = []
         media_count = 0  # how many, not merely "some" (audit p05 EX03)
@@ -497,92 +469,52 @@ def strip_injected_context_blocks(text: str, *, mark: bool = False, compact: boo
     return cleaned.strip() if changed else cleaned
 
 
-def _sanitize_json_like(value: Any) -> Any:
-    if isinstance(value, dict):
-        # a sanitised key may never take another key's place. Upstream
-        # rebuilt the dict from sanitised keys, so two keys that became identical collapsed and
-        # the first value was dropped outright: {"a<active_memory>x</active_memory>": "FIRST",
-        # "a": "SECOND"} became {"a": "SECOND"} — a whole tool argument gone with no marker
-        # (audit p05 EX04). The whole ORIGINAL keyspace is reserved first, so a sanitised name
-        # is used only when nothing else — sanitised or original — already claims it, in either
-        # insertion order (verify-4 #5).
-        original_keys = {key for key in value if isinstance(key, str)}
-        taken: set = set()
-        renamed: dict = {}
-        for key in value:
-            if not isinstance(key, str):
-                renamed[key] = key
-                continue
-            candidate = strip_injected_context_blocks(_sanitize_string_media(key))
-            if candidate != key and (candidate in original_keys or candidate in taken):
-                candidate = key  # the clean spelling is somebody else's; keep our own
-            if candidate in taken:
-                candidate = key
-            taken.add(candidate)
-            renamed[key] = candidate
-        sanitized = {renamed[key]: _sanitize_json_like(val) for key, val in value.items()}
-        # a KEY that was rewritten is a removal like any other, and it left
-        # no trace (round-3 verify-4 #9). The receipt rides in the object it happened in.
-        changed_keys = [key for key, candidate in renamed.items()
-                        if isinstance(key, str) and candidate != key]
-        if changed_keys:
-            receipt_key = "_lcm_key_sanitisation"
-            suffix = 0
-            while receipt_key in sanitized:
-                suffix += 1
-                receipt_key = f"_lcm_key_sanitisation_{suffix}"
-            shown = ", ".join(sorted(renamed[key] for key in changed_keys)[:10])
-            sanitized[receipt_key] = (
-                f"[LCM: {len(changed_keys)} key name(s) had injected context removed before "
-                f"summarising ({shown}); the stored message is unchanged — lcm_expand]"
-            )
-        return sanitized
-    if isinstance(value, list):
-        return [_sanitize_json_like(item) for item in value]
-    if isinstance(value, str):
-        # a compact marker inside tool ARGUMENTS. The argument block has its
-        # own char budget, so the marker is the short form: enough to say a removal happened
-        # and how big it was, without the sentence that would displace real arguments
-        # (verify-4 #7).
-        return strip_injected_context_blocks(_sanitize_string_media(value), mark=True, compact=True)
-    return value
-
-
 def sanitize_pre_compaction_content(text: Any) -> str:
-    """Replace inline media/base64 payloads and transient injected context before compaction."""
-    return strip_injected_context_blocks(_sanitize_content_block(text), mark=True)
+    """Render a message's content as text for the summariser, changing nothing in it.
+
+    This used to remove inline media payloads and host-injected context blocks on the way to
+    the summariser, leaving markers behind. Both were LCM's own cuts to the source (#56): the
+    media marker claimed a whole medium for a payload it had only trimmed one line from, and
+    the injected block was a span the host had actually put in the conversation. The source is
+    the message now; only STRUCTURE is projected, because the summariser reads text and a
+    content list is not text. That projection's own losses (a media block becoming a marker)
+    are #31 MC01 and are not made worse here.
+
+    Nothing here removes a part or spills a file. A payload the configured summary route
+    cannot process fails at that route — `escalation.summarize_with_escalation` raises
+    `SummaryUnavailableError`, the leaf rescue retries with smaller chunks, and the raw
+    messages stay in context — which is the fail-before-loss outcome the contract asks for.
+    Steering by recalled text is handled where it costs nothing: the summariser's source is
+    carried inside `prompt_boundary.build_untrusted_data_messages`, whose system role says the
+    sources are untrusted evidence and never an instruction channel.
+    """
+    if isinstance(text, str):
+        return text
+    return _sanitize_content_block(text)
 
 
 def sanitize_pre_compaction_tool_arguments(arguments: Any) -> str:
-    """Clean tool-call argument payloads while preserving JSON-like structure when possible."""
+    """Render tool-call arguments for the summariser and for raw expansion, unchanged.
+
+    A valid JSON argument string was parsed and re-serialised, so
+    `0.123456789012345678901234567890` reached both the summary source and `lcm_expand`'s
+    raw-row branch as `0.12345678901234568` — a value the provider never sent, in the one
+    place a reader goes to get the exact bytes (#56). The string a provider sent IS the
+    argument; it is returned as it stands, which also makes the duplicate-key and key-collision
+    hazards the round trip created impossible rather than detected.
+    """
     if arguments is None:
         return ""
+    if isinstance(arguments, str):
+        return arguments
     if isinstance(arguments, (dict, list)):
-        return json.dumps(_sanitize_json_like(arguments), ensure_ascii=False)
-    if not isinstance(arguments, str):
-        return sanitize_pre_compaction_content(arguments)
-    # duplicate JSON keys are collapsed by json.loads, so re-serialising a
-    # parsed copy silently dropped one of two values a provider had really sent
-    # ({"k":"FIRST","k":"SECOND"} became {"k":"SECOND"}; verify-4 #5). Detect that and clean
-    # the raw text instead, which keeps both.
-    duplicate_keys = False
-
-    def _note_duplicates(pairs):
-        nonlocal duplicate_keys
-        seen: set = set()
-        for key, _value in pairs:
-            if key in seen:
-                duplicate_keys = True
-            seen.add(key)
-        return dict(pairs)
-
-    try:
-        parsed = json.loads(arguments, object_pairs_hook=_note_duplicates)
-    except Exception:
-        return sanitize_pre_compaction_content(arguments)
-    if duplicate_keys:
-        return sanitize_pre_compaction_content(arguments)
-    return json.dumps(_sanitize_json_like(parsed), ensure_ascii=False)
+        # already a structure rather than the provider's own text: JSON is the
+        # faithful rendering of it, and there is no original string to preserve instead.
+        try:
+            return json.dumps(arguments, ensure_ascii=False)
+        except Exception:
+            return json.dumps(arguments, ensure_ascii=False, default=str)
+    return sanitize_pre_compaction_content(arguments)
 
 
 def extract_before_compaction(

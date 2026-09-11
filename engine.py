@@ -5865,7 +5865,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                 )
                 if externalized:
                     # the placeholder alone does not hint at what was externalized; the
-                    # head comes from the same sanitised text an inline result would show
+                    # head comes from the same rendering an inline result would show
                     content = externalized["placeholder"] + marked_loss.externalized_head_note(
                         sanitize_pre_compaction_content(content)
                     )

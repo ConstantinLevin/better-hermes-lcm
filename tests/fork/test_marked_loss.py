@@ -685,7 +685,6 @@ def test_transcript_gc_never_rewrites_a_row_against_a_sanitized_only_payload(tmp
     unrecoverable loss.
     """
     from hermes_lcm.externalize import maybe_externalize_tool_output
-    from hermes_lcm.extraction import sanitize_pre_compaction_content
     e = _engine(
         tmp_path, "gc.db",
         large_output_externalization_enabled=True,
@@ -698,14 +697,19 @@ def test_transcript_gc_never_rewrites_a_row_against_a_sanitized_only_payload(tmp
         e.on_session_start("gc", platform="cli", context_length=200_000)
         original = ("<active_memory>injected block</active_memory>\n"
                     "THE DECISION WAS TO CANCEL THE LAUNCH\n" + "z" * 400)
-        sanitized = sanitize_pre_compaction_content(original)
-        assert sanitized != original, "fixture must exercise the sanitising path"
+        # fork: better-hermes-lcm — the partial payload used to be built by running the row
+        # through `sanitize_pre_compaction_content`, which removed the injected block. That
+        # helper no longer removes anything (#56), so the shortfall is made here instead. The
+        # property under test is unchanged and is the reason the fixture exists: a payload that
+        # does not hold the row's bytes may never authorise replacing the row with a reference.
+        partial = original.replace("<active_memory>injected block</active_memory>\n", "")
+        assert partial != original, "fixture must exercise the partial-payload path"
 
         store_id = e._store.append("gc", {"role": "tool", "tool_call_id": "c1",
                                           "content": original}, source="cli")
         e._store._conn.commit()
-        # a payload that holds only the SANITIZED text
-        assert maybe_externalize_tool_output(sanitized, tool_call_id="c1", session_id="gc",
+        # a payload that holds only PART of the row's text
+        assert maybe_externalize_tool_output(partial, tool_call_id="c1", session_id="gc",
                                              config=e._config, hermes_home=e._hermes_home,
                                              force=True) is not None
 
