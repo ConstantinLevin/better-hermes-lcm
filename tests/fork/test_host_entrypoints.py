@@ -350,7 +350,11 @@ def test_a_node_and_its_sidecar_are_published_together_or_not_at_all(tmp_path, m
             raise RuntimeError("sidecar write refused")
 
         monkeypatch.setattr(dag.node_meta, "write_statement", _refuse)
-        with pytest.raises(Exception):
+        # the error is pinned, not merely "something raised": a bare `raises(Exception)` is the
+        # same vacuity as catching one — a renamed `add_node_with_meta` would raise AttributeError,
+        # satisfy the context manager, and leave `get_session_nodes(...) == []` trivially true
+        # because nothing was ever published
+        with pytest.raises(RuntimeError, match="sidecar"):
             dag.add_node_with_meta(node, level=2)
 
         assert dag.get_session_nodes("atomic") == [], (

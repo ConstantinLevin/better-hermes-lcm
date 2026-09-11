@@ -4,16 +4,24 @@ intact, the engine's cooldown is armed and the host reports the block as `cooldo
 
 Two modes, and the difference is the point of #14:
 
-* **optional** (the default, for a developer box): a missing hermes-agent checkout or a missing
-  host dependency skips. That is deliberate and stays.
+* **optional** (the default, for a developer box): a missing hermes-agent checkout skips, and so
+  does a host dependency that is missing when one of the three module imports below reaches for
+  it. That is deliberate and stays.
 * **binding** (``LCM_REQUIRE_HOST=1``, which the CI host lane sets): the same conditions are
   FAILURES. A run that was supposed to prove the plugin works against a named host revision and
   instead proved nothing must not report success — a green skip is the dishonest-empty-result
   this fork forbids, wearing a test runner's colours.
 
-Only the host IMPORTS are excused, in either mode. The `try` that used to catch `ImportError`
-wrapped the `yield` too, so an `ImportError` raised anywhere in a test body — a real failure of
-the integration — came back as "host not importable" and skipped; the body now runs outside it.
+Only those three imports are excused, and only they. Two things are NOT, in either mode. The
+`try` used to wrap the `yield` too, so an `ImportError` raised anywhere in a test body — a real
+failure of the integration — came back as "host not importable" and skipped; the body now runs
+outside it. And the host's own ``tools`` package is exec'd earlier, before the excused block, so a
+dependency that fails THERE raises in both modes and ``_restore()`` never runs — leaving
+``sys.path`` and the environment swapped for the rest of the session. That is a real leak, not a
+tidiness point; it is left as a recorded finding rather than fixed blind, because moving the
+restore under a wrapper changes when the host's ``tools`` is visible and this file's comments say
+that ordering has bitten before.
+
 The gate is checked at the point of failure rather than at collection, so "no checkout" and "not
 importable, <exc>" stay two different facts and each says which it is.
 """

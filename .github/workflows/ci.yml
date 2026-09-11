@@ -92,6 +92,11 @@ jobs:
       - name: Run pytest under low file descriptor limit
         run: |
           ulimit -n 1024
+          # scripts/test.sh sets this and bare pytest does not. This job runs the whole suite, so
+          # it is the one most exposed: the plugin refuses a SQLite file whose parent directory is
+          # group- or other-writable, and a runner defaulting to umask 002 would fail every test
+          # that opens a store, for a reason that has nothing to do with the change under test.
+          umask 077
           python -m pytest tests/ -q
 
       - name: Run static validation
