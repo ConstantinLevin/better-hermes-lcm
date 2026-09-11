@@ -600,6 +600,75 @@ def envelope_summary_suffix(envelope: dict) -> str:
     return "".join(parts)
 
 
+HOST_MESSAGE_TIME_SOURCE = "host_message_timestamp"
+
+
+def _resolve_message_times(msg: dict) -> tuple:
+    """``(source_time, source_kind, ingest_time)`` for either message shape.
+
+    ``store.py`` makes the same distinction with the same test: a dict that carries
+    ``store_id`` came out of the store, where ``timestamp`` is the LCM WRITE time and the
+    host's own time sits in ``observed_at``. A live host message has only ``timestamp``, and
+    that one IS the host's time. Conflating the two would let a replayed conversation look as
+    though every turn happened at import.
+    """
+    stored_shape = any(key in msg for key in ("store_id", "observed_at", "ingested_at"))
+    if stored_shape:
+        ingest = msg.get("ingested_at")
+        if ingest in (None, ""):
+            ingest = msg.get("timestamp")
+        return msg.get("observed_at"), msg.get("observed_at_source") or "", ingest
+    return msg.get("timestamp"), HOST_MESSAGE_TIME_SOURCE, None
+
+
+def _render_message_time(value: Any) -> str:
+    """A time as ISO-8601 UTC, ``unknown``, or the raw value when it cannot be represented."""
+    # the store's OWN rule decides what is representable, so the source text and
+    # the observed_at column can never disagree about which times are real.
+    from .store import _normalize_observed_at
+
+    if value in (None, ""):
+        return "unknown"
+    normalized = _normalize_observed_at(value)
+    if normalized is None:
+        # a time the column cannot hold is still the only record of when the turn
+        # happened; store._envelope_extra_json keeps it as timestamp_raw for the same reason.
+        return f"unparsed({content_head(value, limit=120)})"
+    from datetime import datetime, timezone
+
+    return datetime.fromtimestamp(normalized, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def message_time_note(msg: dict) -> str:
+    """Offer the summariser this message's source time and ingest time, separately.
+
+    ``The meeting is tomorrow.`` reached the model with no date at all, and two messages from
+    different days serialised to identical bytes: ``_message_envelope_fields`` excludes
+    ``timestamp``/``observed_at``/``ingested_at`` and nothing added them back (#37). The two
+    kinds are named rather than merged into one unqualified number, and an absent source time
+    says ``unknown`` — it is never filled in with the ingest time, which would invent an event
+    time the host never gave.
+    """
+    if not isinstance(msg, dict):
+        return ""
+    source_raw, source_kind, ingest_raw = _resolve_message_times(msg)
+    envelope = msg.get("envelope")
+    if source_raw in (None, "") and isinstance(envelope, dict):
+        # the store parks a host time it cannot represent here rather than dropping it
+        source_raw = envelope.get("timestamp_raw")
+        source_kind = source_kind or HOST_MESSAGE_TIME_SOURCE
+    source_text = _render_message_time(source_raw)
+    parts = [f"source_time={source_text}"]
+    if source_kind and source_text != "unknown":
+        parts[0] += f" ({source_kind})"
+    # the ingest time is offered only where the message actually carries one. A live
+    # host message has none, and printing "ingest_time=unknown" on every turn would spend the
+    # summariser's source on a field this path never has rather than on the conversation.
+    if ingest_raw not in (None, ""):
+        parts.append(f"ingest_time={_render_message_time(ingest_raw)}")
+    return " [time: " + ", ".join(parts) + "]"
+
+
 def acknowledgement_only_marker(content: str) -> str:
     """an acknowledgement-shaped turn removed from the summariser's input.
 

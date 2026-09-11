@@ -6801,7 +6801,12 @@ class TestExtraction:
             }
         ])
 
-        assert "[USER]: [Media attachment]" == serialized
+        # fork: better-hermes-lcm — this asserted `"[USER]: [Media attachment]" == serialized`.
+        # Every serialized message now carries the host's own message time, separately from
+        # LCM's ingest time (#37), so an equality over the whole line can no longer hold. What
+        # the test is about — that a pure inline media message renders as the marker — is
+        # unchanged here.
+        assert serialized.startswith("[USER]: [Media attachment]"), serialized
         assert "data:image/png;base64" not in serialized
 
     def test_serialize_messages_preserves_text_but_replaces_inline_media_suffix(self, tmp_path):

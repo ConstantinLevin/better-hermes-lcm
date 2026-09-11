@@ -6154,6 +6154,15 @@ def lcm_expand(args: Dict[str, Any], **kwargs) -> str:
             "conversation_id": stored.get("conversation_id") or "",
             "role": stored.get("role"),
             "timestamp": stored.get("timestamp", 0),
+            # `timestamp` is the ingest column and was the only time this path
+            # returned, unqualified, so a reader could not tell LCM's write time from the
+            # host's own message time — and the host's was not returned at all (#37). Both
+            # kinds are named; `observed_at` is null when the host sent no usable time, which
+            # is not the same thing as "it happened when we wrote it".
+            "timestamp_kind": "lcm_ingest_time",
+            "ingested_at": stored.get("ingested_at") or stored.get("timestamp", 0),
+            "observed_at": stored.get("observed_at"),
+            "observed_at_source": stored.get("observed_at_source") or "",
             "tool_call_id": stored.get("tool_call_id") or "",
             "from_current_session": bool(engine_session_id) and stored_session_id == engine_session_id,
             "content": sliced["content"],

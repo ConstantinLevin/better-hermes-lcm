@@ -5875,6 +5875,8 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                     content = marked_loss.elide_text(  # marked
                         content, serialize_cap, original_chars=raw_chars
                     )
+                # the host's own message time, kept apart from LCM's write time (#37)
+                content += marked_loss.message_time_note(msg)
                 content += marked_loss.envelope_summary_suffix(  # round-3 verify-4 #8
                     self._message_envelope_fields(msg)
                 )
@@ -5936,6 +5938,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                     for tc in unrepresentable_calls:
                         tc_parts.append(marked_loss.unrepresentable_tool_call_note(tc))
                     content += "\n[Tool calls:\n" + "\n".join(tc_parts) + "\n]"
+                content += marked_loss.message_time_note(msg)  # source time, not ingest (#37)
                 content += marked_loss.envelope_summary_suffix(  # round-3 verify-4 #8
                     self._message_envelope_fields(msg)
                 )
@@ -5945,6 +5948,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
             content = marked_loss.elide_text(  # marked
                 content, serialize_cap, original_chars=raw_chars
             )
+            content += marked_loss.message_time_note(msg)  # source time, not ingest (#37)
             content += marked_loss.envelope_summary_suffix(  # round-3 verify-4 #8
                 self._message_envelope_fields(msg)
             )
