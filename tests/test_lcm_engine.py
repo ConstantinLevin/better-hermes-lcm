@@ -10220,10 +10220,12 @@ class TestEngineCompress:
             assert match, serialized
             # fork: better-hermes-lcm — this asserted `"literal XML docs" not in serialized`,
             # which held only because the head note was stripped of injected-context tags. The
-            # source pre-processing no longer removes spans from a message (#56), so the head
-            # of the externalized output shows the payload's own first characters. The point of
-            # the test — that the whole payload is recoverable byte-identical through the ref —
-            # is asserted below and unchanged.
+            # source pre-processing no longer removes spans from a message (#56), so
+            # externalized_head_note(sanitize_pre_compaction_content(content)) at
+            # engine.py:5869-5871 now carries the payload's OWN text. The assertion is
+            # inverted, not dropped. The point of the test — that the whole payload is
+            # recoverable byte-identical through the ref — is asserted below and unchanged.
+            assert "literal XML docs" in serialized, serialized
             expanded = json.loads(lcm_tools.lcm_expand({"externalized_ref": match.group(1), "max_tokens": 100_000}, engine=instance))
             assert expanded["content"] == payload
         finally:

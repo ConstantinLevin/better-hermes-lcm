@@ -77,6 +77,52 @@ def test_every_short_envelope_field_is_rendered_not_only_the_first_ten(engine):
         assert f"value_{index:02d}" in serialized, (index, serialized)
 
 
+def test_an_envelope_value_obeys_the_operator_s_sensitive_pattern_policy(tmp_path):
+    """Offering the value (#67) must not walk it past a policy the operator switched on.
+
+    `engine.py` redacts content and tool arguments before serialising, and ingest redacts
+    content only, so an envelope field was the one way a configured pattern reached the model
+    in plaintext. The repair is redaction, not removal: the field is still offered.
+    """
+    e = LCMEngine(
+        config=LCMConfig(database_path=str(tmp_path / "redact.db"),
+                         sensitive_patterns_enabled=True),
+        hermes_home=str(tmp_path),
+    )
+    e.on_session_start("red", platform="cli", context_length=262_144)
+    try:
+        serialized = e._serialize_messages([
+            {"role": "user", "content": "api_key=SUPERSECRETVALUE1234567890",
+             "api_content": "api_key=SUPERSECRETVALUE1234567890",
+             "finish_reason": "stop"},
+        ])
+        assert "SUPERSECRETVALUE1234567890" not in serialized, serialized
+        # ... and the field is still offered, not removed
+        assert "api_content" in serialized, serialized
+        assert "finish_reason=stop" in serialized, serialized
+    finally:
+        e.shutdown()
+
+
+def test_an_envelope_key_named_like_a_host_field_is_not_dropped_for_its_name(engine):
+    """#67 removed a name-based rule about what the model may see; `lcm_`-prefixed HOST keys
+    were still being dropped by one, with no receipt."""
+    serialized = engine._serialize_messages([
+        {"role": "assistant", "content": "done", "lcm_run_label": "nightly-rollback"},
+    ])
+    assert "nightly-rollback" in serialized, serialized
+
+
+def test_an_lcm_internal_envelope_key_is_named_rather_than_dropped_in_silence(engine):
+    serialized = engine._serialize_messages([
+        {"role": "assistant", "content": "done",
+         "envelope": {"_lcm_internal": "bookkeeping", "finish_reason": "stop"}},
+    ])
+    assert "_lcm_internal" in serialized, serialized
+    assert "lcm_expand" in serialized, serialized
+    assert "finish_reason=stop" in serialized, serialized
+
+
 def test_an_unrenderable_value_is_named_while_its_renderable_neighbour_is_shown(engine):
     """Fail-visibly, never silently, and never take one bad field's neighbours down with it."""
     class _Unrenderable:

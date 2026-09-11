@@ -6893,7 +6893,7 @@ class TestExtraction:
         assert "[Media attachment]" not in serialized
         assert "[with media attachment]" not in serialized
 
-    def test_serialize_messages_sanitizes_tool_call_arguments_media_payloads(self, tmp_path):
+    def test_serialize_messages_keeps_tool_call_argument_media_payloads(self, tmp_path):
         from hermes_lcm.config import LCMConfig
         from hermes_lcm.engine import LCMEngine
 
@@ -6923,7 +6923,7 @@ class TestExtraction:
         assert '{"image":"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAUA"}' in serialized
         assert "[Media attachment]" not in serialized
 
-    def test_serialize_messages_sanitizes_parsed_tool_call_arguments_media_payloads(self, tmp_path):
+    def test_serialize_messages_keeps_parsed_tool_call_argument_media_payloads(self, tmp_path):
         from hermes_lcm.config import LCMConfig
         from hermes_lcm.engine import LCMEngine
 
@@ -7190,7 +7190,7 @@ class TestExtraction:
         assert payload["tool_call_id"] == "call_big_custom"
         assert payload["content"] == content
 
-    def test_run_pre_compaction_extraction_uses_media_cleaned_text(self, tmp_path):
+    def test_run_pre_compaction_extraction_uses_the_message_text_unchanged(self, tmp_path):
         from hermes_lcm.config import LCMConfig
         from hermes_lcm.engine import LCMEngine
         import hermes_lcm.extraction as ext_module

@@ -75,8 +75,11 @@ def test_a_source_time_that_cannot_be_represented_is_offered_verbatim_not_as_unk
     serialized = engine._serialize_messages([
         {"role": "user", "content": "see you then", "timestamp": "next tuesday"},
     ])
-    assert "source_time=unparsed(next tuesday)" in serialized, serialized
+    assert "source_time=unparsed(next tuesday" in serialized, serialized
     assert "source_time=unknown" not in serialized, serialized
+    # the note flattens and caps the raw value for one line, so it says where the
+    # unflattened one is; the raw time is in no other part of the source
+    assert "envelope_extra.timestamp_raw" in serialized, serialized
 
 
 def test_an_unrepresentable_stored_source_time_is_recovered_from_the_envelope(engine):
@@ -86,8 +89,11 @@ def test_an_unrepresentable_stored_source_time_is_recovered_from_the_envelope(en
          "observed_at": None, "observed_at_source": None,
          "envelope": {"timestamp_raw": "next tuesday"}},
     ])
-    assert "source_time=unparsed(next tuesday)" in serialized, serialized
+    assert "source_time=unparsed(next tuesday" in serialized, serialized
     assert "source_time=unknown" not in serialized, serialized
+    # the note flattens and caps the raw value for one line, so it says where the
+    # unflattened one is; the raw time is in no other part of the source
+    assert "envelope_extra.timestamp_raw" in serialized, serialized
 
 
 def test_default_raw_expansion_names_its_time_kinds_and_returns_the_source_time(engine):

@@ -5835,6 +5835,21 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
         """Serialize messages into labeled text for the summarizer."""
         parts = []
         matched_tool_ids = _matched_tool_call_ids(messages)
+
+        def envelope_suffix(message: Dict[str, Any]) -> str:
+            # the envelope goes through the SAME redaction as the content and the
+            # tool arguments below. Offering its values instead of their names (#67) put them
+            # in front of the model, and nothing else redacts them — ingest protects `content`
+            # only — so a pattern the operator switched on was applied to a turn's text and
+            # silently bypassed by the sidecar beside it. Redact, THEN render: rendering first
+            # would match the operator's patterns against our own marker text.
+            envelope = redact_sensitive_value(
+                self._message_envelope_fields(message),
+                self._config,
+                parse_json_strings=True,
+            )
+            return marked_loss.envelope_summary_suffix(envelope)  # round-3 verify-4 #8
+
         # 0 means NO CAP, not "cap at 64". Upstream cut every message to
         # 3000 chars; this fork does not truncate at any window, and an engine that has not
         # learned its window yet must not fall back to a tiny cap either (the curve's value is
@@ -5877,9 +5892,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                     )
                 # the host's own message time, kept apart from LCM's write time (#37)
                 content += marked_loss.message_time_note(msg)
-                content += marked_loss.envelope_summary_suffix(  # round-3 verify-4 #8
-                    self._message_envelope_fields(msg)
-                )
+                content += envelope_suffix(msg)
                 parts.append(f"[TOOL RESULT {tool_id}]: {content}")
                 continue
 
@@ -5932,9 +5945,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                         tc_parts.append(marked_loss.unrepresentable_tool_call_note(tc))
                     content += "\n[Tool calls:\n" + "\n".join(tc_parts) + "\n]"
                 content += marked_loss.message_time_note(msg)  # source time, not ingest (#37)
-                content += marked_loss.envelope_summary_suffix(  # round-3 verify-4 #8
-                    self._message_envelope_fields(msg)
-                )
+                content += envelope_suffix(msg)
                 parts.append(f"[ASSISTANT]: {content}")
                 continue
 
@@ -5942,9 +5953,7 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                 content, serialize_cap, original_chars=raw_chars
             )
             content += marked_loss.message_time_note(msg)  # source time, not ingest (#37)
-            content += marked_loss.envelope_summary_suffix(  # round-3 verify-4 #8
-                self._message_envelope_fields(msg)
-            )
+            content += envelope_suffix(msg)
             parts.append(f"[{role.upper()}]: {content}")
 
         return "\n\n".join(parts)

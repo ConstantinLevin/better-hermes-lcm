@@ -491,26 +491,45 @@ def leading_turns_dropped_marker(dropped: int, roles: List[str]) -> str:
 _INLINE_ENVELOPE_VALUE_MAX_CHARS = 200
 
 
-def _is_empty_envelope_value(value: Any) -> bool:
+def _is_blank_value(value: Any) -> bool:
+    """Empty, for a value that may have a hostile ``__eq__``.
+
+    A value whose comparison raises is still a value, and this is called per message on the
+    compaction path: letting it propagate would fail the whole leaf over one odd field.
+    """
     try:
         return value in (None, "", [], {})
-    except Exception:  # pragma: no cover - a value with a hostile __eq__ is still a value
+    except Exception:  # pragma: no cover - defensive
         return False
 
 
-def _envelope_items(envelope: dict) -> tuple[List[tuple], List[tuple]]:
-    """Split an envelope into (inline scalar fields, fields that need their own rendering).
+# The ONE prefix this module refuses to offer: the fork's own internal keys. It matches
+# ``store._envelope_extra_json``, which refuses the same prefix when it writes the archive, so
+# this drops only what the store would never have held anyway — a row carrying one came from
+# another build or an import. It was ``lcm_`` (no leading underscore), which is not that
+# prefix: it matched ordinary host keys instead, and dropping a host field because of its NAME
+# is the exact mechanism #67 exists to remove. Anything it does drop is named in a receipt.
+_INTERNAL_ENVELOPE_KEY_PREFIX = "_lcm"
+
+
+def _envelope_items(envelope: dict) -> tuple[List[tuple], List[tuple], List[str]]:
+    """Split an envelope into (inline scalar fields, fields needing their own rendering, dropped).
 
     Inline entries carry the value already rendered as text; the others carry it as it is, so
     the caller can decide between a full JSON rendering (the summary source) and a name
-    (a bounded preview such as ``lcm_load_session``).
+    (a bounded preview such as ``lcm_load_session``). The third list is the fork's own internal
+    keys, which are never offered as values and are named instead.
     """
     inline: List[tuple] = []
     rest: List[tuple] = []
+    internal: List[str] = []
     if not isinstance(envelope, dict):
-        return inline, rest
+        return inline, rest, internal
     for key, value in envelope.items():
-        if not isinstance(key, str) or key.startswith("lcm_") or _is_empty_envelope_value(value):
+        if not isinstance(key, str) or _is_blank_value(value):
+            continue
+        if key.startswith(_INTERNAL_ENVELOPE_KEY_PREFIX):
+            internal.append(key)
             continue
         if not isinstance(value, (dict, list)):
             try:
@@ -522,7 +541,7 @@ def _envelope_items(envelope: dict) -> tuple[List[tuple], List[tuple]]:
                 inline.append((key, rendered))
                 continue
         rest.append((key, value))
-    return inline, rest
+    return inline, rest, internal
 
 
 def envelope_inventory(envelope: dict) -> tuple[dict, list[str]]:
@@ -538,10 +557,12 @@ def envelope_inventory(envelope: dict) -> tuple[dict, list[str]]:
     inline: dict = {}
     if not isinstance(envelope, dict):
         return inline, []
-    inline_fields, rest = _envelope_items(envelope)
+    inline_fields, rest, internal = _envelope_items(envelope)
     for key, _rendered in inline_fields:
         inline[key] = envelope[key]
-    return inline, sorted(key for key, _value in rest)
+    # the internal keys are NAMED here too, not dropped: this listing is what the
+    # reader's `envelope_recover_with` pointer is built from.
+    return inline, sorted([key for key, _value in rest] + internal)
 
 
 def _envelope_json(value: Any) -> "str | None":
@@ -570,7 +591,7 @@ def envelope_summary_suffix(envelope: dict) -> str:
     """
     if not isinstance(envelope, dict) or not envelope:
         return ""
-    inline_fields, rest = _envelope_items(envelope)
+    inline_fields, rest, internal = _envelope_items(envelope)
     parts = []
     if inline_fields:
         # every inline field, not the first ten: the list used to be cut at ten with
@@ -591,11 +612,20 @@ def envelope_summary_suffix(envelope: dict) -> str:
             rendered = _envelope_json(verbatim) if verbatim else None
         if rendered is not None and verbatim:
             parts.append(f"\n[envelope (verbatim): {rendered}]")
+    # the two reasons a field is named instead of shown, each said plainly: no
+    # serialisation of it exists, or it is one of the fork's own internal keys. Neither is a
+    # judgement about a HOST field's name, and neither is silent.
     if unrenderable:
         shown = ", ".join(sorted(unrenderable))
         parts.append(
             f"\n{RECEIPT_LINE_PREFIX} {len(unrenderable)} envelope field(s) could not be "
             f"rendered here ({shown}); the stored message holds them — lcm_expand]"
+        )
+    if internal:
+        shown = ", ".join(sorted(internal))
+        parts.append(
+            f"\n{RECEIPT_LINE_PREFIX} {len(internal)} LCM-internal envelope key(s) are not "
+            f"offered here ({shown}); the stored message holds them — lcm_expand]"
         )
     return "".join(parts)
 
@@ -615,7 +645,7 @@ def _resolve_message_times(msg: dict) -> tuple:
     stored_shape = any(key in msg for key in ("store_id", "observed_at", "ingested_at"))
     if stored_shape:
         ingest = msg.get("ingested_at")
-        if ingest in (None, ""):
+        if _is_blank_value(ingest):
             ingest = msg.get("timestamp")
         return msg.get("observed_at"), msg.get("observed_at_source") or "", ingest
     return msg.get("timestamp"), HOST_MESSAGE_TIME_SOURCE, None
@@ -627,13 +657,19 @@ def _render_message_time(value: Any) -> str:
     # the observed_at column can never disagree about which times are real.
     from .store import _normalize_observed_at
 
-    if value in (None, ""):
+    if _is_blank_value(value):
         return "unknown"
     normalized = _normalize_observed_at(value)
     if normalized is None:
         # a time the column cannot hold is still the only record of when the turn
-        # happened; store._envelope_extra_json keeps it as timestamp_raw for the same reason.
-        return f"unparsed({content_head(value, limit=120)})"
+        # happened; store._envelope_extra_json keeps it as timestamp_raw for exactly that
+        # reason (store.py:203-205). content_head flattens and caps the raw value for this
+        # one line, so the line says where the unflattened one is — the raw time appears
+        # nowhere else in the source (engine._message_envelope_fields excludes `timestamp`).
+        return (
+            f"unparsed({content_head(value, limit=120)}"
+            "; full value in envelope_extra.timestamp_raw — lcm_expand)"
+        )
     from datetime import datetime, timezone
 
     return datetime.fromtimestamp(normalized, tz=timezone.utc).isoformat().replace("+00:00", "Z")
@@ -653,7 +689,7 @@ def message_time_note(msg: dict) -> str:
         return ""
     source_raw, source_kind, ingest_raw = _resolve_message_times(msg)
     envelope = msg.get("envelope")
-    if source_raw in (None, "") and isinstance(envelope, dict):
+    if _is_blank_value(source_raw) and isinstance(envelope, dict):
         # the store parks a host time it cannot represent here rather than dropping it
         source_raw = envelope.get("timestamp_raw")
         source_kind = source_kind or HOST_MESSAGE_TIME_SOURCE
@@ -664,7 +700,7 @@ def message_time_note(msg: dict) -> str:
     # the ingest time is offered only where the message actually carries one. A live
     # host message has none, and printing "ingest_time=unknown" on every turn would spend the
     # summariser's source on a field this path never has rather than on the conversation.
-    if ingest_raw not in (None, ""):
+    if not _is_blank_value(ingest_raw):
         parts.append(f"ingest_time={_render_message_time(ingest_raw)}")
     return " [time: " + ", ".join(parts) + "]"
 

@@ -677,12 +677,11 @@ def test_search_failure_is_reported_not_returned_as_no_matches(tmp_path, monkeyp
         e.shutdown()
 
 
-def test_transcript_gc_never_rewrites_a_row_against_a_sanitized_only_payload(tmp_path):
+def test_transcript_gc_never_rewrites_a_row_against_a_partial_payload(tmp_path):
     """Audit p01 E12 / B21: GC looked up a SANITIZED copy of the row first and accepted that
-    match, so a payload holding only the sanitized text authorised replacing the row with a
-    reference to it. Sanitisation removes whole injected blocks — what it removed would then
-    exist nowhere. Failing to GC is a missed optimisation; GC against a partial payload is
-    unrecoverable loss.
+    match, so a payload holding only part of the row's text authorised replacing the row with a
+    reference to it — and what the payload did not hold would then exist nowhere. Failing to GC
+    is a missed optimisation; GC against a partial payload is unrecoverable loss.
     """
     from hermes_lcm.externalize import maybe_externalize_tool_output
     e = _engine(
