@@ -1412,6 +1412,12 @@ class TestEscalationStripReasoning:
         class _FakeChoice:
             def __init__(self, content):
                 self.message = _FakeMessage(content)
+                # fork: better-hermes-lcm — this double carried no finish_reason and the
+                # summariser accepted it anyway. The test is about reasoning stripping, not
+                # about how a generation ends, so it now declares the terminal state every
+                # supported host adapter sets (#32: a generation counts as finished only on
+                # positive evidence, so absent terminal evidence is refused).
+                self.finish_reason = "stop"
 
         class _FakeResponse:
             def __init__(self, content):
@@ -1471,6 +1477,10 @@ class TestEscalationStripReasoning:
         class _FakeChoice:
             def __init__(self, content):
                 self.message = _FakeMessage(content)
+                # fork: better-hermes-lcm — see the double above; an unclosed reasoning block
+                # must be discarded for its OWN reason (the text is reasoning, not a summary),
+                # which is only reachable once the response declares that it terminated (#32).
+                self.finish_reason = "stop"
 
         class _FakeResponse:
             def __init__(self, content):
@@ -1593,10 +1603,15 @@ class TestEscalationStripReasoning:
 
         def fake_call_llm(**kwargs):
             calls.append(kwargs)
+            # fork: better-hermes-lcm — the double carried no finish_reason, so this
+            # condensation published on a response that never said it had finished. The test
+            # is about node lineage and the prompt boundary, so the double now declares the
+            # terminal state every supported host adapter sets (#32).
             return SimpleNamespace(
                 choices=[
                     SimpleNamespace(
-                        message=SimpleNamespace(content="Grounded persisted condensation.")
+                        message=SimpleNamespace(content="Grounded persisted condensation."),
+                        finish_reason="stop",
                     )
                 ]
             )

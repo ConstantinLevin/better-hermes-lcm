@@ -2242,21 +2242,22 @@ def _synthesize_expansion_answer(
     }
     apply_lcm_model_route(call_kwargs, model)
     response = call_llm(**call_kwargs)
-    choice = response.choices[0]
-    content = choice.message.content
-    if not isinstance(content, str):
-        content = str(content) if content else ""
-    from .escalation import _TRUNCATED_FINISH_REASONS, _strip_reasoning_blocks
+    from .escalation import _strip_reasoning_blocks
+    from .generation_contract import evaluate_generation, generation_text
+    content = generation_text(response)
     # a synthesised answer that stopped at the generation limit was returned
-    # as an ordinary complete answer (round-2 verify-4 #24). The caller labels it.
-    finish_reason = str(getattr(choice, "finish_reason", "") or "").strip().lower()
-    response_status = str(getattr(response, "status", "") or "").strip().lower()
-    unfinished = ""
-    if finish_reason in _TRUNCATED_FINISH_REASONS:
-        unfinished = f"the route stopped at its generation limit (finish_reason={finish_reason})"
-    elif response_status == "incomplete" or getattr(response, "incomplete_details", None):
-        unfinished = "the provider reported an incomplete response"
-    _LAST_SYNTHESIS_STATUS.unfinished = unfinished
+    # as an ordinary complete answer (round-2 verify-4 #24). The caller labels it. The same
+    # positive terminal test the summariser uses applies here — this route reaches the host
+    # through the same fabricating adapters (#32) — and the two outcomes stay apart: a route
+    # that reported a generation limit produced a genuine prefix of an answer, while a route
+    # that never said it finished (or said it failed) produced text of unknown provenance,
+    # which the caller refuses rather than labels.
+    outcome = evaluate_generation(response, requested_max_tokens=max_tokens)
+    _LAST_SYNTHESIS_STATUS.unfinished = (
+        f"the route stopped at its generation limit ({outcome.reason})"
+        if outcome.cut else ""
+    )
+    _LAST_SYNTHESIS_STATUS.refused = "" if outcome.cut else outcome.reason
     return _strip_reasoning_blocks(content).strip()
 
 
@@ -6704,6 +6705,10 @@ def lcm_expand_query(args: Dict[str, Any], **kwargs) -> str:
             "query": query,
             "error": reason,
             "degraded": True,
+            # a degraded answer carried no `complete` key at all, so a reader
+            # that asks the same question of every payload got None here and nothing to say
+            # why. A refusal is the one thing that is certainly not complete (#32).
+            "complete": False,
             "model": model,
             "max_tokens": max_tokens,
             "context_max_tokens": context_max_tokens,
@@ -6721,6 +6726,7 @@ def lcm_expand_query(args: Dict[str, Any], **kwargs) -> str:
     timeout = engine.effective_expansion_timeout_ms / 1000  # curved
     try:
         _LAST_SYNTHESIS_STATUS.unfinished = ""  # see below
+        _LAST_SYNTHESIS_STATUS.refused = ""
         answer = _synthesize_expansion_answer(
             prompt=prompt,
             context_blocks=context_blocks,
@@ -6736,6 +6742,16 @@ def lcm_expand_query(args: Dict[str, Any], **kwargs) -> str:
         )
 
     answer_unfinished = str(getattr(_LAST_SYNTHESIS_STATUS, "unfinished", "") or "")
+    # a generation with no positive evidence that it ENDED is not an answer to label; its
+    # text could be anything from an aborted run. Refusing keeps the sources — the node ids,
+    # the matches and every pagination cursor are still in the payload, so the caller can read
+    # them itself (#32). This is the answer side; evidence coverage is reported separately.
+    answer_refused = str(getattr(_LAST_SYNTHESIS_STATUS, "refused", "") or "")
+    if answer_refused:
+        logger.warning("LCM expand_query synthesis refused: %s", answer_refused)
+        return _degraded_payload(
+            f"lcm_expand_query synthesis did not finish: {answer_refused}"
+        )
     answer = str(answer).strip() if answer is not None else ""
     if not answer:
         logger.warning("LCM expand_query synthesis returned an empty answer")

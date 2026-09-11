@@ -23,7 +23,12 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Optional
 
 from . import tokens as _token_module
-from .errors import SummaryUnavailableError
+from .errors import GenerationNotTerminatedError, SummaryUnavailableError
+from .generation_contract import (
+    TRUNCATED_FINISH_REASONS,
+    generation_text,
+    unterminated_generation_reason,
+)
 from .model_routing import apply_lcm_model_route
 from .prompt_boundary import build_untrusted_data_messages
 from .tokens import count_tokens
@@ -302,40 +307,26 @@ def _call_llm_for_summary(prompt: str | list[dict[str, str]], max_tokens: int,
             # out keeps them switched on.
             call_kwargs["extra_body"] = {"reasoning": {"effort": effort}}
         response = call_llm(**call_kwargs)
-        choice = response.choices[0]
-        # a summary that stopped at the generation limit is an UNFINISHED
-        # index, and upstream accepted it as a finished one: the node became durable and the
-        # topics after the cut point were indexed nowhere (audit p05 ES01). "stop" is not taken
-        # as proof of completion — some host paths fabricate it — but an explicit truncation
-        # reason is trusted, and the chunk is left raw for another route or a smaller retry.
-        finish_reason = str(getattr(choice, "finish_reason", "") or "").strip().lower()
-        # the RESPONSE can also declare itself unfinished while the choice
-        # still says "stop": a probe with status="incomplete" and incomplete_details had its
-        # truncated summary accepted and published (round-2 verify-3 #12). Either signal is
-        # enough to refuse the text.
-        response_status = str(getattr(response, "status", "") or "").strip().lower()
-        incomplete_details = getattr(response, "incomplete_details", None)
-        unfinished_reason = ""
-        if finish_reason in _TRUNCATED_FINISH_REASONS:
-            unfinished_reason = f"finish_reason={finish_reason}"
-        elif response_status == "incomplete" or incomplete_details:
-            unfinished_reason = (
-                f"status={response_status or 'incomplete'}"
-                + (f", incomplete_details={incomplete_details!r}"[:200] if incomplete_details else "")
-            )
+        # a summary the route did not FINISH is an unfinished index, and it was
+        # accepted as a finished one: the node became durable and the topics after the cut
+        # point were indexed nowhere (audit p05 ES01). The test is now positive — the response
+        # must declare a recognised terminal state and contradict it nowhere — because the
+        # host's adapters fabricate "stop" for a stream that ended without one and for a
+        # Responses run that reported `failed` (#32). See generation_contract.py.
+        unfinished_reason = unterminated_generation_reason(
+            response, requested_max_tokens=max_tokens
+        )
         if unfinished_reason:
             logger.warning(
-                "LCM summary rejected: the route stopped before finishing (%s, model=%s)",
+                "LCM summary rejected: the route did not finish the generation (%s, model=%s)",
                 unfinished_reason,
                 model or "<default>",
             )
-            _LAST_ROUTE_ERROR.error = SummaryUnavailableError(
+            _LAST_ROUTE_ERROR.error = GenerationNotTerminatedError(
                 f"route returned an unfinished summary ({unfinished_reason})"
             )
             return None
-        content = choice.message.content
-        if not isinstance(content, str):
-            content = str(content) if content else ""
+        content = generation_text(response)
         sanitized = _sanitize_reasoning_summary(content)
         if content.strip() and not sanitized:
             logger.warning(
@@ -425,10 +416,10 @@ def _summary_model_chain(primary_model: str = "", fallback_models: list[str] | t
     return chain
 
 
-# reasons that mean "the model was cut off", not "the model finished".
-_TRUNCATED_FINISH_REASONS = frozenset({
-    "length", "max_tokens", "max_output_tokens", "content_filter", "incomplete",
-})
+# the cut-off reasons now live with the rest of the generation contract
+# (generation_contract.py), which reads them beside the terminal states they are the negative
+# half of. The name stays here because three opt-in subsystems and the query route import it.
+_TRUNCATED_FINISH_REASONS = TRUNCATED_FINISH_REASONS
 
 
 class _RouteErrorSlot(threading.local):

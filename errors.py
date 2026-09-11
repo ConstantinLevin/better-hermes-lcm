@@ -19,3 +19,14 @@ class SummaryUnavailableError(RuntimeError):
     active context, the engine arms a compression-failure cooldown the host understands, and
     the turn continues uncompressed. See ``host_cooldown.py``.
     """
+
+
+class GenerationNotTerminatedError(SummaryUnavailableError):
+    """The route returned text without positive evidence that the generation finished.
+
+    A subclass, not a sibling, so every caller that already treats "the summariser was
+    unavailable" as fail-closed — the leaf rescue, the condensation guard, the host cooldown —
+    treats an unterminated generation exactly the same way, with no new handling anywhere.
+    The difference is only in what the message says, which is what the rescue predicate and the
+    operator read. See ``generation_contract.py`` for what counts as terminal evidence.
+    """

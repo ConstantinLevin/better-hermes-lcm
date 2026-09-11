@@ -176,8 +176,14 @@ class TestModelRouting:
 
 class TestProviderPrefixedAuxiliaryCalls:
     def _fake_response(self, content="ok"):
+        # fork: better-hermes-lcm — this double used to carry no finish_reason at all, and the
+        # summariser accepted it. These tests are about provider/model routing, not about how a
+        # generation ends, so the double now declares the terminal state every supported host
+        # adapter sets (#32: a generation counts as finished only on positive evidence, and a
+        # response that says nothing about how it ended is refused).
         return SimpleNamespace(
-            choices=[SimpleNamespace(message=SimpleNamespace(content=content))]
+            choices=[SimpleNamespace(message=SimpleNamespace(content=content),
+                                     finish_reason="stop")]
         )
 
     def _install_fake_auxiliary_client(self, monkeypatch, fake_call_llm):
