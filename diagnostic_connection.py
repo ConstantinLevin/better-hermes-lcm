@@ -45,6 +45,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator, Optional
 
 from .db_bootstrap import SQLITE_BUSY_TIMEOUT_MS, _database_path_for_connection
+from .sqlite_util import _temporary_sqlite_busy_timeout
 
 try:  # the host's cooperative per-thread interrupt bit. ``tools`` here is the
     # HOST's package: this plugin's tools.py is only importable as
@@ -84,6 +85,41 @@ DIAGNOSTIC_BUDGET_SECONDS = SQLITE_BUSY_TIMEOUT_MS / 1000.0 / 2
 _PROGRESS_INSTRUCTIONS = 1000
 
 
+def caller_connection_is_read_only(conn: sqlite3.Connection) -> bool:
+    """True when the caller opened this connection read-only.
+
+    Python's sqlite3 exposes no ``sqlite3_db_readonly``, so ask SQLite with the
+    one statement that is refused on a read-only connection and provably does
+    nothing on a writable one. With ``auto_vacuum`` NONE -- SQLite's default,
+    which this plugin never changes -- ``PRAGMA incremental_vacuum`` has no
+    freelist to work on: it leaves the database file and the WAL byte-identical
+    and neither starts nor joins a transaction (measured: inside a foreign
+    transaction the pending row stays pending and the owner's rollback still
+    discards it). Under any other ``auto_vacuum`` setting it WOULD free pages,
+    so that case skips the probe and the connection counts as writable.
+
+    Only SQLite's own read-only refusal answers ``True``. Anything else -- a
+    busy database, a locked one -- is not evidence about the caller's intent.
+
+    The probe is a (no-op) write, so it still asks for SQLite's write lock and
+    would otherwise wait out the caller connection's full 30 s for it. It is
+    bounded to the diagnostic's own backoff and restored afterwards: a diagnostic
+    must not stall on a question about permissions.
+    """
+    try:
+        auto_vacuum = conn.execute("PRAGMA auto_vacuum").fetchone()
+        if not auto_vacuum or int(auto_vacuum[0]) != 0:
+            return False
+        with _temporary_sqlite_busy_timeout([conn], DIAGNOSTIC_BUSY_TIMEOUT_MS):
+            conn.execute("PRAGMA incremental_vacuum(0)").fetchall()
+    except sqlite3.DatabaseError as exc:
+        lowered = str(exc).lower()
+        return "readonly" in lowered or "read-only" in lowered
+    except Exception:  # pragma: no cover - a probe must never break the doctor
+        return False
+    return False
+
+
 @contextmanager
 def private_diagnostic_connection(
     conn: Optional[sqlite3.Connection],
@@ -103,8 +139,19 @@ def private_diagnostic_connection(
     if not db_path or db_path == ":memory:" or not Path(db_path).exists():
         yield None
         return
+    # Match the caller's access. Reopening read-write what the operator opened
+    # ``mode=ro`` would let a DIAGNOSTIC write to a database they deliberately
+    # closed to writes, and then report that nothing needing permission
+    # happened. The deep check genuinely needs a write, so on a read-only caller
+    # it fails with SQLite's own readonly message and becomes ``unchecked`` --
+    # which is what the read-only remedy has always told the operator.
+    read_only = caller_connection_is_read_only(conn)
+    target = f"{Path(db_path).as_uri()}?mode=ro" if read_only else db_path
     probe = sqlite3.connect(
-        db_path, timeout=DIAGNOSTIC_BUSY_TIMEOUT_MS / 1000.0, check_same_thread=False
+        target,
+        uri=read_only,
+        timeout=DIAGNOSTIC_BUSY_TIMEOUT_MS / 1000.0,
+        check_same_thread=False,
     )
     try:
         # Only the busy timeout: a diagnostic handle must not re-run the
@@ -165,8 +212,13 @@ def run_isolated_fts_check(
                             "integrity-check finished; it was stopped rather than left "
                             "holding SQLite's write lock for a caller that had given up"
                         )
-                except Exception:  # pragma: no cover - a host signal must never raise here
-                    return ""
+                except Exception:
+                    # `pass`, never `return`: returning here would skip the
+                    # deadline test below, and a host signal that raised would
+                    # silently restore the unbounded write-lock hold this
+                    # budget exists to remove. The bound must not depend on
+                    # another component behaving.
+                    pass
             if time.monotonic() >= deadline:
                 return (
                     f"the deep FTS integrity-check exceeded its "
@@ -194,7 +246,11 @@ def run_isolated_fts_check(
         probe.set_progress_handler(interrupt_if_stopped, _PROGRESS_INSTRUCTIONS)
         try:
             result = check(probe, spec)
-        except sqlite3.DatabaseError as exc:
+        except Exception as exc:
+            # Every way this can end is ``unchecked``, including the exotic
+            # ones. An exception that escapes lands in the doctor's generic
+            # handler and is reported as ``fail`` -- a corruption verdict for
+            # something nobody observed.
             result = {"status": "unchecked", "detail": str(exc)}
         finally:
             # Uninstall before the handle's rollback, or the rollback is

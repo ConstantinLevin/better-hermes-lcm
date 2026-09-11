@@ -1075,7 +1075,10 @@ def _doctor_repair_apply_text(engine) -> str:
                 ("nodes_fts", build_nodes_fts_spec()),
             ):
                 applied[label] = repair_external_content_fts(conn, spec)
-        except sqlite3.Error as exc:
+        except Exception as exc:
+            # Exception, not sqlite3.Error: a non-SQLite failure on the second
+            # index would otherwise skip the disclosure below and leave the
+            # first index's committed rebuild unreported.
             lines = [
                 "LCM doctor repair apply",
                 "status: error",

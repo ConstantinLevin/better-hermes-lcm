@@ -1240,11 +1240,21 @@ def test_lcm_doctor_repair_dry_run_works_with_read_only_database(tmp_path):
     finally:
         ro_conn.close()
 
+    # fork: better-hermes-lcm — this used to assert `status: ok` and
+    # `messages_fts: ok` / `nodes_fts: ok`. Those came from folding an
+    # `unchecked` deep check into "nothing to repair": on a read-only connection
+    # the FTS5 integrity-check's probe INSERT is refused, so the deep check never
+    # ran, and it is the only thing that sees same-row-count index drift. The
+    # scan reports `unchecked` now, with the read-only remedy this file's own
+    # sibling tests already expected the operator to be given. It still finds no
+    # structural damage and still repairs nothing, which is what "dry run works
+    # against a read-only database" was there to pin.
     assert "LCM doctor repair" in result
-    assert "status: ok" in result
-    assert "messages_fts: ok" in result
-    assert "nodes_fts: ok" in result
+    assert "status: unchecked" in result
+    assert "messages_fts: unchecked" in result
+    assert "nodes_fts: unchecked" in result
     assert "repair-needed" not in result
+    assert "read-write SQLite access" in result
     assert "note: read-only scan only — no FTS tables were repaired" in result
 
 

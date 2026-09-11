@@ -528,3 +528,132 @@ def test_backup_flush_does_not_commit_a_pending_lifecycle_transaction(tmp_path):
     assert lifecycle.get_by_conversation("doomed-conversation") is not None, (
         "the backup flush committed a lifecycle deletion its owner rolled back"
     )
+
+
+# ---------------------------------------------------------------------------
+# the bound must not depend on the host signal being well-behaved
+# ---------------------------------------------------------------------------
+def test_the_budget_still_stops_the_check_when_the_host_signal_raises(tmp_path):
+    """A raising host bit must not take the deadline down with it. If it does,
+    the check reverts to the unbounded write-lock hold the budget exists to
+    remove -- and it does so silently."""
+    from hermes_lcm import db_bootstrap, diagnostic_connection
+    from hermes_lcm.store import build_message_fts_spec
+
+    engine = _engine(tmp_path)
+
+    def raising_host_bit():
+        raise RuntimeError("host interrupt registry unavailable")
+
+    original_interrupt = diagnostic_connection._host_is_interrupted
+    original_budget = diagnostic_connection.DIAGNOSTIC_BUDGET_SECONDS
+    diagnostic_connection._host_is_interrupted = raising_host_bit
+    diagnostic_connection.DIAGNOSTIC_BUDGET_SECONDS = 0.0
+    try:
+        result = diagnostic_connection.run_isolated_fts_check(
+            engine._store.connection,
+            build_message_fts_spec(),
+            db_bootstrap.check_external_content_fts_integrity,
+        )
+    finally:
+        diagnostic_connection._host_is_interrupted = original_interrupt
+        diagnostic_connection.DIAGNOSTIC_BUDGET_SECONDS = original_budget
+
+    assert result["status"] == "unchecked", result
+    assert "budget" in result["detail"], result
+
+
+def test_a_stopped_check_never_reaches_the_caller_as_an_exception(tmp_path, monkeypatch):
+    """Whatever ends the check, the caller gets `unchecked`. An exception that
+    escapes here lands in the doctor's generic handler and is reported as
+    `fail` -- a corruption verdict for something nobody observed."""
+    from hermes_lcm import diagnostic_connection
+    from hermes_lcm.store import build_message_fts_spec
+
+    engine = _engine(tmp_path)
+
+    def exotic_failure(_conn, _spec):
+        raise RuntimeError("the check died in an unexpected way")
+
+    result = diagnostic_connection.run_isolated_fts_check(
+        engine._store.connection, build_message_fts_spec(), exotic_failure
+    )
+
+    assert result["status"] == "unchecked", result
+    assert "unexpected way" in result["detail"], result
+
+
+def test_repair_apply_names_the_partial_for_a_non_sqlite_failure(tmp_path, monkeypatch):
+    engine = _engine(tmp_path)
+
+    def repair_messages_then_fail(conn, spec, **kwargs):
+        if spec.table_name == "messages_fts":
+            return {"rebuilt": True, "degraded": False, "triggers_recreated": False}
+        raise RuntimeError("the rebuild died in an unexpected way")
+
+    monkeypatch.setattr(command_mod, "repair_external_content_fts", repair_messages_then_fail)
+
+    text = handle_lcm_command("doctor repair apply", engine)
+
+    assert "status: error" in text, text
+    assert "messages_fts_rebuilt: yes" in text, text
+    assert "nodes_fts: not repaired" in text, text
+    assert "PARTIAL" in text, text
+
+
+# ---------------------------------------------------------------------------
+# a caller that opened the database read-only means it
+# ---------------------------------------------------------------------------
+def _read_only_engine(tmp_path):
+    """An engine whose store connection was deliberately opened `mode=ro`."""
+    engine = _engine(tmp_path)
+    db_path = str(engine._store.db_path)
+    engine._store.close()
+    engine._dag.close()
+    engine._lifecycle.close()
+    ro_conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    store_db_path = db_path
+
+    class FakeStore:
+        _conn = ro_conn
+        db_path = store_db_path
+
+        @property
+        def connection(self):
+            return self._conn
+
+    class FakeEngine:
+        _store = FakeStore()
+
+    return FakeEngine(), ro_conn, db_path
+
+
+def test_a_read_only_caller_gets_a_read_only_diagnostic_handle(tmp_path):
+    """The private handle must not reopen read-write what the operator opened
+    read-only: that overrides an explicit choice, and then reports that nothing
+    needing permission happened."""
+    from hermes_lcm.diagnostic_connection import private_diagnostic_connection
+
+    _fake_engine, ro_conn, _db_path = _read_only_engine(tmp_path)
+    try:
+        with private_diagnostic_connection(ro_conn) as probe:
+            assert probe is not None
+            assert probe.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 1
+            with pytest.raises(sqlite3.OperationalError) as caught:
+                probe.execute("CREATE TABLE written_anyway(a)")
+            assert "readonly" in str(caught.value).lower()
+    finally:
+        ro_conn.close()
+
+
+def test_doctor_repair_on_a_read_only_database_reports_unchecked(tmp_path):
+    fake_engine, ro_conn, _db_path = _read_only_engine(tmp_path)
+    try:
+        text = handle_lcm_command("doctor repair", fake_engine)
+    finally:
+        ro_conn.close()
+
+    assert "status: unchecked" in text, text
+    assert "messages_fts: unchecked" in text, text
+    assert "status: ok" not in text, text
+    assert "read-write SQLite access" in text, text
