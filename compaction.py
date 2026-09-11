@@ -604,6 +604,15 @@ class CompactionMixin:
         4. Check if condensation is needed
         5. Assemble new active context: summaries + fresh tail
         """
+        # the abort flag is re-based per turn, like the status below. Hermes reads it to tell
+        # the user "compression aborted - no messages were dropped" and to record a hygiene
+        # cooldown, and the bypass path sets it whenever it declines to compact a session LCM
+        # does not store. It is a plain engine attribute and the auxiliary-thread bypass is a
+        # thread-local marker that binds with no session rebind, so the session-boundary reset
+        # never fires for it: without this, an auxiliary decline made the NEXT managed
+        # compaction - one that really compacted - report an abort that did not happen.
+        self._last_compress_aborted = False
+
         if not messages:
             self._last_compression_status = "noop"
             self._last_compression_noop_reason = "empty message list"

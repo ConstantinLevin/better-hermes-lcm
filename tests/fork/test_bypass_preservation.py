@@ -209,9 +209,18 @@ def test_an_explicit_native_abort_is_preserved_not_overridden(tmp_path, monkeypa
         engine.shutdown()
 
 
-def test_a_native_compaction_is_returned_exactly_as_the_host_built_it(tmp_path, monkeypatch):
+@pytest.mark.parametrize("exposes_abort_flag", [True, False])
+def test_a_native_compaction_is_returned_exactly_as_the_host_built_it(
+    tmp_path, monkeypatch, exposes_abort_flag,
+):
     """Delegation is allowed; post-processing the host's own result is not. LCM neither repairs
-    nor re-cuts what the host decided to keep."""
+    nor re-cuts what the host decided to keep.
+
+    Both host shapes: a real Hermes compressor carries ``_last_compress_aborted``
+    (``agent/context_compressor.py:1857``) and LCM mirrors it; an older host exposes no such
+    attribute and LCM has to clear it itself. Asserting only the second shape would pass for
+    the wrong reason on every real host.
+    """
     native_result = [
         {"role": "assistant", "content": "native summary",
          "tool_calls": [{"id": "kept", "type": "function"}]},
@@ -222,18 +231,74 @@ def test_a_native_compaction_is_returned_exactly_as_the_host_built_it(tmp_path, 
     class _CompactingCompressor:
         def __init__(self, **kwargs):
             self.compression_count = 0
+            if exposes_abort_flag:
+                self._last_compress_aborted = False
 
         def compress(self, messages, **kwargs):
             self.compression_count += 1
             return copy.deepcopy(native_result)
 
     _install_native_compressor(monkeypatch, _CompactingCompressor)
-    engine = _ignored_engine(tmp_path, "native-verbatim.db")
+    engine = _ignored_engine(tmp_path, f"native-verbatim-{exposes_abort_flag}.db")
     try:
         result = engine.compress(_conversation(), current_tokens=100_000, force=True)
 
         assert result == native_result
         assert engine.compression_count == 1
+        assert engine._last_compress_aborted is False
+    finally:
+        engine.shutdown()
+
+
+def test_a_host_with_nothing_to_compact_is_not_reported_as_a_failure(tmp_path, monkeypatch):
+    """Hermes returns the list unchanged for insufficient_messages, no_compressible_window and
+    empty_post_handoff_window (agent/context_compressor.py:4606/4626/4650) and counts none of
+    them as a failure (:4322). Routing that through the abort flag would make the host warn the
+    user and point them at "your auxiliary.compression model configuration" for a turn where
+    there was simply nothing to compact."""
+    class _NothingToCompactCompressor:
+        def __init__(self, **kwargs):
+            self.compression_count = 0
+            self._last_compress_aborted = False
+
+        def compress(self, messages, **kwargs):
+            return messages  # unchanged, and not an abort
+
+    _install_native_compressor(monkeypatch, _NothingToCompactCompressor)
+    engine = _ignored_engine(tmp_path, "nothing-to-compact.db")
+    try:
+        messages = _conversation()
+        original = copy.deepcopy(messages)
+
+        result = engine.compress(messages, current_tokens=100_000, force=True)
+
+        assert result == original
+        assert engine._last_compress_aborted is False
+        assert "nothing to compact" in engine._last_compression_noop_reason
+    finally:
+        engine.shutdown()
+
+
+def test_a_managed_turn_after_an_auxiliary_decline_is_not_reported_as_an_abort(tmp_path, monkeypatch):
+    """An auxiliary thread context is a thread-local marker that binds WITHOUT a session rebind
+    (engine.py:3248), so the session-boundary reset never runs for it. The abort flag therefore
+    has to be re-based per turn, where the status already is: otherwise a managed compaction
+    that really compacted still tells the user "compression aborted - no messages were
+    dropped", and the host records a hygiene-failure cooldown for it."""
+    _no_native_compressor(monkeypatch)
+    config = LCMConfig(database_path=str(tmp_path / "aux-then-managed.db"))
+    engine = LCMEngine(config=config)
+    try:
+        engine.on_session_start("foreground:session", platform="cli", context_length=200_000)
+        engine._mark_thread_context_stateless("auxiliary:session")
+        engine._compress_lcm_bypassed_session(
+            [{"role": "user", "content": "aux turn " + "a" * 2_000}], force=True,
+        )
+        assert engine._last_compress_aborted is True
+
+        engine._clear_thread_context_stateless("auxiliary:session")
+        engine.compress([{"role": "user", "content": "a managed turn of the bound session"}])
+
         assert engine._last_compress_aborted is False
     finally:
         engine.shutdown()

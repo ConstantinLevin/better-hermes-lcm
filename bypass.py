@@ -410,58 +410,68 @@ class BypassMixin:
                 # the host's explicit "do not compress this" became a destructive delete
                 # reported as ordinary success (audit p05 BY02). The decision and the flag both
                 # stand; the host already tells the user nothing was dropped.
-                self._last_compression_status = "bypass_not_compacted"
-                self._last_compression_noop_reason = (
-                    f"LCM bypassed {reason}: Hermes' native compressor aborted and LCM stores "
-                    "no copy of this session; every message is returned unchanged"
-                )
+                outcome = "Hermes' native compressor aborted"
                 logger.warning(
                     "LCM native compressor aborted for bypassed %s %s; returning its context "
                     "unchanged (LCM stores no copy of this session)",
                     reason,
                     session_id,
                 )
-                return compacted
-            return self._decline_bypass_compaction(
-                compacted,
-                reason=reason,
-                session_id=session_id,
-                detail="Hermes' native ContextCompressor compacted nothing",
-            )
+            else:
+                # the host RAN and had nothing to compact. Hermes returns the list unchanged
+                # for insufficient_messages, no_compressible_window and
+                # empty_post_handoff_window, and counts none of them as a failure - so this is
+                # a no-op, not an alarm. Reporting it through ``_last_compress_aborted`` would
+                # make the host warn the user and point them at their summariser configuration
+                # for a turn where there was simply nothing to compact.
+                outcome = "Hermes' native compressor found nothing to compact"
+                logger.debug(
+                    "LCM bypassed %s %s: the native compressor found nothing to compact",
+                    reason,
+                    session_id,
+                )
+        else:
+            # The host's own compaction, returned exactly as the host built it: LCM does not
+            # sanitise, re-cut or annotate it. Its own tool-pair repair already ran
+            # (``agent/context_compressor.py``), and there is no LCM copy to repair it from.
+            if not hasattr(compressor, "_last_compress_aborted"):
+                # the mirror above had no flag to copy on this host, so a compaction that
+                # really happened would otherwise inherit this turn's earlier state. A host
+                # that DOES expose the flag keeps its own answer.
+                self._last_compress_aborted = False
+            outcome = "Hermes' native compressor compacted this session"
 
-        # The host's own compaction, returned exactly as the host built it: LCM does not
-        # sanitise, re-cut or annotate it. Its own tool-pair repair already ran
-        # (``agent/context_compressor.py``), and there is no LCM copy to repair it from.
-        if not hasattr(compressor, "_last_compress_aborted"):
-            # the mirror above had no flag to copy on this host, so a compaction that really
-            # happened would otherwise inherit a previous turn's abort and tell the user
-            # nothing was dropped. A host that DOES expose the flag keeps its own answer.
-            self._last_compress_aborted = False
         target_tokens = self._bypass_compaction_target_tokens(
             observed_tokens=observed_tokens,
             messages=safe_messages,
         )
         if target_tokens is not None and count_messages_tokens(compacted) > target_tokens:
-            # a bounded result is never presented as a complete one
+            # a bounded result is never presented as a complete one - whichever of the three
+            # outcomes above got us here
             self._last_compression_status = "bypass_over_bound"
             self._last_compression_noop_reason = (
-                f"LCM bypassed {reason}: Hermes' native compressor compacted this session but "
-                f"it is still over the {target_tokens}-token bound; LCM stores no copy and "
-                "does not cut it further"
+                f"LCM bypassed {reason}: {outcome}, but the context is still over the "
+                f"{target_tokens}-token bound; LCM stores no copy of this session and does not "
+                "cut it"
             )
             logger.warning(
-                "LCM bypassed %s %s is still over the %d-token bound after Hermes' native "
-                "compression; LCM stores no copy of this session and will not shorten it",
+                "LCM bypassed %s %s is still over the %d-token bound (%s); LCM stores no copy "
+                "of this session and will not shorten it",
                 reason,
                 session_id,
                 target_tokens,
+                outcome,
             )
-            return compacted
-        # name the actor and the absence of a copy: what the host removed here is in the host
-        # transcript and nowhere in lcm.db, so this is not the ordinary "compacted" boundary an
-        # operator reading the status would otherwise assume.
-        self._last_compression_noop_reason = (
-            f"LCM bypassed {reason}: Hermes' native compressor compacted this session; "
-            "LCM stores no copy of what it removed"
-        )
+        elif native_changed:
+            # name the actor and the absence of a copy: what the host removed here is in the
+            # host transcript and nowhere in lcm.db, so this is not the ordinary "compacted"
+            # boundary an operator reading the status would otherwise assume.
+            self._last_compression_noop_reason = (
+                f"LCM bypassed {reason}: {outcome}; LCM stores no copy of what it removed"
+            )
+        else:
+            self._last_compression_status = "bypass_not_compacted"
+            self._last_compression_noop_reason = (
+                f"LCM bypassed {reason}: {outcome}; every message is returned unchanged"
+            )
         return compacted
