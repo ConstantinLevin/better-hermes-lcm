@@ -54,6 +54,14 @@ def _matched_tool_call_ids(messages: List[Dict[str, Any]]) -> set[str]:
 
 
 def _is_synthetic_assistant_noise(content: str) -> bool:
+    """DO NOT use this to decide what the summariser or the agent is allowed to read.
+
+    The leaf serializer used it exactly that way and deleted real assistant replies whose text
+    happened to be "Acknowledged" (#31 MA01); it no longer calls it. Synthetic origin is a
+    property of who produced a turn, and this function only inspects the words in it, so it
+    cannot tell a generated heartbeat from a person agreeing. It survives only as a wording
+    predicate for callers that do not remove anything on the strength of it.
+    """
     normalized = re.sub(r"\s+", " ", (content or "").strip()).lower()
     if not normalized:
         return True

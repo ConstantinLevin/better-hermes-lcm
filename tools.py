@@ -1225,32 +1225,13 @@ _TEMPORAL_ROLLUP_PERIOD_KINDS = ("day", "week", "month")
 _TEMPORAL_ROLLUP_STATUSES = ("ready", "stale", "building", "failed")
 
 
-def _sanitized_tool_calls_for_response(tool_calls: Any) -> Any:
-    """tool calls rendered for a reader, with inline payloads marked.
-
-    Raw-row expansion used to omit stored tool calls entirely and still answer has_more=false
-    (round-2 verify-4 #20). They are returned now; the arguments go through the compaction
-    argument sanitiser so a legacy row's inline data URI becomes a marker instead of a
-    megabyte of base64.
-    """
-    if not isinstance(tool_calls, list):
-        return tool_calls
-    rendered = []
-    for call in tool_calls:
-        if not isinstance(call, dict):
-            rendered.append(call)
-            continue
-        function = call.get("function")
-        if isinstance(function, dict) and "arguments" in function:
-            call = {
-                **call,
-                "function": {
-                    **function,
-                    "arguments": sanitize_pre_compaction_tool_arguments(function.get("arguments")),
-                },
-            }
-        rendered.append(call)
-    return rendered
+# `_sanitized_tool_calls_for_response` stood here. Raw-row expansion used to omit stored tool
+# calls entirely and still answer has_more=false (round-2 verify-4 #20); they are returned now,
+# but they went through the compaction argument sanitiser first, which parsed and re-serialised
+# any valid JSON argument string. The exact-bytes recovery path therefore returned
+# 0.12345678901234568 for a stored 0.123456789012345678901234567890, and a continuation walk
+# paged over that transformed copy rather than the row (#56). The stored calls are rendered as
+# they are; size is what `_slice_content_for_response` is for, and it pages with a cursor.
 
 
 def _slice_content_for_response(content: str, max_tokens: int, content_offset: int = 0) -> dict[str, Any]:
@@ -6154,6 +6135,15 @@ def lcm_expand(args: Dict[str, Any], **kwargs) -> str:
             "conversation_id": stored.get("conversation_id") or "",
             "role": stored.get("role"),
             "timestamp": stored.get("timestamp", 0),
+            # `timestamp` is the ingest column and was the only time this path
+            # returned, unqualified, so a reader could not tell LCM's write time from the
+            # host's own message time — and the host's was not returned at all (#37). Both
+            # kinds are named; `observed_at` is null when the host sent no usable time, which
+            # is not the same thing as "it happened when we wrote it".
+            "timestamp_kind": "lcm_ingest_time",
+            "ingested_at": stored.get("ingested_at") or stored.get("timestamp", 0),
+            "observed_at": stored.get("observed_at"),
+            "observed_at_source": stored.get("observed_at_source") or "",
             "tool_call_id": stored.get("tool_call_id") or "",
             "from_current_session": bool(engine_session_id) and stored_session_id == engine_session_id,
             "content": sliced["content"],
@@ -6239,20 +6229,14 @@ def lcm_expand(args: Dict[str, Any], **kwargs) -> str:
         stored_tool_calls = stored.get("tool_calls")
         if stored_tool_calls:
             from .tokens import count_tokens as _count_tokens
-            # Historical rows can hold raw inline media/base64 in their arguments (rows written
-            # before ingest protection existed). Render the calls through the same argument
-            # sanitiser compaction uses, so the call is VISIBLE without replaying a megabyte of
-            # base64 into the answer; the stored row itself is untouched.
-            safe_calls = _sanitized_tool_calls_for_response(stored_tool_calls)
-            rendered_calls = json.dumps(safe_calls, ensure_ascii=False, default=str)
+            # the calls are rendered as the row holds them (#56). A historical row
+            # with a megabyte of inline base64 in its arguments is bounded by the page budget
+            # below, which returns a cursor and says has_more — not by rewriting the bytes the
+            # caller asked this tool for.
+            rendered_calls = json.dumps(stored_tool_calls, ensure_ascii=False, default=str)
             call_budget = max(0, max_tokens - raw_budget_used)
             call_slice = _slice_content_for_response(rendered_calls, call_budget, tool_calls_offset)
             result["tool_calls"] = call_slice["content"]
-            if rendered_calls != json.dumps(stored_tool_calls, ensure_ascii=False, default=str):
-                result["tool_calls_note"] = (
-                    "inline media/base64 payloads in these arguments are rendered as markers; "
-                    "the stored row is unchanged"
-                )
             result["tool_calls_chars"] = call_slice["content_chars"]
             result["tool_calls_offset"] = call_slice["content_offset"]
             result["tool_calls_returned_chars"] = call_slice["content_returned_chars"]

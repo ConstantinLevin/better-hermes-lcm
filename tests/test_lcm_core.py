@@ -6788,7 +6788,14 @@ class TestIngestExternalization:
 
 
 class TestExtraction:
-    def test_serialize_messages_replaces_pure_inline_media_with_attachment_marker(self, tmp_path):
+    # fork: better-hermes-lcm — this asserted `"[USER]: [Media attachment]" == serialized` and
+    # `"data:image/png;base64" not in serialized`. LCM no longer deletes an inline data URI
+    # from ordinary TEXT on its way to the summariser: no spelling of that regex is safe (the
+    # conservative one cut a line-wrapped payload's first line while the marker claimed the
+    # whole medium, the permissive one eats the words after the payload), and cutting the
+    # source at all is the loss this fork exists to remove (#56). A payload the summary route
+    # cannot process fails at that route instead.
+    def test_serialize_messages_keeps_a_pure_inline_media_string(self, tmp_path):
         from hermes_lcm.config import LCMConfig
         from hermes_lcm.engine import LCMEngine
 
@@ -6801,25 +6808,25 @@ class TestExtraction:
             }
         ])
 
-        assert "[USER]: [Media attachment]" == serialized
-        assert "data:image/png;base64" not in serialized
+        assert serialized.startswith(
+            "[USER]: data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAUA"), serialized
+        assert "[Media attachment]" not in serialized
 
-    def test_serialize_messages_preserves_text_but_replaces_inline_media_suffix(self, tmp_path):
+    # fork: better-hermes-lcm — this asserted `"[with media attachment]" in serialized` and
+    # `"data:image/png;base64" not in serialized`, for the same reason as above.
+    def test_serialize_messages_keeps_text_and_the_inline_media_beside_it(self, tmp_path):
         from hermes_lcm.config import LCMConfig
         from hermes_lcm.engine import LCMEngine
 
         engine = LCMEngine(config=LCMConfig(database_path=str(tmp_path / "lcm.db")))
 
+        content = "Here is the chart you asked for.\n\ndata:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAUA"
         serialized = engine._serialize_messages([
-            {
-                "role": "assistant",
-                "content": "Here is the chart you asked for.\n\ndata:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAUA",
-            }
+            {"role": "assistant", "content": content},
         ])
 
-        assert "Here is the chart you asked for." in serialized
-        assert "[with media attachment]" in serialized
-        assert "data:image/png;base64" not in serialized
+        assert content in serialized
+        assert "[with media attachment]" not in serialized
 
     def test_serialize_messages_handles_chat_completions_style_multimodal_blocks(self, tmp_path):
         from hermes_lcm.config import LCMConfig
@@ -6886,7 +6893,7 @@ class TestExtraction:
         assert "[Media attachment]" not in serialized
         assert "[with media attachment]" not in serialized
 
-    def test_serialize_messages_sanitizes_tool_call_arguments_media_payloads(self, tmp_path):
+    def test_serialize_messages_keeps_tool_call_argument_media_payloads(self, tmp_path):
         from hermes_lcm.config import LCMConfig
         from hermes_lcm.engine import LCMEngine
 
@@ -6907,11 +6914,16 @@ class TestExtraction:
             }
         ])
 
+        # fork: better-hermes-lcm — this asserted `'"image": "[Media attachment]"' in
+        # serialized` and `"data:image/png;base64" not in serialized`. The argument string a
+        # provider sent IS the argument: it is offered as it stands, so neither the media
+        # payload nor (the same round trip's other casualty) an exact decimal is rewritten
+        # before the summariser reads it (#56).
         assert "vision_analyze" in serialized
-        assert '"image": "[Media attachment]"' in serialized
-        assert "data:image/png;base64" not in serialized
+        assert '{"image":"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAUA"}' in serialized
+        assert "[Media attachment]" not in serialized
 
-    def test_serialize_messages_sanitizes_parsed_tool_call_arguments_media_payloads(self, tmp_path):
+    def test_serialize_messages_keeps_parsed_tool_call_argument_media_payloads(self, tmp_path):
         from hermes_lcm.config import LCMConfig
         from hermes_lcm.engine import LCMEngine
 
@@ -6935,9 +6947,12 @@ class TestExtraction:
             }
         ])
 
+        # fork: better-hermes-lcm — this asserted `'"image": "[Media attachment]"' in
+        # serialized`. Arguments that arrive as a structure are rendered as JSON, with nothing
+        # removed from their values (#56).
         assert '"prompt": "Describe the chart"' in serialized
-        assert '"image": "[Media attachment]"' in serialized
-        assert "data:image/png;base64" not in serialized
+        assert '"image": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAUA"' in serialized
+        assert "[Media attachment]" not in serialized
 
     def test_serialize_messages_preserves_structured_file_block_metadata(self, tmp_path):
         from hermes_lcm.config import LCMConfig
@@ -7175,7 +7190,7 @@ class TestExtraction:
         assert payload["tool_call_id"] == "call_big_custom"
         assert payload["content"] == content
 
-    def test_run_pre_compaction_extraction_uses_media_cleaned_text(self, tmp_path):
+    def test_run_pre_compaction_extraction_uses_the_message_text_unchanged(self, tmp_path):
         from hermes_lcm.config import LCMConfig
         from hermes_lcm.engine import LCMEngine
         import hermes_lcm.extraction as ext_module
@@ -7208,8 +7223,11 @@ class TestExtraction:
 
         # extraction goes through the untrusted-data envelope (p05 EX05)
         source_text = json.loads(seen_prompt["prompt"][1]["content"])["sources"][0]["content"]
-        assert "[with media attachment]" in source_text
-        assert "data:image/png;base64" not in source_text
+        # fork: better-hermes-lcm — this asserted `"[with media attachment]" in source_text`
+        # and `"data:image/png;base64" not in source_text`. The extractor shares the leaf
+        # serializer, which no longer removes an inline data URI from text (#56).
+        assert "Please save this image for later" in source_text
+        assert "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAUA" in source_text
 
     def test_extract_writes_daily_file(self, tmp_path):
         from hermes_lcm.extraction import extract_before_compaction

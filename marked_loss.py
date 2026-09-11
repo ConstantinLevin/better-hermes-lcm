@@ -8,8 +8,19 @@ a reader can find them, and the message-body marker keeps upstream's literal
 """
 from __future__ import annotations
 
+import datetime as _datetime
+import json
 import re
 from typing import Any, Iterable, List, Sequence
+
+# The store's OWN rule for what counts as a representable observed_at, so the time this module
+# renders into the summariser's source and the time the observed_at column holds can never
+# disagree about which times are real. It is a PRIVATE symbol in another module and this
+# import is the coupling: renaming or removing `store._normalize_observed_at` breaks the leaf
+# serializer. At module level it breaks at plugin load, where the first import catches it,
+# rather than per message deep inside _serialize_messages. (`store` does not reach this module
+# through any import, direct or lazy, so there is no cycle.)
+from .store import _normalize_observed_at
 
 # Upstream's head/tail split for a 3000-char cap was 2000 + 800; keep those ratios so the
 # 256k anchor reproduces upstream's serialisation byte for byte apart from the marker.
@@ -476,13 +487,71 @@ def leading_turns_dropped_marker(dropped: int, roles: List[str]) -> str:
     )
 
 
-# Envelope fields that CHANGE what a turn means and are cheap to render inline.
-_INLINE_ENVELOPE_FIELDS = (
-    # small fields that change what the CONTENT means. `exit_code`/`error`
-    # were only named, not shown, so a reader saw "operation done" with no way to tell it had
-    # failed without a second call (round-5 verify-6 #8).
-    "name", "is_error", "status", "error_code", "error", "exit_code", "finish_reason",
-)
+# A value is rendered INLINE when it is a scalar short enough to sit beside the content;
+# everything else is rendered as JSON on its own line. Both forms carry the value WHOLE, so
+# this split decides only how a field is shown, never whether the summariser sees it.
+#
+# It replaces a seven-name allowlist (`name, is_error, status, error_code, error, exit_code,
+# finish_reason`). That list decided by FIELD NAME what reached the model, and everything else
+# — including `api_content`, the text Hermes actually sends to the provider in place of the
+# display content, and `reasoning`/`reasoning_content` — was offered as "name (N chars)". A
+# turn whose sidecar said "deployment revoked." was then indistinguishable, before the model,
+# from one that said "deployment allowed.": same name, same length (#67). The store always
+# held both; the summariser was handed neither.
+_INLINE_ENVELOPE_VALUE_MAX_CHARS = 200
+
+
+def _is_blank_value(value: Any) -> bool:
+    """Empty, for a value that may have a hostile ``__eq__``.
+
+    A value whose comparison raises is still a value, and this is called per message on the
+    compaction path: letting it propagate would fail the whole leaf over one odd field.
+    """
+    try:
+        return value in (None, "", [], {})
+    except Exception:  # pragma: no cover - defensive
+        return False
+
+
+# The ONE prefix this module refuses to offer: the fork's own internal keys. It matches
+# ``store._envelope_extra_json``, which refuses the same prefix when it writes the archive, so
+# this drops only what the store would never have held anyway — a row carrying one came from
+# another build or an import. It was ``lcm_`` (no leading underscore), which is not that
+# prefix: it matched ordinary host keys instead, and dropping a host field because of its NAME
+# is the exact mechanism #67 exists to remove. Anything it does drop is named in a receipt.
+_INTERNAL_ENVELOPE_KEY_PREFIX = "_lcm"
+
+
+def _envelope_items(envelope: dict) -> tuple[List[tuple], List[tuple], List[str]]:
+    """Split an envelope into (inline scalar fields, fields needing their own rendering, dropped).
+
+    Inline entries carry the value already rendered as text; the others carry it as it is, so
+    the caller can decide between a full JSON rendering (the summary source) and a name
+    (a bounded preview such as ``lcm_load_session``). The third list is the fork's own internal
+    keys, which are never offered as values and are named instead.
+    """
+    inline: List[tuple] = []
+    rest: List[tuple] = []
+    internal: List[str] = []
+    if not isinstance(envelope, dict):
+        return inline, rest, internal
+    for key, value in envelope.items():
+        if not isinstance(key, str) or _is_blank_value(value):
+            continue
+        if key.startswith(_INTERNAL_ENVELOPE_KEY_PREFIX):
+            internal.append(key)
+            continue
+        if not isinstance(value, (dict, list)):
+            try:
+                rendered = str(value)
+            except Exception:
+                rest.append((key, value))
+                continue
+            if len(rendered) <= _INLINE_ENVELOPE_VALUE_MAX_CHARS and "\n" not in rendered:
+                inline.append((key, rendered))
+                continue
+        rest.append((key, value))
+    return inline, rest, internal
 
 
 def envelope_inventory(envelope: dict) -> tuple[dict, list[str]]:
@@ -491,70 +560,164 @@ def envelope_inventory(envelope: dict) -> tuple[dict, list[str]]:
     Returns (inline outcome fields, names of the fields left in the store). JSON-shaped
     readers (``lcm_load_session``) need the structure rather than a rendered suffix; without
     it a tool row's ``is_error``/``exit_code`` never reached the reader and a failed operation
-    read exactly like a successful one (round-5 verify-6 #8).
+    read exactly like a successful one (round-5 verify-6 #8). This is a bounded PREVIEW, which
+    is why it still names the large fields instead of inlining them — it pairs with an
+    ``lcm_expand`` pointer, and it is not what the summariser is offered.
     """
     inline: dict = {}
-    listed: List[str] = []
     if not isinstance(envelope, dict):
-        return inline, listed
-    for key, value in envelope.items():
-        if not isinstance(key, str) or key.startswith("lcm_") or value in (None, "", [], {}):
-            continue
-        if key in _INLINE_ENVELOPE_FIELDS and not isinstance(value, (dict, list)):
-            inline[key] = value
-            continue
-        listed.append(key)
-    return inline, sorted(listed)
+        return inline, []
+    inline_fields, rest, internal = _envelope_items(envelope)
+    for key, _rendered in inline_fields:
+        inline[key] = envelope[key]
+    # the internal keys are NAMED here too, not dropped: this listing is what the
+    # reader's `envelope_recover_with` pointer is built from.
+    return inline, sorted([key for key, _value in rest] + internal)
 
 
-def envelope_summary_suffix(envelope: dict, *, max_listed: int = 10) -> str:
-    """render the small outcome fields, inventory the rest.
+def _envelope_json(value: Any) -> "str | None":
+    """``value`` as JSON, or ``None`` when nothing can render it.
+
+    ``default=str`` is the same fallback ``store._envelope_extra_json`` used when it wrote the
+    archive, so the summariser is offered exactly the text the store holds rather than a
+    second, differently-lossy rendering of the same object.
+    """
+    try:
+        return json.dumps(value, ensure_ascii=False, default=str)
+    except Exception:
+        return None
+
+
+def envelope_summary_suffix(envelope: dict) -> str:
+    """offer every host envelope field's VALUE to the summariser.
 
     The summariser was given ``[ASSISTANT]: Visible`` for a turn whose envelope also carried
     ``reasoning_content="DECISION cancel"`` and ``is_error=True``: a failed step read exactly
     like a successful one and a decision reached the summariser nowhere (round-3 verify-4 #8).
-    Small fields are rendered; larger ones are named with their size and left in the store.
+    Naming the larger fields instead of showing them fixed the first half and left the second
+    (#67), so the value is now rendered whole — inline when it is small, as JSON when it is
+    not. A field is named rather than shown only when no serialisation of it exists at all,
+    and that case says so.
     """
     if not isinstance(envelope, dict) or not envelope:
         return ""
-    inline: List[str] = []
-    listed: List[str] = []
-    for key, value in envelope.items():
-        if not isinstance(key, str) or key.startswith("lcm_") or value in (None, "", [], {}):
-            continue
-        if key in _INLINE_ENVELOPE_FIELDS and not isinstance(value, (dict, list)):
-            inline.append(f"{key}={value}")
-            continue
-        try:
-            size = len(value) if isinstance(value, (str, list, dict)) else len(str(value))
-        except Exception:  # pragma: no cover - defensive
-            size = 0
-        listed.append(f"{key} ({size} chars)")
+    inline_fields, rest, internal = _envelope_items(envelope)
     parts = []
-    if inline:
-        parts.append(" [" + ", ".join(inline[:max_listed]) + "]")
-    if listed:
-        shown = ", ".join(sorted(listed)[:max_listed])
-        more = f" (+{len(listed) - max_listed} more)" if len(listed) > max_listed else ""
+    if inline_fields:
+        # every inline field, not the first ten: the list used to be cut at ten with
+        # nothing in place of the rest (#67).
+        parts.append(" [" + ", ".join(f"{key}={rendered}" for key, rendered in inline_fields) + "]")
+    unrenderable: List[str] = []
+    if rest:
+        verbatim = dict(rest)
+        rendered = _envelope_json(verbatim)
+        if rendered is None:
+            # one hostile value must not take its neighbours with it
+            verbatim = {}
+            for key, value in rest:
+                if _envelope_json(value) is None:
+                    unrenderable.append(key)
+                else:
+                    verbatim[key] = value
+            rendered = _envelope_json(verbatim) if verbatim else None
+        if rendered is not None and verbatim:
+            parts.append(f"\n[envelope (verbatim): {rendered}]")
+    # the two reasons a field is named instead of shown, each said plainly: no
+    # serialisation of it exists, or it is one of the fork's own internal keys. Neither is a
+    # judgement about a HOST field's name, and neither is silent.
+    if unrenderable:
+        shown = ", ".join(sorted(unrenderable))
         parts.append(
-            f"\n{RECEIPT_LINE_PREFIX} envelope field(s) not summarised here: {shown}{more}; "
-            "the stored message holds them — lcm_expand]"
+            f"\n{RECEIPT_LINE_PREFIX} {len(unrenderable)} envelope field(s) could not be "
+            f"rendered here ({shown}); the stored message holds them — lcm_expand]"
+        )
+    if internal:
+        shown = ", ".join(sorted(internal))
+        parts.append(
+            f"\n{RECEIPT_LINE_PREFIX} {len(internal)} LCM-internal envelope key(s) are not "
+            f"offered here ({shown}); the stored message holds them — lcm_expand]"
         )
     return "".join(parts)
 
 
-def acknowledgement_only_marker(content: str) -> str:
-    """an acknowledgement-shaped turn removed from the summariser's input.
+HOST_MESSAGE_TIME_SOURCE = "host_message_timestamp"
 
-    The removal is by WORDING, not by a trusted synthetic-origin signal, so a genuine
-    "Acknowledged." disappeared with nothing in its place (round-4 verify-4 #8). The stored row
-    is untouched; this line says the turn existed and how to read it.
+
+def _resolve_message_times(msg: dict) -> tuple:
+    """``(source_time, source_kind, ingest_time)`` for either message shape.
+
+    ``store.py`` makes the same distinction with the same test: a dict that carries
+    ``store_id`` came out of the store, where ``timestamp`` is the LCM WRITE time and the
+    host's own time sits in ``observed_at``. A live host message has only ``timestamp``, and
+    that one IS the host's time. Conflating the two would let a replayed conversation look as
+    though every turn happened at import.
     """
-    head = content_head(content, limit=60)
+    stored_shape = any(key in msg for key in ("store_id", "observed_at", "ingested_at"))
+    if stored_shape:
+        ingest = msg.get("ingested_at")
+        if _is_blank_value(ingest):
+            ingest = msg.get("timestamp")
+        return msg.get("observed_at"), msg.get("observed_at_source") or "", ingest
+    return msg.get("timestamp"), HOST_MESSAGE_TIME_SOURCE, None
+
+
+def _render_message_time(value: Any) -> str:
+    """A time as ISO-8601 UTC, ``unknown``, or the raw value when it cannot be represented."""
+    if _is_blank_value(value):
+        return "unknown"
+    normalized = _normalize_observed_at(value)
+    if normalized is None:
+        # a time the column cannot hold is still the only record of when the turn
+        # happened; store._envelope_extra_json keeps it as timestamp_raw for exactly that
+        # reason (store.py:203-205). content_head flattens and caps the raw value for this
+        # one line, so the line says where the unflattened one is — the raw time appears
+        # nowhere else in the source (engine._message_envelope_fields excludes `timestamp`).
+        return (
+            f"unparsed({content_head(value, limit=120)}"
+            "; full value in envelope_extra.timestamp_raw — lcm_expand)"
+        )
     return (
-        f"{RECEIPT_LINE_PREFIX} an acknowledgement-shaped assistant turn ({head!r}) is not "
-        "summarised; the stored row is unchanged — lcm_recent / lcm_expand]"
+        _datetime.datetime.fromtimestamp(normalized, tz=_datetime.timezone.utc)
+        .isoformat()
+        .replace("+00:00", "Z")
     )
+
+
+def message_time_note(msg: dict) -> str:
+    """Offer the summariser this message's source time and ingest time, separately.
+
+    ``The meeting is tomorrow.`` reached the model with no date at all, and two messages from
+    different days serialised to identical bytes: ``_message_envelope_fields`` excludes
+    ``timestamp``/``observed_at``/``ingested_at`` and nothing added them back (#37). The two
+    kinds are named rather than merged into one unqualified number, and an absent source time
+    says ``unknown`` — it is never filled in with the ingest time, which would invent an event
+    time the host never gave.
+    """
+    if not isinstance(msg, dict):
+        return ""
+    source_raw, source_kind, ingest_raw = _resolve_message_times(msg)
+    envelope = msg.get("envelope")
+    if _is_blank_value(source_raw) and isinstance(envelope, dict):
+        # the store parks a host time it cannot represent here rather than dropping it
+        source_raw = envelope.get("timestamp_raw")
+        source_kind = source_kind or HOST_MESSAGE_TIME_SOURCE
+    source_text = _render_message_time(source_raw)
+    parts = [f"source_time={source_text}"]
+    if source_kind and source_text != "unknown":
+        parts[0] += f" ({source_kind})"
+    # the ingest time is offered only where the message actually carries one. A live
+    # host message has none, and printing "ingest_time=unknown" on every turn would spend the
+    # summariser's source on a field this path never has rather than on the conversation.
+    if not _is_blank_value(ingest_raw):
+        parts.append(f"ingest_time={_render_message_time(ingest_raw)}")
+    return " [time: " + ", ".join(parts) + "]"
+
+
+# `acknowledgement_only_marker` stood here. It was the receipt for an assistant turn the
+# serializer removed because its text matched a word set, and it is retired with that removal
+# (#31 MA01): real acknowledgement text now reaches the summariser byte-identical, so there is
+# nothing left for the receipt to record — and a receipt claiming a removal that did not
+# happen is its own defect.
 
 
 INTERNAL_REPLAY_MARKER = (
