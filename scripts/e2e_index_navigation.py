@@ -513,6 +513,20 @@ def _collect_text(value: Any, sink: list[str], store_ids: set[int]) -> None:
         sink.append(value)
 
 
+def _store_ids_named_as_missing(result: dict[str, Any]) -> list[int]:
+    """Store ids the tool itself named as unreadable. Exact attribution, better than per node."""
+    out: list[int] = []
+    for holder in (result, result.get("pagination") or {}):
+        if not isinstance(holder, dict):
+            continue
+        for key in ("missing_source_store_ids", "unreadable_source_ids", "missing_source_ids"):
+            for value in holder.get(key) or ():
+                parsed = _as_int(value)
+                if parsed is not None:
+                    out.append(parsed)
+    return out
+
+
 def _as_int(value: Any) -> Optional[int]:
     if isinstance(value, bool):
         return None
@@ -640,6 +654,7 @@ class LexicalReader:
         defects: list[str] = []
         observations: list[str] = []
         bounded_nodes: dict[int, set[str]] = {}
+        bounded_direct: dict[int, set[str]] = {}
         pages_followed = 0
         # One greedy descent, not a sweep of the DAG: take the best-matching rendered node,
         # then at each condensation take its best-matching child. Expanding everything would
@@ -676,6 +691,16 @@ class LexicalReader:
                 results.append(page)
                 found_defects, found_observations = label_evidence(page, piece)
                 defects.extend(found_defects)
+                # A defect is attributed to the recovery it actually broke — the rows this node
+                # holds, or the exact rows the tool named as unreadable. A trace-level defect
+                # cannot say which line it broke, so it may not excuse any of them.
+                named_missing = _store_ids_named_as_missing(page)
+                for store_id in named_missing:
+                    bounded_direct.setdefault(store_id, set()).add("evidence:source_missing")
+                for name in found_defects:
+                    if name == "evidence:source_missing" and named_missing:
+                        continue  # already attributed exactly, above
+                    bounded_nodes.setdefault(node_id, set()).add(name)
                 # Bounds are attributed to THIS NODE, not to the whole trace. A marker in one
                 # page of one node used to bound every line of every node the reader touched.
                 for name in found_observations:
@@ -715,7 +740,7 @@ class LexicalReader:
             "evidence_defects": tuple(sorted(dict.fromkeys(defects))),
             "observations": tuple(sorted(dict.fromkeys(observations))),
             "bounded_nodes": {node: sorted(labels) for node, labels in bounded_nodes.items()},
-            "bounded_store_ids_direct": {},
+            "bounded_store_ids_direct": {s: sorted(v) for s, v in bounded_direct.items()},
             "unsourced_node_ids": (),  # it only ever opens ids it read from the frontier
             "tool_calls": len(results),
             "pages_followed": pages_followed,
@@ -850,8 +875,16 @@ class ModelReader:
                     # Attributed to the node (or the row) this call was about, and re-derived
                     # per call: a later page of the same node that ends with has_more false
                     # clears the bound, and a marker in one node's page never bounds another's.
+                    # DEFECTS are attributed the same way — a trace-level label cannot say
+                    # which line it broke, so it may not excuse any of them.
+                    named_missing = _store_ids_named_as_missing(result)
+                    for missing_id in named_missing:
+                        bounded_direct.setdefault(missing_id, set()).add(
+                            "evidence:source_missing")
                     bounds = {name for name in found_observations
                               if name in BOUNDED_OBSERVATIONS}
+                    bounds |= {name for name in found_defects
+                               if not (name == "evidence:source_missing" and named_missing)}
                     paged = "evidence:paged_result"
                     if node_id is not None:
                         current = bounded_nodes.setdefault(node_id, set())

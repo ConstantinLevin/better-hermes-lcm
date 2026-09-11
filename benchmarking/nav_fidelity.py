@@ -187,6 +187,7 @@ def score_navigation(cases: Sequence[NavigationCase],
     defect_counts: dict[str, int] = {}
     observation_counts: dict[str, int] = {}
     withdrawn_samples: list[dict[str, Any]] = []
+    recovery_defects_seen: dict[str, int] = {}
     missed_samples: list[dict[str, Any]] = []
     claim_samples: list[dict[str, Any]] = []
     incomplete: list[str] = []
@@ -267,12 +268,16 @@ def score_navigation(cases: Sequence[NavigationCase],
                 case_source_hit += 1
                 continue
             # A line that did not come back out of a BOUNDED or BROKEN recovery may be on the
-            # next page, inside what an "[LCM …]" marker names, or behind the tool error. That
+            # next page, inside what an "[LCM …]" marker names, or behind a tool error. That
             # belongs to another issue (#50/#51/#52), so the LINE leaves source recall — only
             # when the reader actually opened a node covering it, and never node recall.
-            bounds = [name for name in BOUNDED_OBSERVATIONS
-                      if name in (trace.bounded_store_ids.get(store_id) or ())]
-            bounds.extend(recovery_defects)
+            #
+            # ONLY per-line attribution counts. A trace-level defect cannot say which line it
+            # broke, so it may not excuse any of them: folding one in here let a single tool
+            # error anywhere in a question withdraw every line of it, hiding real misses
+            # behind an unrelated failure. The caller attributes each defect to the rows of
+            # the node whose recovery it actually broke.
+            bounds = list(dict.fromkeys(trace.bounded_store_ids.get(store_id) or ()))
             if reached and bounds:
                 case_withdrawn.append({"question_id": case.question_id,
                                        "store_id": store_id,
@@ -290,11 +295,18 @@ def score_navigation(cases: Sequence[NavigationCase],
                 f"no delivered node ({label}) — withdrawn from both recalls, not scored as a "
                 f"model failure"
             )
-        for label in recovery_defects:
-            defect_counts[label] = defect_counts.get(label, 0) + 1
         if recovery_defects:
-            entry["recovery_defects"] = recovery_defects
-            entry["reasons"].extend(recovery_defects)
+            # Reported and made incomplete, but NOT counted into evidence_defects: what it
+            # actually withdrew is counted per line above, and counting it here too would
+            # report one event under two names.
+            entry["recovery_defects_seen"] = recovery_defects
+            for label in recovery_defects:
+                recovery_defects_seen[label] = recovery_defects_seen.get(label, 0) + 1
+            incomplete.append(
+                f"{case.question_id}: the recovery reported "
+                f"{', '.join(recovery_defects)} on at least one call; only the lines it could "
+                f"be attributed to were withdrawn"
+            )
 
         if case_node_expected == 0:
             # Nothing this question asked for was reachable at all: there is no choice left to
@@ -315,14 +327,14 @@ def score_navigation(cases: Sequence[NavigationCase],
         source_expected += case_source_expected
         source_hit += case_source_hit
         if case_withdrawn:
-            # Counted only for lines withdrawn by a BOUND. A line withdrawn because the
-            # recovery was broken is already counted under that defect's own label; adding a
-            # second one would double-count one event under two names.
-            bounded_only = [item for item in case_withdrawn
-                            if any(name in BOUNDED_OBSERVATIONS for name in item["bounded_by"])]
-            if bounded_only:
-                label = "evidence:bounded_recovery"
-                defect_counts[label] = defect_counts.get(label, 0) + len(bounded_only)
+            # Each withdrawn line is counted once, under the cause that withdrew it: the
+            # "bounded_recovery" umbrella for a page boundary or a cut marker, and the defect's
+            # own name for anything else. One event, one name.
+            for item in case_withdrawn:
+                label = ("evidence:bounded_recovery"
+                         if any(name in BOUNDED_OBSERVATIONS for name in item["bounded_by"])
+                         else item["bounded_by"][0])
+                defect_counts[label] = defect_counts.get(label, 0) + 1
             withdrawn_samples.extend(case_withdrawn)
             entry["source_recall_withdrawn"] = case_withdrawn
             entry["reasons"].append(label)
@@ -410,6 +422,10 @@ def score_navigation(cases: Sequence[NavigationCase],
         "false_assertions": {"checked": claims_checked, "found": claims_found,
                              "sample": claim_samples[:12]},
         "evidence_defects": defect_counts,
+        # Reported separately from evidence_defects: a defect SEEN on some call is not
+        # the same claim as a line withdrawn because of it, and only the second is a
+        # statement about a specific labelled source.
+        "recovery_defects_seen": recovery_defects_seen,
         "observations": observation_counts,
         "complete": not incomplete,
         "incomplete_reasons": incomplete,

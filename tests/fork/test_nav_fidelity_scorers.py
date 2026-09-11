@@ -200,8 +200,15 @@ def test_a_source_reachable_from_no_delivered_node_withdraws_only_itself():
 
 
 def test_a_broken_recovery_does_not_erase_what_the_reader_chose():
-    """An evidence defect bears on what came BACK, never on what was CHOSEN."""
-    trace = _trace(recovered_text="", evidence_defects=("evidence:tool_error",))
+    """An evidence defect bears on what came BACK, never on what was CHOSEN.
+
+    # fork: better-hermes-lcm — this used to pass the tool error only as a TRACE-level
+    # evidence_defect. That let one error anywhere in a question excuse every line of it, so
+    # the defect now has to be attributed to the line whose recovery it actually broke.
+    """
+    trace = _trace(recovered_text="",
+                   evidence_defects=("evidence:tool_error",),
+                   bounded_store_ids={11: ("evidence:tool_error",)})
 
     result = score_navigation([_case()], [trace])
 
@@ -210,6 +217,29 @@ def test_a_broken_recovery_does_not_erase_what_the_reader_chose():
     assert result["source_recall"] == {"expected": 0, "hit": 0, "fraction": None}
     assert result["evidence_defects"] == {"evidence:tool_error": 1}
     assert result["complete"] is False
+
+
+def test_an_error_on_one_recovery_does_not_excuse_an_unrelated_missing_line():
+    """A trace-level defect cannot say WHICH line it broke, so it may not excuse any of them.
+
+    Both sources sit under the node the reader opened. One recovery genuinely errored; the
+    other line is simply absent, which is a real miss. Withdrawing both would hide the miss
+    behind an unrelated error — the same per-line-versus-per-question confusion, a third time.
+    """
+    case = _case(
+        expected_store_ids=(11, 12),
+        covering_node_ids={11: (7,), 12: (7,)},
+        evidence_snippets={11: "the line that is simply absent", 12: "the line that errored"},
+    )
+    trace = _trace(recovered_text="nothing useful came back",
+                   evidence_defects=("evidence:tool_error",),
+                   bounded_store_ids={12: ("evidence:tool_error",)})
+
+    result = score_navigation([case], [trace])
+
+    assert result["source_recall"] == {"expected": 1, "hit": 0, "fraction": 0.0}
+    assert [w["store_id"] for w in result["source_recall_withdrawn"]["sample"]] == [12]
+    assert result["per_case"][0]["reasons"].count("reader:incomplete_recovery") == 1
 
 
 def test_a_node_id_the_reader_could_not_have_seen_is_not_credited_as_navigation():
