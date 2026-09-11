@@ -8,9 +8,19 @@ a reader can find them, and the message-body marker keeps upstream's literal
 """
 from __future__ import annotations
 
+import datetime as _datetime
 import json
 import re
 from typing import Any, Iterable, List, Sequence
+
+# The store's OWN rule for what counts as a representable observed_at, so the time this module
+# renders into the summariser's source and the time the observed_at column holds can never
+# disagree about which times are real. It is a PRIVATE symbol in another module and this
+# import is the coupling: renaming or removing `store._normalize_observed_at` breaks the leaf
+# serializer. At module level it breaks at plugin load, where the first import catches it,
+# rather than per message deep inside _serialize_messages. (`store` does not reach this module
+# through any import, direct or lazy, so there is no cycle.)
+from .store import _normalize_observed_at
 
 # Upstream's head/tail split for a 3000-char cap was 2000 + 800; keep those ratios so the
 # 256k anchor reproduces upstream's serialisation byte for byte apart from the marker.
@@ -653,10 +663,6 @@ def _resolve_message_times(msg: dict) -> tuple:
 
 def _render_message_time(value: Any) -> str:
     """A time as ISO-8601 UTC, ``unknown``, or the raw value when it cannot be represented."""
-    # the store's OWN rule decides what is representable, so the source text and
-    # the observed_at column can never disagree about which times are real.
-    from .store import _normalize_observed_at
-
     if _is_blank_value(value):
         return "unknown"
     normalized = _normalize_observed_at(value)
@@ -670,9 +676,11 @@ def _render_message_time(value: Any) -> str:
             f"unparsed({content_head(value, limit=120)}"
             "; full value in envelope_extra.timestamp_raw — lcm_expand)"
         )
-    from datetime import datetime, timezone
-
-    return datetime.fromtimestamp(normalized, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+    return (
+        _datetime.datetime.fromtimestamp(normalized, tz=_datetime.timezone.utc)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
 
 
 def message_time_note(msg: dict) -> str:
