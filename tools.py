@@ -453,6 +453,11 @@ def _parse_strict_int(value: Any, name: str) -> tuple[int | None, str | None]:
         return None, f"{name} must be an integer"
 
 
+# one page of a node's own summary when the caller names no length. The same 4,000
+# characters the index block uses, and a page, not a cut: the response carries the total
+# length, the cursor and the call that returns the rest (#52).
+_DESCRIBE_SUMMARY_MAX_CHARS = 4_000
+
 _LCM_GREP_VALID_SCOPES = frozenset({"current", "all", "session"})
 _LCM_GREP_VALID_CONTENT_SCOPES = frozenset({"history", "externalized", "both"})
 _LCM_GREP_HARD_LIMIT_CAP = 200
@@ -5986,7 +5991,15 @@ def lcm_describe(args: Dict[str, Any], **kwargs) -> str:
         # (round-3 verify-4 #13).
         summary_offset = _parse_non_negative_int(args.get("summary_offset", 0), 0)
         summary_text = str(node.summary or "")
-        summary_max = _parse_positive_int(args.get("summary_max_chars"), 0) or 4_000
+        # the default is resolved BEFORE the positive clamp. `_parse_positive_int(..., 0)`
+        # returns max(1, 0) = 1, so `or 4_000` could never fire and a plain describe answered
+        # with one character and a cursor at offset 1 (#52). The helper is left alone — it also
+        # serves max_tokens and source_limit in the expand handler. A non-positive or
+        # unparseable length means "not specified" here, the same convention the fork uses for
+        # its own sizes, because a zero-character page is the one-character page again.
+        summary_max = _parse_int_value(args.get("summary_max_chars"), _DESCRIBE_SUMMARY_MAX_CHARS)
+        if summary_max <= 0:
+            summary_max = _DESCRIBE_SUMMARY_MAX_CHARS
         summary_end = min(len(summary_text), summary_offset + summary_max)
         info["summary"] = summary_text[summary_offset:summary_end]
         info["summary_chars"] = len(summary_text)
