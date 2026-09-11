@@ -13,11 +13,13 @@ from typing import Any
 
 _TEXT_PART_TYPES = {"text", "input_text", "output_text"}
 
-# The store's own record of what the host's ``content`` WAS, kept in ``envelope_extra``
-# beside the projected text. The `_lcm` prefix keeps it out of the host envelope a row
-# replays (``MessageStore.to_openai_msg`` skips that prefix) and out of the envelope the
-# change-detection fingerprint compares, so it can never reach a provider or be spoofed by a
-# host field of the same name.
+# The store's own record of what the host's ``content`` WAS: written into ``envelope_extra``
+# beside the projected text, and published back at row level under this same name. The `_lcm`
+# prefix is the one every generic consumer of a message dict already skips — the envelope
+# writer, ``MessageStore.to_openai_msg``, ``LCMEngine._message_envelope_fields`` and the
+# active cleaner — so the record can never be replayed to a provider, never be counted as a
+# host field the summariser did not summarise, and never be spoofed by a host key of the same
+# name. It is the store's bookkeeping, and it has to be unmistakable as such at both levels.
 CONTENT_KIND_KEY = "_lcm_content_kind"
 
 CONTENT_KIND_STRING = "str"
@@ -53,7 +55,12 @@ def text_is_ambiguously_typed(text: Any) -> bool:
     Only then does the recorded type change anything: for every other text the value itself
     fixes the type, and callers can leave their comparisons exactly as they were.
     """
-    if not isinstance(text, str) or not text:
+    # the cheap test first: the canonical form of a list or a dict opens with its own bracket
+    # and carries no leading space, so any other text cannot equal one and must not pay for a
+    # parse. This runs inside `message_envelope_fingerprint`, which the per-turn
+    # prefix-revision path calls for every message carrying a host id — the path that was
+    # explicitly optimised because reading whole prefixes tripled the ingest hot path.
+    if not isinstance(text, str) or not text or text[0] not in "[{":
         return False
     try:
         decoded = json.loads(text)
@@ -65,13 +72,13 @@ def text_is_ambiguously_typed(text: Any) -> bool:
 def original_content_from_stored(stored_text: Any, kind: Any) -> Any:
     """The original value a stored row held, given the type recorded with it.
 
-    Fails closed: when the recorded type no longer describes the stored text — ingest
-    protection or tool-result GC rewrites a row's content in place — the stored text is
-    returned as it stands rather than a shape invented from it. A caller that must know
+    Fails closed for every recorded type, ``none`` included: when the type no longer describes
+    the stored text — ingest protection and tool-result GC rewrite a row's content in place,
+    so a row recorded as having held nothing can now hold a placeholder — the stored text is
+    returned as it stands rather than a shape invented from it, and a row whose text really is
+    absent still returns ``None`` because that is what its text is. A caller that must know
     compares ``content_kind(result)`` against the recorded kind.
     """
-    if kind == CONTENT_KIND_NONE:
-        return None
     if kind in (CONTENT_KIND_LIST, CONTENT_KIND_DICT) and isinstance(stored_text, str):
         try:
             decoded = json.loads(stored_text)
@@ -157,7 +164,7 @@ def stored_text_content_for_pattern_matching(content: Any, kind: Any = None) -> 
     valid JSON syntax is not read as evidence of having been JSON.
 
     Omitting ``kind`` keeps the old guess. It is not a default the store needs — every row it
-    hands back carries ``content_kind`` — but the one caller that reads stored rows against
+    hands back carries ``CONTENT_KIND_KEY`` — but the one caller that reads stored rows against
     the ignore patterns still drops that field before it gets here
     (``LCMEngine._matches_ignore_message_patterns``), and without the type the guess is the
     only thing that still recognises a durable structured row as the one the live ignore

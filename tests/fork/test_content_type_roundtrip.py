@@ -9,9 +9,13 @@ the type is recorded beside it, and a row written before that was recorded stays
 """
 import json
 
+from hermes_lcm import marked_loss
+from hermes_lcm.config import LCMConfig
+from hermes_lcm.engine import LCMEngine
 from hermes_lcm.message_content import (
     CONTENT_KIND_KEY,
     CONTENT_KIND_LIST,
+    CONTENT_KIND_NONE,
     CONTENT_KIND_STRING,
     CONTENT_KIND_UNKNOWN,
     content_kind,
@@ -45,13 +49,13 @@ def test_the_list_and_its_json_literal_round_trip_to_different_originals(tmp_pat
         # the stored text is still the one search/token projection, unchanged
         assert structured["content"] == literal["content"] == _IMAGE_PARTS_JSON
         # …and the type is recorded beside it
-        assert structured["content_kind"] == CONTENT_KIND_LIST
-        assert literal["content_kind"] == CONTENT_KIND_STRING
+        assert structured[CONTENT_KIND_KEY] == CONTENT_KIND_LIST
+        assert literal[CONTENT_KIND_KEY] == CONTENT_KIND_STRING
         assert original_content_from_stored(
-            structured["content"], structured["content_kind"]
+            structured["content"], structured[CONTENT_KIND_KEY]
         ) == _IMAGE_PARTS
         assert original_content_from_stored(
-            literal["content"], literal["content_kind"]
+            literal["content"], literal[CONTENT_KIND_KEY]
         ) == _IMAGE_PARTS_JSON
     finally:
         store.close()
@@ -95,7 +99,7 @@ def test_a_row_written_before_the_type_was_recorded_stays_unknown():
         "content": _IMAGE_PARTS_JSON,
         "envelope": {},
     }
-    assert legacy.get("content_kind") is None
+    assert legacy.get(CONTENT_KIND_KEY) is None
     fingerprint = message_envelope_fingerprint(legacy)
     assert f'"content_kind": "{CONTENT_KIND_UNKNOWN}"' in fingerprint
     assert message_envelope_fingerprint(legacy) != message_envelope_fingerprint(
@@ -119,22 +123,98 @@ def test_stored_pattern_text_reads_the_recorded_type_instead_of_guessing():
     ) == _IMAGE_PARTS_JSON
 
 
-def test_omitting_the_type_still_guesses_it_and_that_is_the_remaining_consumer():
-    """Pins the one path that still guesses, so it is impossible to think it was fixed here:
-    `LCMEngine._matches_ignore_message_patterns` reads `msg.get("content")` and drops the row's
-    `content_kind`, and the durable-row half of the ignore policy has nothing else to
-    recognise a structured row by. It goes away when that caller passes the field."""
-    assert stored_text_content_for_pattern_matching(
-        _IMAGE_PARTS_JSON
-    ) == "HEARTBEAT: Do not deploy."
-
-
 def test_a_recorded_type_the_stored_text_no_longer_supports_fails_closed():
     """GC and ingest protection rewrite a row's content in place. The recorded type then no
-    longer describes the text, and inventing a list from it would be worse than saying so."""
+    longer describes the text, and inventing a list from it would be worse than saying so —
+    for every recorded type, `none` included."""
     rewritten = original_content_from_stored("[LCM externalized tool output]", CONTENT_KIND_LIST)
     assert rewritten == "[LCM externalized tool output]"
     assert content_kind(rewritten) != CONTENT_KIND_LIST
+    # a row recorded as holding nothing, whose content was later rewritten to a placeholder,
+    # still reads back as the text it now holds rather than as the nothing it once held
+    assert original_content_from_stored(
+        "[LCM externalized tool output]", CONTENT_KIND_NONE
+    ) == "[LCM externalized tool output]"
+    assert original_content_from_stored(None, CONTENT_KIND_NONE) is None
+
+
+def test_the_type_record_is_never_mistaken_for_a_field_the_host_sent(tmp_path):
+    """The record is the store's bookkeeping. Named without the `_lcm` prefix every generic
+    consumer of a message dict already skips, it read as a HOST field on a row that has no
+    host envelope: the summariser's envelope receipt named it as content it had not
+    summarised, and its mere presence is what decides whether an acknowledgement-shaped turn
+    gets the marker that exists for it or is blanked to empty content instead."""
+    store = MessageStore(str(tmp_path / "phantom.db"))
+    try:
+        store_id = store.append("s", {"role": "assistant", "content": "Acknowledged"})
+        store.commit()
+        row = store.get(store_id)
+        assert LCMEngine._message_envelope_fields(row) == {}    # not a host field…
+        assert marked_loss.envelope_summary_suffix(
+            LCMEngine._message_envelope_fields(row)
+        ) == ""
+        assert row[CONTENT_KIND_KEY] == CONTENT_KIND_STRING     # …but the record is there
+        # and re-storing a row dict cannot turn the record into one either
+        again = store.append("s2", row)
+        store.commit()
+        assert CONTENT_KIND_KEY not in (store.get(again).get("envelope") or {})
+        assert "content_kind" not in store.to_openai_msg(store.get(again))
+    finally:
+        store.close()
+
+
+def _legacy_shaped_db(tmp_path, name, incoming):
+    """A database as the released build wrote it: the row is there, the type record is not."""
+    db = str(tmp_path / name)
+    store = MessageStore(db)
+    store.append("s", incoming)
+    store.commit()
+    row_id, extra = store.connection.execute(
+        "SELECT store_id, envelope_extra FROM messages WHERE session_id='s'").fetchone()
+    envelope = json.loads(extra or "{}")
+    envelope.pop(CONTENT_KIND_KEY, None)
+    store.connection.execute(
+        "UPDATE messages SET envelope_extra = ? WHERE store_id = ?",
+        (json.dumps(envelope, ensure_ascii=False, sort_keys=True) if envelope else None, row_id))
+    store.connection.commit()
+    store.close()
+    return db
+
+
+def test_an_unchanged_legacy_row_is_not_reported_as_a_host_correction(tmp_path):
+    """Refusing to guess a legacy row's type must not fabricate an edit. Archiving a revision
+    does not merely add a row: the summary text then tells the reader that messages summarised
+    there "were later CORRECTED by the host", a correction that never happened."""
+    incoming = {"role": "user", "content": _IMAGE_PARTS, "message_id": "m-1"}
+    engine = LCMEngine(config=LCMConfig(
+        database_path=_legacy_shaped_db(tmp_path, "revision.db", incoming)))
+    try:
+        engine.on_session_start("s", context_length=200_000)
+        engine._session_id = "s"
+        assert engine._record_host_message_revisions([incoming]) == 0
+        rows = engine._store.get_session_messages("s")
+        assert len(rows) == 1
+        assert rows[0][CONTENT_KIND_KEY] == CONTENT_KIND_UNKNOWN
+    finally:
+        engine.shutdown()
+
+
+def test_a_real_edit_of_a_legacy_row_is_still_archived(tmp_path):
+    """Tolerating an unrecorded type must not make the detector blind. That trade is the
+    reason the type is in the fingerprint at all."""
+    incoming = {"role": "user", "content": _IMAGE_PARTS, "message_id": "m-1"}
+    engine = LCMEngine(config=LCMConfig(
+        database_path=_legacy_shaped_db(tmp_path, "edited.db", incoming)))
+    try:
+        engine.on_session_start("s", context_length=200_000)
+        engine._session_id = "s"
+        edited = {"role": "user", "content": "the host replaced it", "message_id": "m-1"}
+        assert engine._record_host_message_revisions([edited]) == 1
+        rows = engine._store.get_session_messages("s")
+        assert len(rows) == 2
+        assert rows[1]["envelope"]["lcm_supersedes_store_id"] == rows[0]["store_id"]
+    finally:
+        engine.shutdown()
 
 
 def test_the_type_marker_never_reaches_the_replayed_message(tmp_path):

@@ -250,7 +250,6 @@ _MESSAGE_SCAFFOLDING_KEYS = frozenset({
     "message_id", "id", "uuid", "event_id", "host_message_id",  # which message
     "store_id", "session_id", "conversation_id", "source", "token_estimate", "pinned",
     "envelope", "envelope_extra", "envelope_corrupt", "envelope_raw", "envelope_raw_chars",
-    "content_kind",                                        # the store's record of the type
 })
 
 

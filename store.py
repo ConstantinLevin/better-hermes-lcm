@@ -118,6 +118,44 @@ def is_revision_row(row: Dict[str, Any]) -> bool:
     return bool(isinstance(envelope, dict) and envelope.get(REVISION_SUPERSEDES_KEY))
 
 
+def stored_content_kind(row: Dict[str, Any]) -> str:
+    """The content type recorded with a stored row, or ``unknown`` when no build recorded one.
+
+    Reads the row-level field ``_row_to_dict`` publishes, falling back to the envelope key for
+    a row dict assembled some other way. Never derived from the text.
+    """
+    if not isinstance(row, dict):
+        return CONTENT_KIND_UNKNOWN
+    envelope = row.get("envelope")
+    recorded = row.get(CONTENT_KIND_KEY) or (
+        envelope.get(CONTENT_KIND_KEY) if isinstance(envelope, dict) else None
+    )
+    return str(recorded or CONTENT_KIND_UNKNOWN)
+
+
+def message_envelope_changed(incoming: Dict[str, Any], stored_row: Dict[str, Any]) -> bool:
+    """Did the host EDIT this already-stored message? Tolerant about a type nobody recorded.
+
+    A straight fingerprint comparison calls a stored row whose content type was never recorded
+    different from its own unchanged incoming message, because one side says ``unknown`` and
+    the other says what it is. That is not evidence of an edit, and the caller does not merely
+    archive an extra row for it: the summary text then tells the reader that some of the
+    messages summarised there "were later CORRECTED by the host" — a correction that never
+    happened, which is a false receipt reaching the model, not a bookkeeping wart.
+
+    So a row carrying no record is compared as if it had held whatever the incoming message
+    holds. Two rows whose types ARE both recorded still separate, which is the point of
+    recording them: an edit that changed only the content type is still archived.
+    """
+    if message_envelope_fingerprint(incoming) == message_envelope_fingerprint(stored_row):
+        return False
+    if stored_content_kind(stored_row) != CONTENT_KIND_UNKNOWN:
+        return True
+    return message_envelope_fingerprint(incoming) != message_envelope_fingerprint({
+        **stored_row, CONTENT_KIND_KEY: _content_kind(incoming.get("content")),
+    })
+
+
 def message_envelope_fingerprint(msg: Dict[str, Any]) -> str:
     """Everything a host sent, for change detection: content, calls and the rest.
 
@@ -175,10 +213,7 @@ def message_envelope_fingerprint(msg: Dict[str, Any]) -> str:
     # rows by an earlier build still compare equal.
     if _text_is_ambiguously_typed(payload["content"]):
         payload["content_kind"] = (
-            str(msg.get("content_kind") or (msg.get("envelope") or {}).get(CONTENT_KIND_KEY)
-                or CONTENT_KIND_UNKNOWN)
-            if stored_row
-            else _content_kind(msg.get("content"))
+            stored_content_kind(msg) if stored_row else _content_kind(msg.get("content"))
         )
     try:
         return json.dumps(payload, ensure_ascii=False, default=str, sort_keys=True)
@@ -2338,16 +2373,24 @@ class MessageStore:
         d.pop("envelope_extra", None)
         # the store's record of what `content` WAS comes out as a field of its own, not
         # as part of the host envelope: "envelope" is what the HOST sent, and `to_openai_msg`
-        # replays every key of it. A row that carries no record was written before the type
-        # was kept, and its type is UNKNOWN — never inferred from the text, because valid JSON
-        # syntax is not evidence of having been JSON (#31 MC01).
+        # replays every key of it. It keeps the `_lcm` prefix at row level too, because that
+        # prefix is the one every generic consumer of a message dict already skips — the
+        # envelope writer above, `to_openai_msg`, `LCMEngine._message_envelope_fields` and the
+        # active cleaner. Named plainly, it read as a field the HOST sent on any row with no
+        # envelope of its own: the summariser's envelope receipt named it as content it had
+        # not summarised, and a non-empty envelope is also what decides whether an
+        # acknowledgement-shaped turn gets the marker that exists for it or is blanked to
+        # empty content instead.
+        # A row that carries no record was written before the type was kept, and its type is
+        # UNKNOWN — never inferred from the text, because valid JSON syntax is not evidence of
+        # having been JSON (#31 MC01).
         envelope = d.get("envelope")
         if isinstance(envelope, dict) and CONTENT_KIND_KEY in envelope:
-            d["content_kind"] = str(envelope.pop(CONTENT_KIND_KEY) or CONTENT_KIND_UNKNOWN)
+            d[CONTENT_KIND_KEY] = str(envelope.pop(CONTENT_KIND_KEY) or CONTENT_KIND_UNKNOWN)
             if not envelope and not d.get("envelope_corrupt"):
                 d.pop("envelope", None)  # a message with nothing extra still stores nothing extra
         else:
-            d["content_kind"] = CONTENT_KIND_UNKNOWN
+            d[CONTENT_KIND_KEY] = CONTENT_KIND_UNKNOWN
         d["source"] = _normalize_source_value(d.get("source"))
         d["conversation_id"] = _normalize_conversation_id_value(d.get("conversation_id"))
         # Deserialize tool_calls JSON

@@ -151,6 +151,7 @@ from .store import (
     MessageStore,
     PRE_PROTECTION_FINGERPRINT_KEY,
     host_message_id_of,
+    message_envelope_changed,
     message_envelope_digest,
     message_envelope_fingerprint,
 )
@@ -2217,8 +2218,11 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                     continue
             # the WHOLE envelope decides, not the content alone: an edit that
             # changed only tool arguments or reasoning metadata was never archived
-            # (round-3 verify-4 #3).
-            elif message_envelope_fingerprint(message) == message_envelope_fingerprint(row):
+            # (round-3 verify-4 #3). The comparison is tolerant about a content type no build
+            # ever recorded (see message_envelope_changed): archiving a revision here does not
+            # only add a row, it makes the summary text tell the reader the host CORRECTED a
+            # message it never corrected.
+            elif not message_envelope_changed(message, row):
                 settled[host_id] = fingerprints.get(host_id, "")
                 continue
             revision = dict(message)
