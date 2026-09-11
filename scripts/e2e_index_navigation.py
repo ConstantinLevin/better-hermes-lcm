@@ -76,6 +76,7 @@ from benchmarking.nav_fidelity import (  # noqa: E402
     CorpusPatternError,
     RecoveryCause,
     attribute_recovery_defects,
+    ensure_failure_reported,
     nearest_node_scopes,
     recovery_causes,
     NavigationCase,
@@ -629,10 +630,11 @@ def label_evidence(result: dict[str, Any], recovered_text: str) -> tuple[list[st
                     unread_nodes.append(parsed)
                 else:
                     unidentified = True
-        # Failures that name no row are scoped below, by the block that contains them.
-        for key in _UNIDENTIFIED_FAILURE_FIELDS:
-            if holder.get(key):
-                unidentified = True
+        # _UNIDENTIFIED_FAILURE_FIELDS are deliberately NOT recognised here: nearest_node_scopes
+        # is their one recogniser, and it scopes them to the block that contains them. Counting
+        # them in both places raised a node-wide duplicate of a failure that had just been
+        # scoped precisely — two recognisers for one signal is what caused the previous defect
+        # in the other direction, and one signal gets one recogniser.
         if holder.get("complete") is False:
             declared_incomplete = True
         if holder.get("has_more"):
@@ -655,9 +657,15 @@ def label_evidence(result: dict[str, Any], recovered_text: str) -> tuple[list[st
     # block is its true scope. Spreading such a label over every node the answer mentioned bound
     # nodes the answer had read perfectly well and hid real misses under them.
     scoped, unscoped = nearest_node_scopes(result, _UNIDENTIFIED_FAILURE_FIELDS)
+    # `unidentified` carries the failures the WALK recognised but could not narrow — an
+    # unhydrated ref with no store_id, an unread root that is not a node id. Passing only
+    # `unscoped` here discarded them: they were recognised and then produced no cause at all,
+    # so they bound nothing, withdrew nothing and were reported nowhere. Both recognisers feed
+    # this now, and ensure_failure_reported is the backstop if a third one ever appears.
+    unidentified = unidentified or bool(unscoped)
     causes = list(recovery_causes(
         tool_failed=tool_failed, identified_missing_rows=identified,
-        unidentified_failure=bool(unscoped),
+        unidentified_failure=unidentified,
         declared_incomplete=declared_incomplete and not scoped,
         has_more=has_more, unread_node_ids=unread_nodes))
     for scoped_node, labels in scoped.items():
@@ -666,7 +674,10 @@ def label_evidence(result: dict[str, Any], recovered_text: str) -> tuple[list[st
         if declared_incomplete:
             causes.append(RecoveryCause("evidence:incomplete_recovery_declared",
                                         node_ids=(scoped_node,)))
-    return tuple(causes), sorted(dict.fromkeys(observations))
+    saw_failure = bool(tool_failed or identified or unidentified or unread_nodes or scoped
+                       or (declared_incomplete and not has_more))
+    return ensure_failure_reported(causes, observed=saw_failure), \
+        sorted(dict.fromkeys(observations))
 
 
 def _walk_dicts(value: Any):

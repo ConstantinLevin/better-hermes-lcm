@@ -13,6 +13,7 @@ from benchmarking.nav_fidelity import (
     CorpusPatternError,
     RecoveryCause,
     attribute_recovery_defects,
+    ensure_failure_reported,
     nearest_node_scopes,
     recovery_causes,
     NavigationCase,
@@ -340,6 +341,26 @@ def test_an_unread_root_binds_that_node_and_not_the_reader():
 # helper that spread a synthesis answer's node-wide labels over every node the answer MENTIONED.
 # That hid unrelated misses: a node the answer read successfully was bound by another node's
 # corrupt payload. A nested failure belongs to the block that contains it, and nothing else.
+
+def test_a_recognised_failure_that_produced_no_cause_is_reported_not_dropped():
+    """The backstop for the one class of defect this review kept finding.
+
+    Every round of it was a failure signal whose scope went wrong, and the worst version is a
+    signal that yields no cause at all and so binds, reports and withdraws nothing. When the
+    caller saw a failure and the causes came back empty, that is a wiring defect in the caller;
+    this makes it surface in the run instead of vanishing.
+    """
+    causes = ensure_failure_reported((), observed=True)
+
+    assert causes == (RecoveryCause("evidence:unclassified_failure", None),)
+
+
+def test_causes_that_were_produced_pass_through_untouched():
+    original = (RecoveryCause("evidence:source_missing", (42,)),)
+
+    assert ensure_failure_reported(original, observed=True) == original
+    assert ensure_failure_reported((), observed=False) == ()
+
 
 def test_a_nested_failure_belongs_to_the_block_that_contains_it():
     """lcm_expand_query answers in blocks; a failure inside one is about that block's node."""

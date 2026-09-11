@@ -176,6 +176,27 @@ def attribute_recovery_defects(
             tuple(sorted(node_wide)))
 
 
+def ensure_failure_reported(causes: Sequence[RecoveryCause], *,
+                            observed: bool) -> tuple[RecoveryCause, ...]:
+    """Backstop: a recognised failure must never come out of the extractor as nothing.
+
+    Every round of review on this harness found the same class of defect — a failure signal
+    whose scope went wrong — and the worst version of it is a signal that yields no cause at
+    all, so it binds nothing, withdraws nothing and, crucially, is reported nowhere. That is
+    always a wiring defect in the caller (two recognisers, one of whose outputs was discarded,
+    is how it happened), and it cannot be caught by looking at the numbers because the numbers
+    look clean.
+
+    So when the caller says it saw a failure and the causes come back empty, one is
+    manufactured. It binds nothing — an unknown scope must never withdraw — but it appears in
+    the run's output, which is the difference between a defect that is visible and a defect
+    that is silent.
+    """
+    if observed and not causes:
+        return (RecoveryCause("evidence:unclassified_failure", None),)
+    return tuple(causes)
+
+
 def nearest_node_scopes(
     result: Any,
     field_labels: Mapping[str, str],
