@@ -26,6 +26,10 @@ from .db_bootstrap import (
     remediate_interim_schema_stamp,
     repair_external_content_fts,
 )
+from .diagnostic_connection import (
+    private_diagnostic_connection,
+    unavailable_check_result,
+)
 from .diagnostics import (
     _has_lifecycle_fragmentation,
     _state_db_path_for_engine,
@@ -908,6 +912,21 @@ def _rotate_apply_text(engine) -> str:
     return "\n".join(lines)
 
 
+def _isolated_fts_integrity(conn, spec) -> dict[str, Any]:
+    """Run the deep FTS check on a handle this diagnostic owns.
+
+    The check's probe INSERT lives in a SAVEPOINT, and a savepoint belongs to
+    the connection, not to the thread: on the live store/DAG connection a doctor
+    still running after the host's tool deadline rolls back rows a concurrent
+    ingest committed on it (#10). No private handle means ``unchecked``, never a
+    pass -- a private handle to an in-memory database is a different, empty one.
+    """
+    with private_diagnostic_connection(conn) as probe:
+        if probe is None:
+            return unavailable_check_result(spec.table_name)
+        return check_external_content_fts_integrity(probe, spec)
+
+
 def _scan_fts_repair(engine) -> dict[str, Any]:
     checks: dict[str, dict[str, Any]] = {}
     specs = {
@@ -918,7 +937,7 @@ def _scan_fts_repair(engine) -> dict[str, Any]:
     for label, spec in specs.items():
         try:
             structural_needs_repair = external_content_fts_needs_repair(conn, spec)
-            integrity_check = check_external_content_fts_integrity(conn, spec)
+            integrity_check = _isolated_fts_integrity(conn, spec)
             integrity_status = str(integrity_check.get("status") or "fail")
             needs_repair = structural_needs_repair or integrity_status == "fail"
             content_count = int(conn.execute(
@@ -991,20 +1010,38 @@ def _doctor_repair_apply_text(engine) -> str:
     # via a race (F3).
     join_background_integrity_scans()
 
-    conn = engine._store.connection
-    try:
-        messages_result = repair_external_content_fts(conn, build_message_fts_spec())
-        nodes_result = repair_external_content_fts(conn, build_nodes_fts_spec())
-    except sqlite3.Error as exc:
-        return "\n".join([
-            "LCM doctor repair apply",
-            "status: error",
-            f"database_path: {backup['db_path']}",
-            f"backup_path: {backup['backup_path']}",
-            f"backup_size: {_fmt_size(int(backup['backup_size']))}",
-            f"error: FTS repair failed: {exc}",
-            "note: backup was created before repair apply",
-        ])
+    # The repair opens BEGIN IMMEDIATE and commits -- and its healthy fast path
+    # commits too. On the live store connection that publishes whatever another
+    # thread had pending there, or discards it on the rollback (#10), so the
+    # repair takes a handle it owns. SQLite's single-writer rule serializes it
+    # against live ingest: losing that race fails the command below with the
+    # backup already taken, and changes nothing.
+    with private_diagnostic_connection(engine._store.connection) as conn:
+        if conn is None:
+            return "\n".join([
+                "LCM doctor repair apply",
+                "status: error",
+                f"database_path: {backup['db_path']}",
+                f"backup_path: {backup['backup_path']}",
+                f"backup_size: {_fmt_size(int(backup['backup_size']))}",
+                "error: this database cannot be reopened on a second connection "
+                "(in-memory or anonymous), and FTS repair must not run on the live "
+                "store connection",
+                "note: no FTS tables were repaired",
+            ])
+        try:
+            messages_result = repair_external_content_fts(conn, build_message_fts_spec())
+            nodes_result = repair_external_content_fts(conn, build_nodes_fts_spec())
+        except sqlite3.Error as exc:
+            return "\n".join([
+                "LCM doctor repair apply",
+                "status: error",
+                f"database_path: {backup['db_path']}",
+                f"backup_path: {backup['backup_path']}",
+                f"backup_size: {_fmt_size(int(backup['backup_size']))}",
+                f"error: FTS repair failed: {exc}",
+                "note: backup was created before repair apply",
+            ])
 
     return "\n".join([
         "LCM doctor repair apply",
@@ -1338,7 +1375,7 @@ def _doctor_text(engine) -> str:
 
     try:
         store_fts_count = int(store_conn.execute("SELECT COUNT(*) FROM messages_fts").fetchone()[0])
-        store_fts_integrity = check_external_content_fts_integrity(store_conn, build_message_fts_spec())
+        store_fts_integrity = _isolated_fts_integrity(store_conn, build_message_fts_spec())
         store_fts = _fts_text_status(store_fts_integrity)
         if store_fts == "fail":
             issues.append("messages_fts")
@@ -1352,7 +1389,7 @@ def _doctor_text(engine) -> str:
 
     try:
         node_fts_count = int(dag_conn.execute("SELECT COUNT(*) FROM nodes_fts").fetchone()[0])
-        node_fts_integrity = check_external_content_fts_integrity(dag_conn, build_nodes_fts_spec())
+        node_fts_integrity = _isolated_fts_integrity(dag_conn, build_nodes_fts_spec())
         node_fts = _fts_text_status(node_fts_integrity)
         if node_fts == "fail":
             issues.append("nodes_fts")
