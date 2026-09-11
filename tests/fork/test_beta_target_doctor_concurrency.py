@@ -139,9 +139,22 @@ def test_a_paused_doctor_cannot_roll_back_a_successful_concurrent_ingest(tmp_pat
             "the doctor reported no messages FTS integrity check at all: a check that was removed "
             f"cannot roll anything back, and it cannot tell anyone anything either — {payload!r}"
         )
-        assert fts_checks["messages_fts_integrity"] != "unchecked", (
-            "the doctor ran the check and reported it as not actually checked, which reads as "
-            f"healthy to anyone who does not open the detail — {fts_checks!r}"
+        # `pass` and nothing else. The first version of this assertion said
+        # `!= "unchecked"`, which could never fire: `check_external_content_fts_integrity` returns
+        # "unchecked" but `lcm_doctor` renders that as **"warn"** before it reaches the payload
+        # (tools.py:7693), so the string being forbidden never appears and an unchecked scan
+        # sailed through the gate added to stop exactly that. On a database that is intact and
+        # uncontended — which this fixture's is — the only honest answer is that the scan ran and
+        # found the index whole; "warn" here means it could not look, and a #10 fix that reaches
+        # for the shared connection and gives up would produce precisely that.
+        fts_detail = next(
+            (check.get("detail") for check in payload.get("checks", [])
+             if check.get("check") == "messages_fts_integrity"), None)
+        assert fts_checks["messages_fts_integrity"] == "pass", (
+            "the messages FTS integrity scan did not report a clean check on an intact, "
+            "uncontended database. 'warn' is how the doctor renders 'unchecked', i.e. it never "
+            f"looked — which reads as healthy to anyone who does not open the detail. "
+            f"status={fts_checks['messages_fts_integrity']!r} detail={fts_detail!r}"
         )
     finally:
         engine.shutdown()
