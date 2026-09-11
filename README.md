@@ -878,9 +878,12 @@ which return every message unchanged:
   those as a failure) — reported as `bypass_not_compacted` with that reason, and
   deliberately *not* through the abort flag: it is a no-op, not an alarm.
 
-A context still over the model window after any of these — including one the
-host's compressor did shorten — is reported as `bypass_over_bound` with a warning
-rather than as a success.
+A context still over the model window is reported as `bypass_over_bound` with a
+warning rather than as a success — but only once the host's compressor actually
+ran: after an abort, after "nothing to compact", and after a compaction it did
+perform. The unavailable and raises paths return before that check, under
+`bypass_not_compacted` with the abort flag raised, so an operator looking for
+over-window bypassed sessions should grep for both statuses.
 
 ### Large tool-output handling
 
