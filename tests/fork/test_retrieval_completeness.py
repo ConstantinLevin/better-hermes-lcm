@@ -534,8 +534,14 @@ def test_several_explicit_roots_report_the_ones_the_budget_never_reached(tmp_pat
             "lcm_expand_query",
             {"prompt": "what was decided?", "node_ids": roots, "context_max_tokens": 30}))
 
-        # one receipt names every root the budget could not reach, rather than one empty
-        # block each: the count of receipts is not the contract, naming the nodes is
+        # fork: better-hermes-lcm — this used to assert one `unread_evidence` block PER
+        # unreached root, reading their ids off `block["node_id"]`. The roots loop now stops
+        # when the evidence budget is spent and names every root it did not reach in ONE
+        # receipt, because a block plus a receipt per unreachable root made the emitted context
+        # grow with the caller's own node list, far past the budget it was given. The count of
+        # receipts was never the contract; naming the nodes is, so the assertion moved to
+        # membership in `pagination["unread_node_ids"]` — the same claim, against the shape
+        # that now carries it.
         unread_nodes = {
             node_id
             for b in captured["blocks"] if b.get("type") == "unread_evidence"

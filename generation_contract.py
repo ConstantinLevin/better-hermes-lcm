@@ -23,11 +23,13 @@ does not have. The cost of this rule is that a route whose adapter genuinely nev
 would be refused wholesale — loudly, with the sources kept, which is the direction this fork
 errs in.
 
-What remains invisible is the Codex/Responses adapter: it rebuilds the response as chat
-choices with a fabricated ``stop``, drops ``status``, ``incomplete_details`` and ``error`` on
-the way, and DOES carry usage — so an ``incomplete`` or ``failed`` run reaches us looking
-exactly like a finished one. Closing that needs the adapter to carry the provider's own
-terminal event through unaltered: a host contract, not a plugin check.
+What remains invisible is every path that rebuilds the response as chat choices with a
+fabricated ``stop`` while carrying a usage record forward: the Codex/Responses adapter, which
+drops ``status``, ``incomplete_details`` and ``error`` on the way, and the generic
+Responses-shape recovery, whose fallback branch reconstructs the response without the status it
+was carrying. An ``incomplete`` or ``failed`` run then reaches us looking exactly like a
+finished one. Closing that needs the adapter to carry the provider's own terminal event through
+unaltered: a host contract, not a plugin check.
 
 Refusing is safe: every consumer treats it as "the summariser was unavailable", which in this
 fork means the sources stay raw and nothing is published.
