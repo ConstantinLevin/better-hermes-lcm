@@ -46,6 +46,12 @@ jobs:
   test:
     runs-on: ubuntu-latest
     strategy:
+      # every leg reports. With the default fail-fast, 3.14 breaking cancelled 3.11, 3.12 and
+      # 3.13 mid-run, so a matrix that exists to compare interpreters produced one result and
+      # three "cancelled" — and the three it cancelled were the ones everything else is measured
+      # on. A run that hides three answers because a fourth broke is a weaker instrument than it
+      # looks, and the minutes it saves are not worth the signal.
+      fail-fast: false
       matrix:
         python-version: ["3.11", "3.12", "3.13", "3.14"]
 
@@ -97,7 +103,17 @@ jobs:
           # group- or other-writable, and a runner defaulting to umask 002 would fail every test
           # that opens a store, for a reason that has nothing to do with the change under test.
           umask 077
-          python -m pytest tests/ -q
+          # ONE deselection, and it buys no leniency. `test_cancellation_propagates_through_call_llm`
+          # imports the host's real `AuxiliaryExplicitCancellation`, a BaseException the plugin
+          # must not swallow — the whole point is that it is the host's class and not a local
+          # stand-in. The stub written above is `agent.context_engine` and nothing else, so the
+          # test cannot run here, and extending the stub with a fake auxiliary_client would make
+          # it assert against a hand-built copy of the thing under test (#16's complaint exactly).
+          # It is REQUIRED in the host-integration job below, against the pinned revision, so
+          # nothing is excused — only relocated. pytest reports it as "1 deselected".
+          echo "::notice::deselecting test_cancellation_propagates_through_call_llm here; it needs the real host and is required in host-integration"
+          python -m pytest tests/ -q \
+            --deselect tests/fork/test_host_cooldown.py::test_cancellation_propagates_through_call_llm
 
       - name: Run static validation
         run: |
@@ -139,30 +155,50 @@ jobs:
           # through one named host, not interpreter coverage.
           python-version: "3.11"
 
-      - name: Install the host revision's dependencies
+      - name: Materialise the host revision's own environment from its lock
+        working-directory: hermes-agent
         run: |
           python -m pip install --upgrade pip
-          python -m pip install pytest numpy
-          # the host's declared dependencies come from the checked-out revision itself, so this
-          # lane cannot drift from what that revision actually needs.
-          python -m pip install ./hermes-agent
+          python -m pip install uv
+          # `uv sync`, not `pip install ./hermes-agent`. The first attempt used pip and CI proved
+          # it cannot work: this revision's setup.py overrides `bdist_wheel`/`sdist` to raise
+          # outside a Nix build, and pip's PEP 517 path calls exactly that
+          # ("Building wheels or sdists for hermes-agent is not supported"). The same file says
+          # which paths ARE supported — "Editable installs (uv sync, pip install -e ., nix
+          # develop) use build_editable, which does NOT call bdist_wheel" — and the revision ships
+          # a 722 KB uv.lock for it.
+          #
+          # `--frozen` uses that lock exactly and refuses to re-resolve, so the lane installs what
+          # the pinned revision pins rather than whatever PyPI offers today. A lane whose
+          # dependency set drifts is a lane that proves something different every run.
+          uv sync --frozen --python 3.11
 
       - name: Run the fork host lane, binding
         env:
           LCM_REQUIRE_HOST: "1"
           # `_host_root()` finds the checkout by looking for run_agent.py + tools/ beside the
           # interpreter or on sys.path, so putting the source tree on PYTHONPATH is what makes
-          # the pinned checkout — not the installed copy — the host under test.
+          # the pinned checkout the host under test.
           PYTHONPATH: ${{ github.workspace }}/hermes-agent
+          # scripts/test.sh's two overridable inputs: the uv binary and the interpreter that has
+          # the host's dependencies. Locally those default to the operator's install; here they
+          # are the runner's uv and the venv uv sync just built from the pinned lock.
+          HERMES_PYTHON: ${{ github.workspace }}/hermes-agent/.venv/bin/python
         working-directory: plugin
         run: |
-          # scripts/test.sh sets this and bare pytest does not: the plugin refuses a SQLite file
-          # whose parent directory is group- or other-writable, and a runner whose default umask
-          # is 002 would fail every test that opens a store — for a reason that has nothing to do
-          # with the host. Set it rather than depending on the runner's default being 022.
-          umask 077
-          python -m pytest tests/fork/test_host_integration.py \
-                           tests/fork/test_host_entrypoints.py -q -rs
+          # test_host_cooldown.py is in this list deliberately. It imports the host's real
+          # AuxiliaryExplicitCancellation — a BaseException the plugin must not swallow — and
+          # cannot run in the stub job, which is why that job deselects it. This is where it is
+          # required, so the deselection there costs no coverage.
+          #
+          # scripts/test.sh rather than bare pytest: it sets `umask 077` itself (the plugin
+          # refuses a SQLite file whose parent directory is group- or other-writable, and a
+          # runner defaulting to 002 would fail every test that opens a store) and it is the
+          # command the fork is actually developed against.
+          UV="$(command -v uv)" bash scripts/test.sh \
+              tests/fork/test_host_integration.py \
+              tests/fork/test_host_entrypoints.py \
+              tests/fork/test_host_cooldown.py -rs
 
   # The negative control, and it is not optional: a lane nobody has watched fail is not a lane.
   # This job is deliberately the host lane WITHOUT a host — same checkout, same command, same
