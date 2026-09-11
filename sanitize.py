@@ -237,6 +237,44 @@ def _content_carries_text(value: Any) -> bool:
     return value is not None
 
 
+# Message-level keys that record WHEN, WHERE and HOW a turn was captured rather than WHAT it
+# said. The host stamps them on every message it builds, including the ones that really did say
+# nothing, so a turn carrying only these still held nothing. Everything else is treated as
+# payload — the same direction `_structured_part_has_visible_assistant_content` already takes
+# for unknown content blocks, because dropping a legitimate turn is the worse error.
+_MESSAGE_SCAFFOLDING_KEYS = frozenset({
+    "role", "content",                                    # decided by the caller, above
+    "tool_calls", "tool_call_id", "tool_name", "name",     # tool sequencing, decided separately
+    "timestamp", "observed_at", "observed_at_source", "ingested_at",  # when
+    "display_kind", "finish_reason", "cache_control",      # how it was rendered/ended
+    "message_id", "id", "uuid", "event_id", "host_message_id",  # which message
+    "store_id", "session_id", "conversation_id", "source", "token_estimate", "pinned",
+    "envelope", "envelope_extra", "envelope_corrupt", "envelope_raw", "envelope_raw_chars",
+})
+
+
+def _message_carries_more_than_its_content(msg: Dict[str, Any]) -> bool:
+    """Does this turn hold anything BESIDES the content already found to be empty?
+
+    The existence of a whole host message used to be decided from ``content`` and
+    ``tool_calls`` alone: ``_content_carries_text`` is handed the content VALUE and never sees
+    the message, so a sibling field carrying the turn's actual payload could not keep it alive.
+    Hermes' user-redirect placeholder is exactly that shape — empty display content,
+    ``display_kind='hidden'`` and ``api_content='[response interrupted]'``, the string the host
+    substitutes into its own API copy — and it was removed wholesale from the replayed context
+    with no marker, so the context showed no turn where one happened. Deciding a host message
+    does not exist is not LCM's to make.
+    """
+    for key, value in msg.items():
+        if not isinstance(key, str) or key in _MESSAGE_SCAFFOLDING_KEYS:
+            continue
+        if key.startswith("lcm_") or key.startswith("_lcm"):
+            continue  # this plugin's own bookkeeping, not something the host sent
+        if _content_carries_text(value):
+            return True
+    return False
+
+
 def _clean_active_assistant_message(msg: Dict[str, Any]) -> Dict[str, Any] | None:
     if msg.get("role") != "assistant":
         return msg
@@ -251,7 +289,9 @@ def _clean_active_assistant_message(msg: Dict[str, Any]) -> Dict[str, Any] | Non
         # still dropped outright — an empty turn loses nothing, and inventing a receipt for
         # it would be a false claim of removal.
         if not _content_carries_text(original_content):
-            return None if not msg.get("tool_calls") else msg
+            if msg.get("tool_calls") or _message_carries_more_than_its_content(msg):
+                return msg
+            return None
         cleaned_content = ""
     if cleaned_content == original_content:
         return msg

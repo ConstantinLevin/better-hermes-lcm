@@ -5983,8 +5983,13 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
             cleaned.append(msg)
 
         if dropped_assistant_messages:
+            # say what was actually dropped. "No visible content" also
+            # described the turns that carry their payload in a sibling field (`api_content`,
+            # `reasoning_content`, a native carrier); those are kept now, and what remains
+            # here held nothing at all.
             logger.info(
-                "LCM active-context cleanup: dropped %d assistant message(s) with no visible content",
+                "LCM active-context cleanup: dropped %d empty assistant message(s) "
+                "(no content, no tool calls and no carrier field)",
                 dropped_assistant_messages,
             )
         if stripped_assistant_messages:
@@ -7193,11 +7198,13 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                         omitted_node_ids.append(dropped_node_id)
         # whatever was left out is named, so absence from the prefix
         # never reads as absence from history. That includes the assistant turns the
-        # active-context cleanup below is about to drop for holding only internal content.
-        dropped_internal_turns = receipt_only_turns + sum(
-            1 for message in tail_selected
-            if isinstance(message, dict) and _should_drop_active_assistant_message(message)
-        )
+        # active-context cleanup below is about to drop for holding only internal content:
+        # those are the receipt-only ones, which held something and had it replaced.
+        # The cleanup's remaining drop is a turn that held NOTHING — no content, no tool
+        # calls and no carrier field — and the marker line this feeds says the turn "held
+        # only internal/reasoning content". Counting an empty turn there claimed a removal
+        # that never happened, which is its own defect.
+        dropped_internal_turns = receipt_only_turns
         # a turn can be PARTLY internal: its visible text is replayed while
         # a <think> block is not. Counting only whole dropped turns left that removal unnamed
         # (round-2 verify-4 #16).
