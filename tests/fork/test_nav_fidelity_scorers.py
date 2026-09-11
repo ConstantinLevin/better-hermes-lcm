@@ -250,16 +250,29 @@ def test_an_error_on_one_recovery_does_not_excuse_an_unrelated_missing_line():
 # scope. That model cannot represent a result carrying TWO failures with DIFFERENT scopes, and
 # on a mixed failure it silently collapsed the unidentified one into the named rows. Causes
 # carry their own scope now, and the split is mechanical.
+#
+# The change is not only to what they CALL. The third one's expected VALUE changed too: a
+# corrupt payload with no named rows used to expect only
+# ("evidence:incomplete_recovery_declared",) node-wide, and now also expects
+# "evidence:source_missing" there, because the corruption is a cause in its own right rather
+# than something the derived incompleteness stood in for.
+#
+# All three also gained has_more=False. Deriving an incompleteness from `complete: false`
+# depends on whether paging is its only cause, and these three are about non-paging causes.
 
 def test_a_tool_that_names_the_missing_rows_binds_only_those_rows():
     """`complete: false` is DOWNSTREAM of the named rows, so it must not bind the whole node.
 
-    tools.py:1746 sets `complete: false` *because* of missing_source_store_ids, so when those
-    rows are the whole story the two labels are one event.
+    On the base tree the emitter sets `complete: false` *because* of missing_source_store_ids,
+    so when those rows are the whole story the two labels are one event. The citation this
+    docstring used to carry (tools.py:1746) is deliberately gone: a retrieval branch adds
+    `has_more` to the same reason list, so the line number no longer establishes the claim and
+    the suppression rule above is what makes the derivation safe.
     """
     causes = recovery_causes(tool_failed=False, identified_missing_rows=(42,),
-                             unidentified_failure=False, declared_incomplete=True)
-    per_row, node_wide = attribute_recovery_defects(causes)
+                             unidentified_failure=False, declared_incomplete=True,
+                             has_more=False)
+    per_row, _per_node, node_wide = attribute_recovery_defects(causes)
 
     assert per_row == {42: ("evidence:incomplete_recovery_declared", "evidence:source_missing")}
     assert node_wide == ()
@@ -268,8 +281,9 @@ def test_a_tool_that_names_the_missing_rows_binds_only_those_rows():
 def test_a_whole_call_failure_still_binds_the_whole_node():
     """A tool error returned nothing at all, so it bounds every row that call was about."""
     causes = recovery_causes(tool_failed=True, identified_missing_rows=(42,),
-                             unidentified_failure=False, declared_incomplete=False)
-    per_row, node_wide = attribute_recovery_defects(causes)
+                             unidentified_failure=False, declared_incomplete=False,
+                             has_more=False)
+    per_row, _per_node, node_wide = attribute_recovery_defects(causes)
 
     assert per_row == {42: ("evidence:source_missing",)}
     assert node_wide == ("evidence:tool_error",)
@@ -279,11 +293,46 @@ def test_an_incomplete_recovery_naming_no_rows_still_binds_the_node():
     """A corrupt payload declares incompleteness without naming a store_id; the node is all
     the attribution available, and losing it would charge the reader for the corruption."""
     causes = recovery_causes(tool_failed=False, identified_missing_rows=(),
-                             unidentified_failure=True, declared_incomplete=True)
-    per_row, node_wide = attribute_recovery_defects(causes)
+                             unidentified_failure=True, declared_incomplete=True,
+                             has_more=False)
+    per_row, _per_node, node_wide = attribute_recovery_defects(causes)
 
     assert per_row == {}
     assert node_wide == ("evidence:incomplete_recovery_declared", "evidence:source_missing")
+
+
+def test_an_ordinary_paged_page_raises_no_incompleteness_cause():
+    """`beta/retrieval` sets `complete: false` for `has_more` alone (tools.py:1813-1826).
+
+    Deriving an incompleteness cause from that binds a whole subtree on an ordinary page, and
+    unlike the paging observation it is never cleared. The paging channel already self-clears
+    when the reader follows the cursor, so paging must not raise a second, stickier signal.
+    """
+    causes = recovery_causes(tool_failed=False, identified_missing_rows=(),
+                             unidentified_failure=False, declared_incomplete=True,
+                             has_more=True)
+
+    assert causes == ()
+
+
+def test_an_incompleteness_with_a_real_cause_survives_a_paged_page():
+    """Paging suppresses the derived signal only when paging is the whole story."""
+    causes = recovery_causes(tool_failed=False, identified_missing_rows=(),
+                             unidentified_failure=True, declared_incomplete=True,
+                             has_more=True)
+
+    assert RecoveryCause("evidence:incomplete_recovery_declared", None) in causes
+    assert RecoveryCause("evidence:source_missing", None) in causes
+
+
+def test_an_unread_root_binds_that_node_and_not_the_reader():
+    """A synthesis block naming roots it never read identifies nodes, not rows."""
+    per_row, per_node, node_wide = attribute_recovery_defects(
+        (RecoveryCause("evidence:source_unread", node_ids=(12, 13)),))
+
+    assert per_row == {}
+    assert per_node == {12: ("evidence:source_unread",), 13: ("evidence:source_unread",)}
+    assert node_wide == ()
 
 
 def test_a_mixed_recovery_failure_keeps_both_attributions():
@@ -294,8 +343,9 @@ def test_a_mixed_recovery_failure_keeps_both_attributions():
     payload is corrupt then gets charged to the reader.
     """
     causes = recovery_causes(tool_failed=False, identified_missing_rows=(42,),
-                             unidentified_failure=True, declared_incomplete=True)
-    per_row, node_wide = attribute_recovery_defects(causes)
+                             unidentified_failure=True, declared_incomplete=True,
+                             has_more=False)
+    per_row, _per_node, node_wide = attribute_recovery_defects(causes)
 
     assert per_row == {42: ("evidence:source_missing",)}
     assert node_wide == ("evidence:incomplete_recovery_declared", "evidence:source_missing")
@@ -304,9 +354,11 @@ def test_a_mixed_recovery_failure_keeps_both_attributions():
 def test_a_declared_incompleteness_is_row_scoped_only_when_the_named_rows_explain_it():
     """With an unidentified failure in the same result, "incomplete" is not about row 42 alone."""
     narrow = recovery_causes(tool_failed=False, identified_missing_rows=(42,),
-                             unidentified_failure=False, declared_incomplete=True)
+                             unidentified_failure=False, declared_incomplete=True,
+                             has_more=False)
     broad = recovery_causes(tool_failed=False, identified_missing_rows=(42,),
-                            unidentified_failure=True, declared_incomplete=True)
+                            unidentified_failure=True, declared_incomplete=True,
+                            has_more=False)
 
     assert RecoveryCause("evidence:incomplete_recovery_declared", (42,)) in narrow
     assert RecoveryCause("evidence:incomplete_recovery_declared", None) in broad

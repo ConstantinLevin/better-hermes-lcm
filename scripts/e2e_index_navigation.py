@@ -584,10 +584,17 @@ def label_evidence(result: dict[str, Any], recovered_text: str) -> tuple[list[st
     observations: list[str] = []
     tool_failed = bool(result.get("__tool_error__") or result.get("error"))
     identified: list[int] = []
+    unread_nodes: list[int] = []
     unidentified = False
     declared_incomplete = False
+    has_more = False
     pagination = result.get("pagination")
-    for holder in (result, pagination if isinstance(pagination, dict) else {}):
+    # Walk the WHOLE result, not just its top level and its own pagination block. lcm_expand_query
+    # answers with synthesis blocks and carries no top-level pagination at all, so a scan of two
+    # fixed places found nothing in it: an unread_evidence block naming roots never read, a
+    # nested corrupt payload and incomplete_context_blocks all bound nothing, and every labelled
+    # line under those roots was charged to the reader.
+    for holder in _walk_dicts(result):
         # Rows the tool NAMED: the narrowest attribution available, and the one that keeps a
         # failure from withdrawing lines it never touched.
         for key in ("missing_source_store_ids", "unreadable_source_ids", "missing_source_ids",
@@ -596,14 +603,33 @@ def label_evidence(result: dict[str, Any], recovered_text: str) -> tuple[list[st
                 parsed = _as_int(value)
                 if parsed is not None:
                     identified.append(parsed)
+        # An unhydrated externalized ref carries its own store_id, so it is an IDENTIFIED row
+        # rather than an unnamed failure — the narrower binding is available and must be used.
+        for value in holder.get("unhydrated_externalized_refs") or ():
+            parsed = _as_int(value.get("store_id")) if isinstance(value, dict) else None
+            if parsed is not None:
+                identified.append(parsed)
+            else:
+                unidentified = True
+        # Roots a synthesis answer never read: nodes, not rows. Binding those nodes is narrower
+        # than binding everything the call touched.
+        for key in ("unread_evidence", "unread_roots", "unread_node_ids"):
+            for value in holder.get(key) or ():
+                parsed = _as_int(value.get("node_id") if isinstance(value, dict) else value)
+                if parsed is not None:
+                    unread_nodes.append(parsed)
+                else:
+                    unidentified = True
         # Failures the tool reported WITHOUT naming the rows they cost. The node is then the
         # only honest scope; dropping them would charge the reader for what they removed.
-        for key in ("missing_source_node_ids", "corrupt_payloads"):
+        for key in ("missing_source_node_ids", "corrupt_payloads", "incomplete_context_blocks"):
             if holder.get(key):
                 unidentified = True
-    if isinstance(pagination, dict):
-        if pagination.get("complete") is False:
+        if holder.get("complete") is False:
             declared_incomplete = True
+        if holder.get("has_more"):
+            has_more = True
+    if isinstance(pagination, dict):
         if pagination.get("has_more") or pagination.get("remaining_sources"):
             observations.append("evidence:paged_result")
         if pagination.get("complete") is True and pagination.get("has_more"):
@@ -619,8 +645,20 @@ def label_evidence(result: dict[str, Any], recovered_text: str) -> tuple[list[st
         observations.append("evidence:truncated_or_marked")
     causes = recovery_causes(tool_failed=tool_failed, identified_missing_rows=identified,
                              unidentified_failure=unidentified,
-                             declared_incomplete=declared_incomplete)
+                             declared_incomplete=declared_incomplete,
+                             has_more=has_more, unread_node_ids=unread_nodes)
     return causes, sorted(dict.fromkeys(observations))
+
+
+def _walk_dicts(value: Any):
+    """Every dict inside a tool result, the result itself included."""
+    if isinstance(value, dict):
+        yield value
+        for item in value.values():
+            yield from _walk_dicts(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from _walk_dicts(item)
 
 
 # ── readers ─────────────────────────────────────────────────────────────────────────────────
@@ -694,9 +732,11 @@ class LexicalReader:
                 # Each cause is attributed to the recovery it actually broke: the exact rows
                 # the tool named, or failing that the rows this node holds. A trace-level
                 # defect cannot say which line it broke, so it may not excuse any of them.
-                per_row, node_wide = attribute_recovery_defects(found_causes)
+                per_row, per_node, node_wide = attribute_recovery_defects(found_causes)
                 for store_id, labels in per_row.items():
                     bounded_direct.setdefault(store_id, set()).update(labels)
+                for bound_node, labels in per_node.items():
+                    bounded_nodes.setdefault(bound_node, set()).update(labels)
                 for name in node_wide:
                     bounded_nodes.setdefault(node_id, set()).add(name)
                 # Bounds are attributed to THIS NODE, not to the whole trace. A marker in one
@@ -862,10 +902,13 @@ class ModelReader:
                 seen_ids: set[int] = set()
                 _collect_text(result, sink, seen_ids)
                 piece = "\n".join(sink)
-                # Every node id this result showed the reader becomes navigable from here on.
-                visible_nodes.update(_node_ids_in(result))
                 found_causes, found_observations = label_evidence(result, piece)
                 if sourced:
+                    # Only a SOURCED result may reveal new navigable ids. An lcm_expand result
+                    # echoes its own node_id, so harvesting from an unsourced call let a guessed
+                    # id launder itself: the second call on the same guess was credited as
+                    # navigation while the run still named it unsourced.
+                    visible_nodes.update(_node_ids_in(result))
                     store_ids.update(seen_ids)
                     texts.append(piece)
                     defects.extend(cause.label for cause in found_causes)
@@ -875,9 +918,11 @@ class ModelReader:
                     # clears the bound, and a marker in one node's page never bounds another's.
                     # CAUSES are attributed the same way — a trace-level label cannot say
                     # which line it broke, so it may not excuse any of them.
-                    per_row, node_wide = attribute_recovery_defects(found_causes)
+                    per_row, per_node, node_wide = attribute_recovery_defects(found_causes)
                     for missing_id, labels in per_row.items():
                         bounded_direct.setdefault(missing_id, set()).update(labels)
+                    for bound_node, labels in per_node.items():
+                        bounded_nodes.setdefault(bound_node, set()).update(labels)
                     bounds = {name for name in found_observations
                               if name in BOUNDED_OBSERVATIONS}
                     bounds |= set(node_wide)
@@ -1283,6 +1328,18 @@ def main(argv: Optional[list[str]] = None) -> int:
         block["window"] = args.window
         block["turns"] = args.turns
         block["note"] = note
+    navigation["known_limitations"] = [
+        # Recorded deliberately, not fixed: the fix is a design question, not a defect, and it
+        # is latent on this tree.
+        "Node recall is never withdrawn for a defect in the NAVIGATIONAL material. The scoring "
+        "rule — an evidence defect bears on what came back, never on what was chosen — is right "
+        "for content and wrong for the material the choice is made from: a reader choosing among "
+        "truncated or elided child summaries is booked reader:wrong_node, which charges another "
+        "issue's bound as model failure. Latent on this tree (no child summary in either anchor "
+        "run carried a truncation marker), and it will matter on a candidate where they do.",
+        "The condensation gate is moved by --condense-budget-fraction, so the index shape under "
+        "test is not the shape production has today; see frontier_shape.",
+    ]
     navigation["observations_note"] = (
         "observations and recalls are tallied over SCORED cases only "
         f"({navigation['scored']} of {navigation['cases_total']}); cases withdrawn for a "

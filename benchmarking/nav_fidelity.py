@@ -98,11 +98,17 @@ class RecoveryCause:
 
     label: str
     store_ids: tuple[int, ...] | None = None
+    # Some failures identify NODES rather than rows — a synthesis block naming roots it never
+    # read. Binding those nodes is narrower than binding everything the call touched, and the
+    # caller expands them to the rows they hold.
+    node_ids: tuple[int, ...] | None = None
 
 
 def recovery_causes(*, tool_failed: bool, identified_missing_rows: Sequence[int],
                     unidentified_failure: bool,
-                    declared_incomplete: bool) -> tuple[RecoveryCause, ...]:
+                    declared_incomplete: bool,
+                    has_more: bool = False,
+                    unread_node_ids: Sequence[int] = ()) -> tuple[RecoveryCause, ...]:
     """Turn what one tool result reported into causes, each carrying its own scope.
 
     One result can carry SEVERAL failures with DIFFERENT scopes — a named unreadable row and a
@@ -111,20 +117,33 @@ def recovery_causes(*, tool_failed: bool, identified_missing_rows: Sequence[int]
     silently collapsed the unidentified failure into the named rows.
 
     ``declared_incomplete`` (``pagination.complete is False``) is derived, never a cause of its
-    own: tools.py sets it *because* of the failures above it. It is row-scoped only when the
+    own: the tool sets it *because* of the failures above it. It is row-scoped only when the
     identified rows are the whole story; any unidentified failure in the same result makes it
     node-wide, because then "incomplete" is not a statement about those rows alone.
+
+    **And it is suppressed entirely when paging is its only cause.** A retrieval path that
+    appends a "there is more" reason to the same list that drives ``complete`` makes
+    ``complete: false`` appear on an ordinary page with nothing missing and nothing corrupt.
+    Deriving an incompleteness cause from that binds the whole subtree under the node — and
+    unlike the paging observation, which clears as soon as the reader follows the cursor, that
+    binding is never cleared. Paging already has a channel; it must not raise a second,
+    stickier one. A real cause alongside the paging still raises it.
     """
     causes: list[RecoveryCause] = []
     rows = tuple(sorted({int(value) for value in identified_missing_rows}))
+    unread = tuple(sorted({int(value) for value in unread_node_ids}))
+    real_cause = bool(rows) or unidentified_failure or tool_failed or bool(unread)
     if tool_failed:
         causes.append(RecoveryCause("evidence:tool_error", None))
     if rows:
         causes.append(RecoveryCause("evidence:source_missing", rows))
     if unidentified_failure:
         causes.append(RecoveryCause("evidence:source_missing", None))
-    if declared_incomplete:
-        explained_by_rows = bool(rows) and not unidentified_failure and not tool_failed
+    if unread:
+        causes.append(RecoveryCause("evidence:source_unread", node_ids=unread))
+    if declared_incomplete and not (has_more and not real_cause):
+        explained_by_rows = bool(rows) and not unidentified_failure and not tool_failed \
+            and not unread
         causes.append(RecoveryCause("evidence:incomplete_recovery_declared",
                                     rows if explained_by_rows else None))
     return tuple(causes)
@@ -132,22 +151,28 @@ def recovery_causes(*, tool_failed: bool, identified_missing_rows: Sequence[int]
 
 def attribute_recovery_defects(
     causes: Sequence[RecoveryCause],
-) -> tuple[dict[int, tuple[str, ...]], tuple[str, ...]]:
-    """Split causes into per-row bindings and node-wide ones. Mechanical, no special cases.
+) -> tuple[dict[int, tuple[str, ...]], dict[int, tuple[str, ...]], tuple[str, ...]]:
+    """Split causes by scope. Mechanical, no special cases.
 
-    Returns ``({store_id: labels}, node_wide_labels)``. A defect only ever withdraws a line it
-    is bound to, so the narrower the binding the fewer unrelated misses it can hide — and a
-    cause whose rows are unknown keeps the node-wide binding rather than being dropped.
+    Returns ``({store_id: labels}, {node_id: labels}, node_wide_labels)`` — the three scopes a
+    cause can carry, narrowest first. A defect only ever withdraws a line it is bound to, so
+    the narrower the binding the fewer unrelated misses it can hide; a cause that identifies
+    neither rows nor nodes keeps the node-wide binding rather than being dropped.
     """
     per_row: dict[int, set[str]] = {}
+    per_node: dict[int, set[str]] = {}
     node_wide: set[str] = set()
     for cause in causes:
         if cause.store_ids:
             for store_id in cause.store_ids:
                 per_row.setdefault(int(store_id), set()).add(cause.label)
+        elif cause.node_ids:
+            for node_id in cause.node_ids:
+                per_node.setdefault(int(node_id), set()).add(cause.label)
         else:
             node_wide.add(cause.label)
     return ({store_id: tuple(sorted(labels)) for store_id, labels in per_row.items()},
+            {node_id: tuple(sorted(labels)) for node_id, labels in per_node.items()},
             tuple(sorted(node_wide)))
 
 
@@ -392,17 +417,21 @@ def score_navigation(cases: Sequence[NavigationCase],
         source_expected += case_source_expected
         source_hit += case_source_hit
         if case_withdrawn:
-            # Each withdrawn line is counted once, under the cause that withdrew it: the
-            # "bounded_recovery" umbrella for a page boundary or a cut marker, and the defect's
-            # own name for anything else. One event, one name.
+            # EVERY cause that bound a withdrawn line is counted, not just one of them: picking
+            # the alphabetically first left a co-occurring evidence:tool_error uncounted, which
+            # is a real failure going unreported. A page boundary or cut marker is counted under
+            # the "bounded_recovery" umbrella; anything else under its own name.
+            case_reasons: list[str] = []
             for item in case_withdrawn:
-                label = ("evidence:bounded_recovery"
-                         if any(name in BOUNDED_OBSERVATIONS for name in item["bounded_by"])
-                         else item["bounded_by"][0])
-                defect_counts[label] = defect_counts.get(label, 0) + 1
+                for name in item["bounded_by"]:
+                    label = ("evidence:bounded_recovery" if name in BOUNDED_OBSERVATIONS
+                             else name)
+                    defect_counts[label] = defect_counts.get(label, 0) + 1
+                    case_reasons.append(label)
             withdrawn_samples.extend(case_withdrawn)
             entry["source_recall_withdrawn"] = case_withdrawn
-            entry["reasons"].append(label)
+            # Every reason, not whatever the loop variable happened to hold last.
+            entry["reasons"].extend(dict.fromkeys(case_reasons))
             incomplete.append(
                 f"{case.question_id}: {len(case_withdrawn)} labelled line(s) did not come back "
                 f"from a bounded recovery "
