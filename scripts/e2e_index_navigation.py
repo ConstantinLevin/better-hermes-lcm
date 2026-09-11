@@ -75,6 +75,7 @@ from benchmarking.nav_fidelity import (  # noqa: E402
     BOUNDED_OBSERVATIONS,
     CorpusPatternError,
     attribute_recovery_defects,
+    recovery_causes,
     NavigationCase,
     ReaderTrace,
     ScoredText,
@@ -514,20 +515,6 @@ def _collect_text(value: Any, sink: list[str], store_ids: set[int]) -> None:
         sink.append(value)
 
 
-def _store_ids_named_as_missing(result: dict[str, Any]) -> list[int]:
-    """Store ids the tool itself named as unreadable. Exact attribution, better than per node."""
-    out: list[int] = []
-    for holder in (result, result.get("pagination") or {}):
-        if not isinstance(holder, dict):
-            continue
-        for key in ("missing_source_store_ids", "unreadable_source_ids", "missing_source_ids"):
-            for value in holder.get(key) or ():
-                parsed = _as_int(value)
-                if parsed is not None:
-                    out.append(parsed)
-    return out
-
-
 def _as_int(value: Any) -> Optional[int]:
     if isinstance(value, bool):
         return None
@@ -588,26 +575,35 @@ def label_evidence(result: dict[str, Any], recovered_text: str) -> tuple[list[st
     cap shaped (#5). None of those is a model failure and the harness must not score them as
     one.
 
-    Returns ``(defects, observations)``. A defect voids the case outright: the evidence itself
-    was broken. An observation only BOUNDS what came back — one page plus a cursor is
-    lcm_expand's normal contract — and the scorer promotes it to a defect only for the case it
-    actually explains.
+    Returns ``(causes, observations)``. A cause carries the rows it is known to be about —
+    ``None`` when the tool reported a failure without identifying which rows it cost, such as a
+    corrupt payload or a child node no longer in the DAG. An observation only BOUNDS what came
+    back — one page plus a cursor is lcm_expand's normal contract — and it withdraws a line only
+    where it explains that line's absence.
     """
-    defects: list[str] = []
     observations: list[str] = []
-    if result.get("__tool_error__") or result.get("error"):
-        defects.append("evidence:tool_error")
-    for key in ("unreadable_source_ids", "missing_source_ids", "unresolved_source_ids",
-                "missing_source_store_ids", "missing_source_node_ids", "corrupt_payloads"):
-        if result.get(key):
-            defects.append("evidence:source_missing")
+    tool_failed = bool(result.get("__tool_error__") or result.get("error"))
+    identified: list[int] = []
+    unidentified = False
+    declared_incomplete = False
     pagination = result.get("pagination")
+    for holder in (result, pagination if isinstance(pagination, dict) else {}):
+        # Rows the tool NAMED: the narrowest attribution available, and the one that keeps a
+        # failure from withdrawing lines it never touched.
+        for key in ("missing_source_store_ids", "unreadable_source_ids", "missing_source_ids",
+                    "unresolved_source_ids"):
+            for value in holder.get(key) or ():
+                parsed = _as_int(value)
+                if parsed is not None:
+                    identified.append(parsed)
+        # Failures the tool reported WITHOUT naming the rows they cost. The node is then the
+        # only honest scope; dropping them would charge the reader for what they removed.
+        for key in ("missing_source_node_ids", "corrupt_payloads"):
+            if holder.get(key):
+                unidentified = True
     if isinstance(pagination, dict):
-        for key in ("missing_source_store_ids", "missing_source_node_ids", "corrupt_payloads"):
-            if pagination.get(key):
-                defects.append("evidence:source_missing")
         if pagination.get("complete") is False:
-            defects.append("evidence:incomplete_recovery_declared")
+            declared_incomplete = True
         if pagination.get("has_more") or pagination.get("remaining_sources"):
             observations.append("evidence:paged_result")
         if pagination.get("complete") is True and pagination.get("has_more"):
@@ -621,7 +617,10 @@ def label_evidence(result: dict[str, Any], recovered_text: str) -> tuple[list[st
         observations.append("evidence:paged_result")
     if _LOSS_MARKER_RE.search(recovered_text):
         observations.append("evidence:truncated_or_marked")
-    return sorted(dict.fromkeys(defects)), sorted(dict.fromkeys(observations))
+    causes = recovery_causes(tool_failed=tool_failed, identified_missing_rows=identified,
+                             unidentified_failure=unidentified,
+                             declared_incomplete=declared_incomplete)
+    return causes, sorted(dict.fromkeys(observations))
 
 
 # ── readers ─────────────────────────────────────────────────────────────────────────────────
@@ -690,13 +689,12 @@ class LexicalReader:
                 piece = "\n".join(sink)
                 texts.append(piece)
                 results.append(page)
-                found_defects, found_observations = label_evidence(page, piece)
-                defects.extend(found_defects)
-                # A defect is attributed to the recovery it actually broke: the exact rows the
-                # tool named, or failing that the rows this node holds. A trace-level defect
-                # cannot say which line it broke, so it may not excuse any of them.
-                per_row, node_wide = attribute_recovery_defects(
-                    found_defects, _store_ids_named_as_missing(page))
+                found_causes, found_observations = label_evidence(page, piece)
+                defects.extend(cause.label for cause in found_causes)
+                # Each cause is attributed to the recovery it actually broke: the exact rows
+                # the tool named, or failing that the rows this node holds. A trace-level
+                # defect cannot say which line it broke, so it may not excuse any of them.
+                per_row, node_wide = attribute_recovery_defects(found_causes)
                 for store_id, labels in per_row.items():
                     bounded_direct.setdefault(store_id, set()).update(labels)
                 for name in node_wide:
@@ -866,19 +864,18 @@ class ModelReader:
                 piece = "\n".join(sink)
                 # Every node id this result showed the reader becomes navigable from here on.
                 visible_nodes.update(_node_ids_in(result))
-                found_defects, found_observations = label_evidence(result, piece)
+                found_causes, found_observations = label_evidence(result, piece)
                 if sourced:
                     store_ids.update(seen_ids)
                     texts.append(piece)
-                    defects.extend(found_defects)
+                    defects.extend(cause.label for cause in found_causes)
                     observations.extend(found_observations)
                     # Attributed to the node (or the row) this call was about, and re-derived
                     # per call: a later page of the same node that ends with has_more false
                     # clears the bound, and a marker in one node's page never bounds another's.
-                    # DEFECTS are attributed the same way — a trace-level label cannot say
+                    # CAUSES are attributed the same way — a trace-level label cannot say
                     # which line it broke, so it may not excuse any of them.
-                    per_row, node_wide = attribute_recovery_defects(
-                        found_defects, _store_ids_named_as_missing(result))
+                    per_row, node_wide = attribute_recovery_defects(found_causes)
                     for missing_id, labels in per_row.items():
                         bounded_direct.setdefault(missing_id, set()).update(labels)
                     bounds = {name for name in found_observations
