@@ -27,9 +27,16 @@ _bootstrap_os.environ["HOME"] = str(_TEST_HOME)
 _bootstrap_os.environ["HERMES_HOME"] = str(_TEST_HOME / ".hermes")
 # LCM_TESTS_* are the harness's own controls (the real-summariser switch, the stashed home),
 # not plugin configuration: scrubbing them disabled the documented real-summary mode.
+# LCM_BETA_TARGET and LCM_REQUIRE_HOST are harness controls too — they select which tests run and
+# how strictly, and no production module reads either — but they were named without the prefix in
+# the issues and on the documented command lines, so they are exempted by name rather than
+# renamed. Adding a plugin setting here would be a mistake; adding a runner switch is not.
+_HARNESS_CONTROL_VARS = ("LCM_BETA_TARGET", "LCM_REQUIRE_HOST")
 for _inherited in [
     name for name in _bootstrap_os.environ
-    if name.startswith("LCM_") and not name.startswith("LCM_TESTS_")
+    if name.startswith("LCM_")
+    and not name.startswith("LCM_TESTS_")
+    and name not in _HARNESS_CONTROL_VARS
 ]:
     _bootstrap_os.environ.pop(_inherited, None)
 assert str(Path.home()) == str(_TEST_HOME), "tests must not resolve HOME to the live account"
@@ -162,6 +169,43 @@ def manifest_version() -> str:
         if line.startswith("version:"):
             return line.split(":", 1)[1].strip().strip('"').strip("'")
     raise AssertionError(f"{manifest} declares no version")
+
+
+# ── beta target-state assertions (issue #19) ─────────────────────────────────────────────────
+# `beta_target` marks an assertion that says what a beta preservation fix MUST achieve. They are
+# written against a tree where those fixes do not exist, so they FAIL here by design and would
+# otherwise turn the default suite red for every group still working on them.
+#
+# The gate is an env var rather than a quiet deselect because a skipped one has to say what it is
+# not testing. An empty result that reads as "there is nothing" is the exact dishonesty this fork
+# forbids, and a silently deselected contract is that dishonesty inside a test runner.
+#
+#   run them:      LCM_BETA_TARGET=1 bash scripts/test.sh tests/ -m beta_target
+#   release gate:  scripts/validate_release.sh --full  (runs the selection above)
+BETA_TARGET_ENV = "LCM_BETA_TARGET"
+
+
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers",
+        "beta_target(issue): an assertion for a beta fix that is not in this tree yet. "
+        f"Runs only with {BETA_TARGET_ENV}=1; select the set with `-m beta_target`.",
+    )
+
+
+def pytest_collection_modifyitems(config, items):
+    if _os.environ.get(BETA_TARGET_ENV) == "1":
+        return
+    for item in items:
+        marker = item.get_closest_marker("beta_target")
+        if marker is None:
+            continue
+        issue = str(marker.args[0]) if marker.args else "#19"
+        item.add_marker(_pytest.mark.skip(reason=(
+            f"NOT RUN: beta target-state assertion for {issue} (tracked by #19). It encodes what "
+            f"the fix must achieve and fails until that fix lands. Run it with "
+            f"{BETA_TARGET_ENV}=1 and `-m beta_target`."
+        )))
 
 
 @_pytest.fixture(autouse=True)
