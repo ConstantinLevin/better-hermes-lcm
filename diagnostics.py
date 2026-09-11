@@ -6,6 +6,8 @@ import os
 from pathlib import Path
 from typing import Any
 
+from .diagnostic_connection import unchecked_fts_remedy
+
 
 DOCTOR_ACTION_SAFE_IGNORE = "safe/ignore"
 DOCTOR_ACTION_INSPECT = "inspect"
@@ -85,7 +87,11 @@ def doctor_guidance_for_check(check: dict[str, Any]) -> dict[str, Any] | None:
     elif name in {"messages_fts_integrity", "nodes_fts_integrity", "fts_index_sync"}:
         if status == "warn" and isinstance(detail, dict) and detail.get("status") == "unchecked":
             action = DOCTOR_ACTION_INSPECT
-            command = "rerun `/lcm doctor` with read-write SQLite access if a deep FTS integrity result is needed"
+            # The remedy is derived from the reason: a read-only database, a
+            # write in flight, an exhausted budget and a host interrupt need
+            # four different things from the operator, and only one of them is
+            # "get read-write access".
+            command = unchecked_fts_remedy(str(detail.get("detail") or ""))
             warning_only = True
             rationale = "the deep FTS check could not run, but this is not evidence that the index is corrupt"
         else:

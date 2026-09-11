@@ -26,6 +26,13 @@ from .db_bootstrap import (
     remediate_interim_schema_stamp,
     repair_external_content_fts,
 )
+from .diagnostic_connection import (
+    CALLER_UNDETERMINED,
+    caller_connection_access,
+    private_diagnostic_connection,
+    run_isolated_fts_check,
+    unchecked_fts_remedy,
+)
 from .diagnostics import (
     _has_lifecycle_fragmentation,
     _state_db_path_for_engine,
@@ -908,6 +915,19 @@ def _rotate_apply_text(engine) -> str:
     return "\n".join(lines)
 
 
+def _isolated_fts_integrity(conn, spec) -> dict[str, Any]:
+    """Run the deep FTS check on a handle this diagnostic owns.
+
+    The check's probe INSERT lives in a SAVEPOINT, and a savepoint belongs to
+    the connection, not to the thread: on the live store/DAG connection a doctor
+    still running after the host's tool deadline rolls back rows a concurrent
+    ingest committed on it (#10). Anything that stops the check short --
+    no private handle, no write lock, the budget, a host interrupt -- comes back
+    as ``unchecked`` with its reason, never as a pass.
+    """
+    return run_isolated_fts_check(conn, spec, check_external_content_fts_integrity)
+
+
 def _scan_fts_repair(engine) -> dict[str, Any]:
     checks: dict[str, dict[str, Any]] = {}
     specs = {
@@ -918,9 +938,15 @@ def _scan_fts_repair(engine) -> dict[str, Any]:
     for label, spec in specs.items():
         try:
             structural_needs_repair = external_content_fts_needs_repair(conn, spec)
-            integrity_check = check_external_content_fts_integrity(conn, spec)
+            integrity_check = _isolated_fts_integrity(conn, spec)
             integrity_status = str(integrity_check.get("status") or "fail")
             needs_repair = structural_needs_repair or integrity_status == "fail"
+            # `unchecked` is a THIRD state, not a quiet "ok". The deep check is the
+            # only thing that sees same-row-count index drift, and this command
+            # exists to answer whether the index needs repair -- so a scan whose
+            # deep check did not run knows nothing, and folding that into `ok`
+            # sends the operator away from the repair that would have fixed it.
+            unchecked = integrity_status == "unchecked" and not needs_repair
             content_count = int(conn.execute(
                 f"SELECT COUNT(*) FROM {spec.content_table}"
             ).fetchone()[0])
@@ -929,8 +955,9 @@ def _scan_fts_repair(engine) -> dict[str, Any]:
             except sqlite3.Error:
                 fts_count = None
             checks[label] = {
-                "ok": not needs_repair,
+                "ok": not needs_repair and not unchecked,
                 "needs_repair": needs_repair,
+                "unchecked": unchecked,
                 "content_rows": content_count,
                 "fts_rows": fts_count,
                 "integrity_status": integrity_status,
@@ -941,6 +968,7 @@ def _scan_fts_repair(engine) -> dict[str, Any]:
             checks[label] = {
                 "ok": False,
                 "needs_repair": True,
+                "unchecked": False,
                 "content_rows": None,
                 "fts_rows": None,
                 "integrity_status": "error",
@@ -950,17 +978,29 @@ def _scan_fts_repair(engine) -> dict[str, Any]:
     return {
         "checks": checks,
         "needs_repair": any(item["needs_repair"] for item in checks.values()),
+        "unchecked": any(item["unchecked"] for item in checks.values()),
     }
 
 
 def _doctor_repair_text(engine) -> str:
     scan = _scan_fts_repair(engine)
+    if scan["needs_repair"]:
+        headline = "repair-needed"
+    elif scan["unchecked"]:
+        headline = "unchecked"
+    else:
+        headline = "ok"
     lines = [
         "LCM doctor repair",
-        f"status: {'repair-needed' if scan['needs_repair'] else 'ok'}",
+        f"status: {headline}",
     ]
     for label, item in scan["checks"].items():
-        state = "repair-needed" if item["needs_repair"] else "ok"
+        if item["needs_repair"]:
+            state = "repair-needed"
+        elif item["unchecked"]:
+            state = "unchecked"
+        else:
+            state = "ok"
         lines.append(f"{label}: {state}")
         if item["error"]:
             lines.append(f"{label}_error: {item['error']}")
@@ -968,10 +1008,26 @@ def _doctor_repair_text(engine) -> str:
             lines.append(f"{label}_content_rows: {item['content_rows']}")
             lines.append(f"{label}_fts_rows: {item['fts_rows']}")
             lines.append(f"{label}_integrity_status: {item['integrity_status']}")
+            if item["unchecked"]:
+                lines.append(f"{label}_unchecked_reason: {item['integrity_detail']}")
     lines.append("note: read-only scan only — no FTS tables were repaired")
+    if scan["unchecked"]:
+        lines.append(
+            "note: the deep integrity-check did not run for every index, so this scan "
+            "cannot say the indexes are healthy — it can only say it found no structural "
+            "damage. Same-row-count index drift is invisible without the deep check."
+        )
+        lines.append(f"note: {unchecked_fts_remedy(_first_unchecked_reason(scan))}")
     if scan["needs_repair"]:
         lines.append("note: use `/lcm doctor repair apply` to create a backup and repair FTS indexes")
     return "\n".join(lines)
+
+
+def _first_unchecked_reason(scan: dict[str, Any]) -> str:
+    for item in scan["checks"].values():
+        if item.get("unchecked"):
+            return str(item.get("integrity_detail") or "")
+    return ""
 
 
 def _doctor_repair_apply_text(engine) -> str:
@@ -991,20 +1047,91 @@ def _doctor_repair_apply_text(engine) -> str:
     # via a race (F3).
     join_background_integrity_scans()
 
-    conn = engine._store.connection
-    try:
-        messages_result = repair_external_content_fts(conn, build_message_fts_spec())
-        nodes_result = repair_external_content_fts(conn, build_nodes_fts_spec())
-    except sqlite3.Error as exc:
+    # The repair opens BEGIN IMMEDIATE and commits -- and its healthy fast path
+    # commits too. On the live store connection that publishes whatever another
+    # thread had pending there, or discards it on the rollback (#10), so the
+    # repair takes a handle it owns. SQLite's single-writer rule serializes it
+    # against live ingest: losing that race fails the command below with the
+    # backup already taken, and changes nothing.
+    # Probe the access once and hand it down. Without this the repair opened the
+    # handle read-only whenever the mode could not be determined -- the right
+    # call -- and then reported SQLite's `readonly` refusal, blaming the
+    # operator's database for LCM's own decision not to find out.
+    store_access = caller_connection_access(engine._store.connection)
+    if store_access.state == CALLER_UNDETERMINED:
         return "\n".join([
             "LCM doctor repair apply",
             "status: error",
             f"database_path: {backup['db_path']}",
             f"backup_path: {backup['backup_path']}",
             f"backup_size: {_fmt_size(int(backup['backup_size']))}",
-            f"error: FTS repair failed: {exc}",
-            "note: backup was created before repair apply",
+            "error: LCM could not determine whether this database was opened read-only "
+            f"({store_access.reason}), and will not write to one that may have been",
+            f"note: {unchecked_fts_remedy(store_access.reason + ' could not be established')}",
+            "note: no FTS tables were repaired",
         ])
+
+    with private_diagnostic_connection(
+        engine._store.connection, access=store_access
+    ) as conn:
+        if conn is None:
+            return "\n".join([
+                "LCM doctor repair apply",
+                "status: error",
+                f"database_path: {backup['db_path']}",
+                f"backup_path: {backup['backup_path']}",
+                f"backup_size: {_fmt_size(int(backup['backup_size']))}",
+                "error: this database cannot be reopened on a second connection "
+                "(in-memory or anonymous), and FTS repair must not run on the live "
+                "store connection",
+                "note: no FTS tables were repaired",
+            ])
+        # Each index is repaired in its OWN transaction, so a failure on the
+        # second leaves the first already committed. Reporting only "FTS repair
+        # failed" would present a partial as a clean abort: name which index
+        # landed and which never ran.
+        applied: dict[str, dict[str, bool]] = {}
+        try:
+            for label, spec in (
+                ("messages_fts", build_message_fts_spec()),
+                ("nodes_fts", build_nodes_fts_spec()),
+            ):
+                applied[label] = repair_external_content_fts(conn, spec)
+        except Exception as exc:
+            # Exception, not sqlite3.Error: a non-SQLite failure on the second
+            # index would otherwise skip the disclosure below and leave the
+            # first index's committed rebuild unreported.
+            lines = [
+                "LCM doctor repair apply",
+                "status: error",
+                f"database_path: {backup['db_path']}",
+                f"backup_path: {backup['backup_path']}",
+                f"backup_size: {_fmt_size(int(backup['backup_size']))}",
+                f"error: FTS repair failed: {exc}",
+            ]
+            for label in ("messages_fts", "nodes_fts"):
+                done = applied.get(label)
+                if done is None:
+                    lines.append(f"{label}: not repaired")
+                    continue
+                lines.append(f"{label}_rebuilt: {_fmt_bool(done['rebuilt'])}")
+                lines.append(f"{label}_triggers_recreated: {_fmt_bool(done['triggers_recreated'])}")
+                lines.append(f"{label}_degraded: {_fmt_bool(done['degraded'])}")
+            if applied:
+                lines.append(
+                    "note: this repair was PARTIAL — the indexes listed above with results are "
+                    "already committed; the ones listed as not repaired were never touched"
+                )
+            else:
+                # A receipt is a claim. The first index failing means nothing was
+                # committed, and announcing a PARTIAL repair there claims a change
+                # that never happened -- the same defect as hiding one, pointing the
+                # other way.
+                lines.append("note: no FTS tables were repaired")
+            lines.append("note: backup was created before repair apply")
+            return "\n".join(lines)
+        messages_result = applied["messages_fts"]
+        nodes_result = applied["nodes_fts"]
 
     return "\n".join([
         "LCM doctor repair apply",
@@ -1338,12 +1465,16 @@ def _doctor_text(engine) -> str:
 
     try:
         store_fts_count = int(store_conn.execute("SELECT COUNT(*) FROM messages_fts").fetchone()[0])
-        store_fts_integrity = check_external_content_fts_integrity(store_conn, build_message_fts_spec())
+        store_fts_integrity = _isolated_fts_integrity(store_conn, build_message_fts_spec())
         store_fts = _fts_text_status(store_fts_integrity)
         if store_fts == "fail":
             issues.append("messages_fts")
         elif store_fts == "unchecked":
-            recommended_actions.append("rerun `/lcm doctor` with read-write SQLite access if a deep messages FTS check is needed")
+            # The remedy names the cause the check actually reported; see
+            # unchecked_fts_remedy.
+            recommended_actions.append(
+                f"messages FTS: {unchecked_fts_remedy(str(store_fts_integrity.get('detail') or ''))}"
+            )
     except Exception as exc:  # pragma: no cover - defensive
         store_fts_count = f"error: {exc}"
         store_fts = f"error: {exc}"
@@ -1352,12 +1483,14 @@ def _doctor_text(engine) -> str:
 
     try:
         node_fts_count = int(dag_conn.execute("SELECT COUNT(*) FROM nodes_fts").fetchone()[0])
-        node_fts_integrity = check_external_content_fts_integrity(dag_conn, build_nodes_fts_spec())
+        node_fts_integrity = _isolated_fts_integrity(dag_conn, build_nodes_fts_spec())
         node_fts = _fts_text_status(node_fts_integrity)
         if node_fts == "fail":
             issues.append("nodes_fts")
         elif node_fts == "unchecked":
-            recommended_actions.append("rerun `/lcm doctor` with read-write SQLite access if a deep nodes FTS check is needed")
+            recommended_actions.append(
+                f"nodes FTS: {unchecked_fts_remedy(str(node_fts_integrity.get('detail') or ''))}"
+            )
     except Exception as exc:  # pragma: no cover - defensive
         node_fts_count = f"error: {exc}"
         node_fts = f"error: {exc}"

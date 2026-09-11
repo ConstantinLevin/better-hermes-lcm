@@ -150,9 +150,22 @@ def flush_engine_connections(engine) -> None:
             engine._dag._conn.commit()
     else:  # pragma: no cover
         engine._dag._conn.commit()
-    lifecycle_conn = getattr(getattr(engine, "_lifecycle", None), "_conn", None)
+    lifecycle = getattr(engine, "_lifecycle", None)
+    lifecycle_conn = getattr(lifecycle, "_conn", None)
     if lifecycle_conn is not None:
-        lifecycle_conn.commit()
+        # the lifecycle connection was flushed WITHOUT its lock, three lines
+        # below the comment above. LifecycleStateStore serializes its read-modify-write
+        # methods on its own RLock, and `prune_empty_sessions` holds BEGIN IMMEDIATE across a
+        # multi-row DELETE loop that it still decides to roll back. A flush from the
+        # `/lcm doctor repair apply` backup path made those deletes durable behind the
+        # pruner's back and turned its rollback into a no-op (#10 review). Same store/DAG
+        # rule, one connection over.
+        lifecycle_lock = getattr(lifecycle, "_lock", None)
+        if lifecycle_lock is not None:
+            with lifecycle_lock:
+                lifecycle_conn.commit()
+        else:  # pragma: no cover - a lifecycle store without the lock attribute
+            lifecycle_conn.commit()
     assertion_store = getattr(engine, "_assertions", None)
     if assertion_store is not None:
         # AssertionStore owns a multi-statement publication transaction. Its

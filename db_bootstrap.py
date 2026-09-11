@@ -2850,9 +2850,19 @@ def check_external_content_fts_integrity(
 ) -> dict[str, str]:
     """Run SQLite's FTS5 integrity-check for an external-content table.
 
-    FTS5 exposes this as a special INSERT command. Wrap it in a savepoint and
-    roll it back so diagnostics can verify the index without leaving any state
-    behind on the shared connection.
+    FTS5 exposes this as a special INSERT command, wrapped here in a savepoint
+    and rolled back so the index is verified without leaving state behind.
+
+    THE CALLER MUST OWN ``conn``. A savepoint belongs to the connection, not to
+    the thread that opened it: ``ROLLBACK TO`` unwinds every write another thread
+    made on this connection since, and ``RELEASE`` of the outermost savepoint
+    commits whatever is left. Bind-time callers own their connection because the
+    store/DAG is not published yet; the background scan opens its own handle
+    (``_run_background_integrity_scan``). Diagnostics that hold a LIVE store or
+    DAG connection must not call this directly -- they go through
+    ``diagnostic_connection.private_diagnostic_connection`` instead, because a
+    doctor still running after the host's tool deadline would otherwise roll back
+    an ingest that already reported success (#10).
     """
 
     if _fts_needs_rebuild_structural(conn, spec):
@@ -3021,6 +3031,15 @@ def repair_external_content_fts(
     now: float | None = None,
     throttle: bool = False,
 ) -> dict[str, bool]:
+    """Rebuild ``spec``'s FTS index and triggers. THE CALLER MUST OWN ``conn``.
+
+    Every exit from here drives the connection's transaction: the healthy fast
+    path commits, ``_fts_repair_ownership`` opens ``BEGIN IMMEDIATE`` and
+    commits or rolls back, and the savepoint branch commits for the caller. On a
+    live store connection that publishes -- or discards -- whatever another
+    thread had pending on it, so ``/lcm doctor repair apply`` runs this on a
+    private handle (#10).
+    """
     rebuilt = False
     degraded = False
     fts_structure_needs_rebuild = _fts_needs_rebuild_structural(conn, spec)

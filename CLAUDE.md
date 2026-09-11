@@ -45,7 +45,7 @@ Fork logic goes in **new modules** so upstream merges stay reviewable; upstream 
 
 > **Naming:** everything is **better-hermes-lcm** — project, repository and branch. Two identifiers deliberately keep the older spelling because they exist in databases already written: `node_meta.MIGRATION_STEP` (`better_hermeslcm_node_meta_v1`) and `node_meta.LEGACY_MIGRATION_STEPS` beside it, which names the pre-rename row so an older build's database has it retired rather than recording one migration twice.
 
-Fork modules: `window_scaling.py` (the anchor table and curve), `window_scaled_mixin.py` (`effective_*` resolution), `marked_loss.py` (**every marker the fork emits**), `host_cooldown.py`, `leaf_pipeline.py`, `node_meta.py`, `coverage_doctor.py`, `errors.py`.
+Fork modules: `window_scaling.py` (the anchor table and curve), `window_scaled_mixin.py` (`effective_*` resolution), `marked_loss.py` (**every marker the fork emits**), `host_cooldown.py`, `leaf_pipeline.py`, `node_meta.py`, `coverage_doctor.py`, `diagnostic_connection.py`, `errors.py`.
 
 The core path — the only code that can lose a conversation, and where effort belongs:
 
