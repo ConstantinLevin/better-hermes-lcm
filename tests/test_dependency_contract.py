@@ -35,7 +35,11 @@ def test_dependency_contract_validator_accepts_repository():
     )
 
     assert result.returncode == 0, result.stderr
-    assert "dependency contract valid: version 1.0.4" in result.stdout
+    # fork: better-hermes-lcm — this pinned 1.0.4. The contract's own update_trigger requires
+    # incrementing it when a scanned runtime import changes, and scripts/e2e_index_navigation.py
+    # added agent.memory_manager.normalize_tool_schema, so the contract is now 1.0.5. The
+    # assertion still pins the version deliberately; only its subject moved.
+    assert "dependency contract valid: version 1.0.5" in result.stdout
     assert "9 external imports declared" in result.stdout
 
 
@@ -940,7 +944,8 @@ def test_contract_records_host_ownership_versions_and_update_owner():
     contract = json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))
 
     assert contract["schema_version"] == 1
-    assert contract["contract_version"] == "1.0.4"
+    # fork: better-hermes-lcm — this pinned 1.0.4; see the note on the version assertion above.
+    assert contract["contract_version"] == "1.0.5"
     assert contract["boundary"] == "host-owned"
     assert contract["imported_api_validation"] == "observed-coverage-only"
     assert contract["ownership"]["dependency_resolver"] == "Hermes Agent host environment"
