@@ -10153,7 +10153,16 @@ class TestEngineCompress:
         assert provenance["store_ids"] == [17, 42]
         assert provenance["message_count"] == 2
 
-    def test_compression_serialization_skips_empty_assistant_and_heartbeat_noise(self, engine):
+    # fork: better-hermes-lcm — this used to assert that "ACK" and "[heartbeat]" were kept OUT
+    # of the summariser's input (each leaving an "acknowledgement-shaped assistant turn"
+    # receipt, three of them, over four "[ASSISTANT]:" labels). The removal was by WORDING
+    # alone, and with any envelope field present — the normal host producer always supplies
+    # finish_reason — the text was replaced by "" with no receipt at all, so a real reply that
+    # happened to read "Acknowledged" vanished before the model (#31 MA01). Synthetic origin
+    # is not recoverable from words, so nothing is removed on the strength of them any more:
+    # every turn is offered as the host wrote it, and an empty one gets no receipt claiming a
+    # removal that never happened.
+    def test_compression_serialization_keeps_acknowledgement_shaped_turns(self, engine):
         messages = [
             {"role": "assistant", "content": ""},
             {"role": "assistant", "content": "ACK"},
@@ -10166,12 +10175,9 @@ class TestEngineCompress:
 
         assert "keep this real user content" in serialized
         assert "[ASSISTANT]: keep this real assistant content" in serialized
-        # the noise turns are still kept OUT of the summariser's input, but
-        # the removal is by wording, not by a trusted synthetic-origin signal, so each one
-        # leaves a one-line receipt instead of disappearing (round-4 verify-4 #8).
-        assert "[ASSISTANT]: ACK" not in serialized
-        assert "[ASSISTANT]: [heartbeat]" not in serialized
-        assert serialized.count("acknowledgement-shaped assistant turn") == 3
+        assert "[ASSISTANT]: ACK" in serialized
+        assert "[ASSISTANT]: [heartbeat]" in serialized
+        assert "acknowledgement-shaped assistant turn" not in serialized
         assert serialized.count("[ASSISTANT]:") == 4
 
     def test_compression_serialization_preserves_plain_content_whitespace(self, engine):

@@ -669,18 +669,11 @@ def message_time_note(msg: dict) -> str:
     return " [time: " + ", ".join(parts) + "]"
 
 
-def acknowledgement_only_marker(content: str) -> str:
-    """an acknowledgement-shaped turn removed from the summariser's input.
-
-    The removal is by WORDING, not by a trusted synthetic-origin signal, so a genuine
-    "Acknowledged." disappeared with nothing in its place (round-4 verify-4 #8). The stored row
-    is untouched; this line says the turn existed and how to read it.
-    """
-    head = content_head(content, limit=60)
-    return (
-        f"{RECEIPT_LINE_PREFIX} an acknowledgement-shaped assistant turn ({head!r}) is not "
-        "summarised; the stored row is unchanged — lcm_recent / lcm_expand]"
-    )
+# `acknowledgement_only_marker` stood here. It was the receipt for an assistant turn the
+# serializer removed because its text matched a word set, and it is retired with that removal
+# (#31 MA01): real acknowledgement text now reaches the summariser byte-identical, so there is
+# nothing left for the receipt to record — and a receipt claiming a removal that did not
+# happen is its own defect.
 
 
 INTERNAL_REPLAY_MARKER = (

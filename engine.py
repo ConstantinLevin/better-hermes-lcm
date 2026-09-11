@@ -5900,20 +5900,13 @@ class LCMEngine(HostCooldownMixin, CompactionMixin, ResetStateMixin, ReconcileMi
                 # a call the renderer cannot shape as name(arguments) was
                 # dropped by the isinstance filter with nothing in its place.
                 unrepresentable_calls = [tc for tc in tool_calls if not isinstance(tc, dict)]
-                envelope_fields = self._message_envelope_fields(msg)
-                if _is_synthetic_assistant_noise(content):
-                    if not serialized_tool_calls and not envelope_fields and not unrepresentable_calls:
-                        # the turn is dropped from the summariser's input by
-                        # WORDING alone, so a genuine "Acknowledged." disappeared with nothing
-                        # in its place (round-4 verify-4 #8). Identifying synthetic origin
-                        # needs a host signal the plugin does not have; until then the removal
-                        # is at least visible.
-                        parts.append(
-                            "[ASSISTANT]: "
-                            + marked_loss.acknowledgement_only_marker(content)
-                        )
-                        continue
-                    content = ""
+                # No wording filter here. A turn whose text matched a word set
+                # ("ack", "acknowledged", "heartbeat", "pong", …) used to be treated as
+                # synthetic noise: with any envelope field present — and the normal host
+                # producer always supplies finish_reason — its text was replaced by "" with
+                # nothing in its place, so a real reply reached the summariser as
+                # "[ASSISTANT]:  [finish_reason=stop]" (#31 MA01). Identifying synthetic
+                # origin needs a host signal the plugin does not have, and a word is not one.
                 content = marked_loss.elide_text(  # marked
                     content, serialize_cap, original_chars=raw_chars
                 )
