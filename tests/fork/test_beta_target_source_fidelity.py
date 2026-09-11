@@ -412,6 +412,17 @@ def test_a_structured_content_list_and_its_json_text_stay_distinguishable(tmp_pa
         assert reconstruct(text["content"], recorded_kind(text)) == literal, (
             "the literal row does not read back as the string the user typed"
         )
+        # the erased row's type must be neither of the two REAL answers. That closes two holes at
+        # once. A fix that defaults an unrecorded kind to `str` passes "it did not reconstruct to
+        # a list" while claiming the row held a string — "als sicher typisiert behandeln" in the
+        # other direction. And it makes the fixture self-checking: the erasure above targets the
+        # envelope, which is where the type lives today, so a fix recording it in its own column
+        # would leave this row fully typed and the assertion below would otherwise pass over a row
+        # that is not legacy at all.
+        assert recorded_kind(legacy) not in (recorded_kind(native), recorded_kind(text)), (
+            "a row whose recorded type was erased still answers with one of the real types — "
+            "either the erasure missed where the type is kept, or unknown was defaulted away"
+        )
         assert not isinstance(
             reconstruct(legacy["content"], recorded_kind(legacy)), (list, dict)
         ), "a row with no recorded type was typed from its JSON syntax, which is the guess MC01 removes"

@@ -126,6 +126,37 @@ def test_a_bypassed_session_comes_back_unchanged_when_no_native_compressor_exist
 
 @pytest.mark.beta_target("#62")
 @pytest.mark.parametrize("window", WINDOWS)
+def test_a_bypassed_session_under_no_pressure_comes_back_whole(tmp_path, window):
+    """The preserving path has to WORK, not merely be the thing that did not happen.
+
+    Both assertions above accept a named refusal as compliant, because fail-before-loss is this
+    fork's stated preference and #62 says so explicitly. That leaves a hole: a plugin whose bypass
+    raised `SummaryUnavailableError` unconditionally would satisfy both of them while never
+    preserving anything at all — the gate would be measuring the absence of a wrong answer rather
+    than the presence of a right one.
+
+    This is the same session with no cap pressure, where there is nothing for even a
+    conservative fix to refuse. Here the messages must come back, and come back whole.
+    """
+    messages = _bypass_history()
+    snapshot = [dict(m) for m in messages]
+    engine = _bypassed_engine(tmp_path, "nopressure62", window)
+    try:
+        engine._get_host_fallback_compressor = lambda: None
+        engine._bypass_compaction_target_tokens = lambda **_kwargs: None  # no cap to satisfy
+        returned = _call_bypass(engine, messages)
+        assert returned is not None, (
+            "the bypass refused a session it had no reason to refuse: nothing was over any cap"
+        )
+        _assert_nothing_was_shortened(
+            returned, snapshot, messages,
+            what="the bypass altered a session it does not store, under no pressure at all")
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.beta_target("#62")
+@pytest.mark.parametrize("window", WINDOWS)
 def test_an_explicit_native_abort_is_not_overridden_by_the_local_trim(tmp_path, window):
     """An abort is a decision to PRESERVE, not a failed attempt.
 

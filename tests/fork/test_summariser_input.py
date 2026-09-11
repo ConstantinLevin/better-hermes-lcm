@@ -293,26 +293,50 @@ def test_the_argument_string_reaches_the_summariser_as_the_provider_wrote_it():
     assert clean_args(duplicated) == duplicated, clean_args(duplicated)
 
 
-@pytest.mark.beta_target("#56")
 def test_every_injected_removal_leaves_a_trace_including_inside_tool_arguments():
     """verify-4 #7: the recursive JSON sanitiser disabled marking for string values, and a
     self-closing tag — which carries its content in its attributes — vanished entirely.
 
-    # fork: better-hermes-lcm — this used to assert `"DECISION" not in inside_args` and
-    # `"CANCEL" not in self_closing`, with a marker present: REMOVAL was the success criterion,
-    # and the marker was what made it acceptable. Under the contract the beta is being cut
-    # against, this source pre-processing may not remove message content at all — a marker
-    # licenses nothing (#56, and the same boundary in #31/#35/#63). So the assertion is
-    # inverted: the payload the host sent has to be there, and because nothing was removed, a
-    # removal receipt in its place would now be a false claim of removal, which is its own
-    # defect. Re-introducing the strip to turn this green is explicitly the wrong repair.
+    # fork: better-hermes-lcm — what survives ungated is the text AROUND the removal: the words
+    # either side of a tag inside an argument VALUE, and either side of a self-closing tag in
+    # content. Both hold today and after #56, and neither branch has another ungated guard — the
+    # split at `test_the_text_around_every_removal_branch_survives_it` covers the unmatched-tag
+    # branch, and `test_no_tool_argument_value_is_lost_to_a_key_collision_or_a_duplicate_key`
+    # covers key collisions, not a tag inside a value.
+    #
+    # What the test used to demand — `"DECISION" not in inside_args`, `"CANCEL" not in
+    # self_closing`, with a marker present — made REMOVAL the success criterion and the marker
+    # what licensed it. That is in
+    # `test_the_injected_payload_inside_an_argument_and_a_tag_survives` below.
     """
     from hermes_lcm.extraction import (
         sanitize_pre_compaction_content,
         sanitize_pre_compaction_tool_arguments as clean_args,
     )
     inside_args = clean_args('{"body": "before<active_memory>DECISION</active_memory>after"}')
-    assert "before" in inside_args and "after" in inside_args
+    assert "before" in inside_args and "after" in inside_args, inside_args
+
+    self_closing = sanitize_pre_compaction_content(
+        'keep this <active_memory decision="CANCEL"/> and this'
+    )
+    assert "keep this" in self_closing and "and this" in self_closing, self_closing
+
+
+@pytest.mark.beta_target("#56")
+def test_the_injected_payload_inside_an_argument_and_a_tag_survives():
+    """# fork: better-hermes-lcm — the target-state half of the test above.
+
+    Under #56 this source pre-processing may not remove message content at all — a marker
+    licenses nothing (and the same boundary is in #31/#35/#63). So the payload the host sent has
+    to be there, and because nothing was removed, a removal receipt in its place would be a false
+    claim of removal, which is its own defect. Re-introducing the strip to turn this green is
+    explicitly the wrong repair.
+    """
+    from hermes_lcm.extraction import (
+        sanitize_pre_compaction_content,
+        sanitize_pre_compaction_tool_arguments as clean_args,
+    )
+    inside_args = clean_args('{"body": "before<active_memory>DECISION</active_memory>after"}')
     assert "DECISION" in inside_args, inside_args
     # the false-receipt guard belongs on BOTH paths, and it has to name the marker the path
     # actually emits: the compact argument form is `[LCM-39c]`, not the sentence the content
@@ -323,7 +347,6 @@ def test_every_injected_removal_leaves_a_trace_including_inside_tool_arguments()
         'keep this <active_memory decision="CANCEL"/> and this'
     )
     assert "CANCEL" in self_closing, self_closing
-    assert "keep this" in self_closing and "and this" in self_closing
     assert "chars of injected context removed" not in self_closing, self_closing
 
 
@@ -442,17 +465,22 @@ def test_a_block_s_other_substantive_fields_are_named_not_dropped():
     assert plain == "just text", plain
 
 
-def test_every_removal_branch_leaves_a_receipt():
+def test_the_text_around_every_removal_branch_survives_it():
     """round-2 verify-4 #15: three removal shapes still had no marker — an unmatched INLINE
     opening tag (its attributes carry the text), the untrusted-context header branches, and
     several inline data URIs collapsing into one attachment indication.
 
-    # fork: better-hermes-lcm — the test's name is its own indictment under the beta contract:
-    # every branch it enumerated was a removal, and it asked only that each be MARKED. What was
-    # behind the removal branch, though, must survive it either way — the prose beside the
-    # unmatched tag is ordinary message text — and that is true today and after #56, so it is
-    # asserted here, ungated, at the production entry point. The post-fix form, in which nothing
-    # is removed at all, is `test_the_source_keeps_every_branch_these_removals_used_to_cut` below.
+    # fork: better-hermes-lcm — RENAMED from `test_every_removal_branch_leaves_a_receipt`,
+    # because that name became a lie the moment the body changed: nothing here asserts a receipt
+    # any more, and its gated sibling below asserts there must be none. A reader grepping the old
+    # name would have concluded the receipt contract was guarded when it is the opposite.
+    #
+    # The test's original name was its own indictment under the beta contract: every branch it
+    # enumerated was a removal, and it asked only that each be MARKED. What was behind the branch
+    # must survive it either way — the prose beside the unmatched tag is ordinary message text —
+    # and that is true today and after #56, so it is asserted here, ungated, at the production
+    # entry point. The post-fix form, in which nothing is removed at all, is
+    # `test_the_source_keeps_every_branch_these_removals_used_to_cut` below.
     """
     from hermes_lcm.extraction import sanitize_pre_compaction_content
 
@@ -489,35 +517,52 @@ def test_the_source_keeps_every_branch_these_removals_used_to_cut():
     assert sanitize_pre_compaction_content(two) == two, sanitize_pre_compaction_content(two)
 
 
-@pytest.mark.beta_target("#67")
-def test_the_summariser_sees_the_envelope_fields_or_a_receipt_for_them(tmp_path):
-    """round-3 verify-4 #8: an assistant turn carrying reasoning_content="DECISION cancel" and
-    is_error=True serialized as "[ASSISTANT]: Visible" — a failed step read exactly like a
-    successful one, and the decision reached the summariser nowhere.
-
-    # fork: better-hermes-lcm — "or a receipt for them" is the old contract, and the name kept it
-    # visible: the test accepted `reasoning_content (26 chars)` plus "not summarised here" as a
-    # sufficient answer. #67 says a name and a length are not the value — two opposite sidecars of
-    # equal length produce the same source text, and the receipt tells the model that something it
-    # will never see exists. The assertion is now the VALUE, and there must be no receipt claiming
-    # the field was withheld when it was not.
-    """
+def _envelope_source(tmp_path, name):
+    """`_serialize_messages` over an assistant turn with an outcome flag and a reasoning sidecar."""
     from hermes_lcm.config import LCMConfig
     from hermes_lcm.engine import LCMEngine
 
-    cfg = LCMConfig(database_path=str(tmp_path / "envsum.db"))
-    e = LCMEngine(config=cfg, hermes_home=str(tmp_path))
+    e = LCMEngine(config=LCMConfig(database_path=str(tmp_path / f"{name}.db")),
+                  hermes_home=str(tmp_path))
     try:
-        e.on_session_start("es", platform="cli", context_length=262_144)
-        serialized = e._serialize_messages([
+        e.on_session_start(name, platform="cli", context_length=262_144)
+        return e._serialize_messages([
             {"role": "assistant", "content": "Visible",
              "reasoning_content": "DECISION cancel the rollout", "is_error": True},
         ])
-        assert "is_error=True" in serialized, serialized
-        assert "DECISION cancel the rollout" in serialized, serialized
-        assert "not summarised here" not in serialized, serialized
     finally:
         e.shutdown()
+
+
+def test_a_failed_step_does_not_read_like_a_successful_one(tmp_path):
+    """round-3 verify-4 #8: an assistant turn carrying reasoning_content="DECISION cancel" and
+    is_error=True serialized as "[ASSISTANT]: Visible" — a failed step read exactly like a
+    successful one.
+
+    # fork: better-hermes-lcm — the outcome flag reaching the source is true today and after #67,
+    # and nothing else ungated asserts `is_error` rendering through `engine._serialize_messages`
+    # (the other guards are all at `sanitize_pre_compaction_content` / `_sanitize_content_block`,
+    # which is a different boundary). The half #67 changes — the sidecar arriving as a VALUE
+    # rather than a name and a length — is
+    # `test_the_summariser_sees_the_envelope_fields_or_a_receipt_for_them` below.
+    """
+    assert "is_error=True" in _envelope_source(tmp_path, "envflag"), "the outcome flag is gone"
+
+
+@pytest.mark.beta_target("#67")
+def test_the_summariser_sees_the_envelope_fields_or_a_receipt_for_them(tmp_path):
+    """# fork: better-hermes-lcm — the target-state half of the test above.
+
+    "or a receipt for them" is the old contract, and the name kept it visible: the test accepted
+    `reasoning_content (26 chars)` plus "not summarised here" as a sufficient answer. #67 says a
+    name and a length are not the value — two opposite sidecars of equal length produce the same
+    source text, and the receipt tells the model that something it will never see exists. The
+    assertion is the VALUE, and there must be no receipt claiming the field was withheld when it
+    was not.
+    """
+    serialized = _envelope_source(tmp_path, "envsum")
+    assert "DECISION cancel the rollout" in serialized, serialized
+    assert "not summarised here" not in serialized, serialized
 
 
 def test_every_rendering_branch_accounts_for_what_it_did_not_render():

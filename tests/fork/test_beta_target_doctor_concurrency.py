@@ -123,5 +123,25 @@ def test_a_paused_doctor_cannot_roll_back_a_successful_concurrent_ingest(tmp_pat
             "a row an ingest reported as written was rolled back by the doctor's savepoint; "
             f"doctor said {json.loads(doctor_result.get('payload') or '{}').get('status')!r}"
         )
+
+        # The instrument has to survive the fix as well as the rows. Everything above is
+        # satisfied by a #10 fix that simply makes the FTS integrity check a no-op — no savepoint,
+        # nothing to roll back, no loss of content and no loss of anything except the ability to
+        # find out whether the index is intact. This fork's rule is that a status must not read as
+        # healthy when nothing checked, so the check has to still run and still report.
+        payload = json.loads(doctor_result.get("payload") or "{}")
+        fts_checks = {
+            str(check.get("check")): str(check.get("status"))
+            for check in payload.get("checks", [])
+            if "fts_integrity" in str(check.get("check"))
+        }
+        assert "messages_fts_integrity" in fts_checks, (
+            "the doctor reported no messages FTS integrity check at all: a check that was removed "
+            f"cannot roll anything back, and it cannot tell anyone anything either — {payload!r}"
+        )
+        assert fts_checks["messages_fts_integrity"] != "unchecked", (
+            "the doctor ran the check and reported it as not actually checked, which reads as "
+            f"healthy to anyone who does not open the detail — {fts_checks!r}"
+        )
     finally:
         engine.shutdown()
