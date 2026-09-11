@@ -586,10 +586,12 @@ class LexicalReader:
         queue = [node_id for _depth, node_id, _text
                  in sorted(blocks, key=lambda b: -self._score(question, b[2]))[:2]]
         hops = 0
+        reached_a_leaf = False
         while queue and hops < self.max_hops:
             node_id = queue.pop(0)
             hops += 1
             chosen.append(node_id)
+            descended = False
             # Follow the cursor the tool hands back. lcm_expand returns one page plus
             # next_source_offset; stopping at page one and calling the remainder lost would
             # score the tool's own contract as a navigation failure.
@@ -627,7 +629,13 @@ class LexicalReader:
                 children = [child for page in pages for child in (page.get("expanded") or [])
                             if isinstance(child, dict) and child.get("node_id") is not None]
                 children.sort(key=lambda child: -self._score(question, str(child.get("summary") or "")))
-                queue.extend(int(child["node_id"]) for child in children[:1])
+                # Depth FIRST. Breadth-first interleaving between two frontier branches ran
+                # out of hops before either descent reached a leaf on a depth-3 DAG, which
+                # reads as "the reader found nothing" when it never got to look.
+                queue[:0] = [int(child["node_id"]) for child in children[:1]]
+                descended = True
+            if not descended:
+                reached_a_leaf = True
         recovered = "\n".join(texts)
         answer = self._answer(question, recovered)
         status = "ok" if recovered.strip() else "empty"
@@ -642,6 +650,10 @@ class LexicalReader:
             "observations": tuple(sorted(dict.fromkeys(observations))),
             "tool_calls": len(results),
             "pages_followed": pages_followed,
+            # A descent that ran out of hops before it reached a leaf did not look and find
+            # nothing; it never got to look. Reporting that as a navigation failure would be
+            # the same lie as an empty result reading as "there is nothing".
+            "budget_exhausted": bool(hops >= self.max_hops and not reached_a_leaf),
         }
 
     @staticmethod
@@ -783,7 +795,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                         help="provider-neutral route override, parsed by the plugin's own "
                              "model_routing; empty means the task default")
     parser.add_argument("--reader-max-tokens", type=int, default=1200)
-    parser.add_argument("--max-tool-calls", type=int, default=6)
+    parser.add_argument("--max-tool-calls", type=int, default=10)
     parser.add_argument("--max-pages", type=int, default=6,
                         help="how far the scripted reader follows lcm_expand's own cursor; "
                              "what is still bounded after that is reported as a bound")
@@ -1012,6 +1024,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             "question_id": case.question_id,
             "tool_calls": outcome["tool_calls"],
             "pages_followed": outcome.get("pages_followed", 0),
+            "budget_exhausted": bool(outcome.get("budget_exhausted")),
             "chosen_node_ids": list(outcome["chosen_node_ids"]),
             "answer_excerpt": (outcome["answer"] or "")[:240],
         })
@@ -1020,6 +1033,14 @@ def main(argv: Optional[list[str]] = None) -> int:
     navigation["reader"] = reader.name
     navigation["measures_a_model"] = args.reader == "model"
     navigation["per_reader_call"] = reader_detail
+    exhausted = sum(1 for item in reader_detail if item.get("budget_exhausted"))
+    navigation["reader_budget_exhausted"] = exhausted
+    if exhausted:
+        navigation["complete"] = False
+        navigation["incomplete_reasons"] = list(navigation["incomplete_reasons"]) + [
+            f"{exhausted} question(s) ran out of the --max-tool-calls budget before the "
+            f"descent reached a leaf; those misses say nothing about the index"
+        ]
 
     # ── fidelity over the SAME run ──────────────────────────────────────────────────────────
     claims = [StateClaim(
