@@ -137,6 +137,65 @@ def test_a_source_still_verbatim_in_the_delivered_context_needs_no_navigation():
     assert result["node_recall"]["expected"] == 0
 
 
+def test_a_missing_line_that_was_paged_out_is_an_evidence_defect_not_a_reader_miss():
+    """lcm_expand returns one page; the rest of the node is behind a cursor (#52 territory).
+
+    A labelled line that did not come back from a PAGED recovery may simply be on the next
+    page. Booking that as "the reader navigated badly" would attribute another issue's bound
+    to the model.
+    """
+    trace = _trace(recovered_text="we rejected exponential backoff",
+                   observations=("evidence:paged_result",))
+
+    result = score_navigation([_case()], [trace])
+
+    assert result["unscored_evidence_defect"] == 1
+    assert result["evidence_defects"] == {"evidence:bounded_recovery": 1}
+    assert result["source_recall"]["expected"] == 0
+    assert result["complete"] is False
+
+
+def test_a_missing_line_from_a_recovery_carrying_a_cut_marker_is_also_an_evidence_defect():
+    """An [LCM ...] marker in the recovered text says content was replaced (#50/#56)."""
+    trace = _trace(recovered_text="we rejected exponential backoff [LCM elided 900 of 2000 chars]",
+                   observations=("evidence:truncated_or_marked",))
+
+    result = score_navigation([_case()], [trace])
+
+    assert result["evidence_defects"] == {"evidence:bounded_recovery": 1}
+    assert result["per_case"][0]["bounded_by"] == ["evidence:truncated_or_marked"]
+
+
+def test_a_paged_recovery_that_did_return_the_line_is_scored_normally():
+    trace = _trace(observations=("evidence:paged_result",))
+
+    result = score_navigation([_case()], [trace])
+
+    assert result["scored"] == 1
+    assert result["source_recall"] == {"expected": 1, "hit": 1, "fraction": 1.0}
+    assert result["observations"] == {"evidence:paged_result": 1}
+
+
+def test_expanding_the_whole_dag_shows_up_as_low_node_precision():
+    """Recall alone rewards a reader that expands everything; precision exposes it."""
+    trace = _trace(chosen_node_ids=(7, 12, 13, 14))
+
+    result = score_navigation([_case()], [trace])
+
+    assert result["node_recall"]["fraction"] == 1.0
+    assert result["node_precision"] == {"expanded": 4, "needed": 1, "fraction": 0.25}
+
+
+def test_descending_through_a_parent_to_reach_the_holding_leaf_costs_no_precision():
+    """Once the frontier is condensed, reaching a leaf REQUIRES opening its ancestors."""
+    case = _case(path_node_ids=(2, 5))
+    trace = _trace(chosen_node_ids=(2, 5, 7))
+
+    result = score_navigation([case], [trace])
+
+    assert result["node_precision"] == {"expanded": 3, "needed": 3, "fraction": 1.0}
+
+
 def test_the_navigation_result_carries_its_own_recalls_and_no_fidelity_rate():
     """#2 and #8 are separate results; one rate covering both would hide either."""
     result = score_navigation([_case()], [_trace()])
@@ -183,6 +242,28 @@ def test_a_started_migration_rendered_as_succeeded_is_a_false_claim():
     assert result["false_claims"]["sample"][0]["claim_id"] == "migrate-started"
     assert result["omitted_statements"]["count"] == 0
     assert result["complete"] is True
+
+
+def test_the_false_claim_sample_shows_the_matched_span_not_the_whole_block():
+    """A summary is one unbroken block as often as not; a 200-char head shows nothing."""
+    text = _text(text="Index over 40 source sentences: " + ("unrelated filler, " * 30)
+                      + "migrate_ledger_v3 succeeded, and the shard is clean")
+
+    result = score_fidelity([STARTED], [text])
+
+    evidence = result["false_claims"]["sample"][0]["evidence"]
+    assert "migrate_ledger_v3 succeeded" in evidence
+    assert len(evidence) < 200
+
+
+def test_a_hedge_far_from_the_claim_does_not_excuse_it():
+    """Hedge suppression is local; over a whole block one stray 'unknown' would hide a lie."""
+    text = _text(text="migrate_ledger_v3 succeeded, and " + ("x" * 400)
+                      + ", the paging rota is unknown")
+
+    result = score_fidelity([STARTED], [text])
+
+    assert result["false_claims"]["count"] == 1
 
 
 def test_a_preserved_hedge_counts_as_correctly_named_uncertainty():

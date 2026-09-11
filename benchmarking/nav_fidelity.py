@@ -42,8 +42,17 @@ UNCERTAIN_STATES = frozenset({"planned", "started", "claimed", "uncertain"})
 # hedges AND falsely claims in one breath scores as uncertainty — which is the safer direction
 # for a detector whose output is read as "this specific lie was found".
 _SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+|\n+")
+# How far either side of a forbidden match a hedge still counts as hedging it.
+_HEDGE_WINDOW = 120
 
 _WHITESPACE = re.compile(r"\s+")
+
+# Recovery shapes that BOUND what came back without being defects in themselves. lcm_expand
+# returning one page and a cursor is its normal contract, and an "[LCM ...]" marker names what
+# it replaced rather than hiding it. Either one explains a labelled line that did not come back,
+# so a miss under one of them is withdrawn from the score instead of being charged to the
+# reader — that bound belongs to another issue (#50/#51/#52), not to the model.
+BOUNDED_OBSERVATIONS = ("evidence:paged_result", "evidence:truncated_or_marked")
 
 
 def _normalize(text: str) -> str:
@@ -55,17 +64,24 @@ def _sentences(text: str) -> list[str]:
     return [part for part in parts if part]
 
 
-def _matches(patterns: Sequence[str], text: str) -> str:
-    """Return the first pattern that matches, or ``""``."""
+def _search(patterns: Sequence[str], text: str):
+    """Return the first pattern's match object, or ``None``."""
     for pattern in patterns:
         try:
-            if re.search(pattern, text, re.IGNORECASE | re.DOTALL):
-                return pattern
+            found = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
         except re.error:
             # A malformed pattern is a corpus defect, not a passing text: treat it as
             # unmatched here and let the caller's corpus validation report it.
             continue
-    return ""
+        if found:
+            return found
+    return None
+
+
+def _matches(patterns: Sequence[str], text: str) -> str:
+    """Return the first pattern that matches, or ``""``."""
+    found = _search(patterns, text)
+    return found.re.pattern if found is not None else ""
 
 
 def _fraction(hit: int, expected: int) -> float | None:
@@ -82,16 +98,24 @@ def _fraction(hit: int, expected: int) -> float | None:
 class NavigationCase:
     """One labelled question and the sources that answer it.
 
-    ``covering_node_ids`` maps a labelled ``store_id`` to the node ids **in the frontier the
-    engine actually delivered** from which that row is reachable. An empty tuple means the row
-    is reachable from nothing the reader was handed, which is an evidence defect (the assembly
-    cap, a removed field, an unbound source) and never a reader failure.
+    ``covering_node_ids`` maps a labelled ``store_id`` to the node ids that COUNT as having
+    reached it — the nodes that hold the row directly, restricted to the ones reachable from
+    the frontier the engine actually delivered. Naming every frontier ancestor instead would
+    make the score vacuous the moment condensation collapses the frontier to one node: there
+    would be exactly one node to "choose". An empty tuple means the row is reachable from
+    nothing the reader was handed, which is an evidence defect (the assembly cap, a removed
+    field, an unbound source) and never a reader failure.
+
+    ``path_node_ids`` are the ancestors between the delivered frontier and those holders.
+    Opening one is how a reader gets down to a leaf, so it costs no precision — only nodes on
+    neither list count as a wasted expansion.
     """
 
     question_id: str
     question: str
     expected_store_ids: tuple[int, ...]
     covering_node_ids: Mapping[int, tuple[int, ...]]
+    path_node_ids: tuple[int, ...] = ()
     raw_in_context_store_ids: tuple[int, ...] = ()
     evidence_snippets: Mapping[int, str] = field(default_factory=dict)
     must_mention: tuple[str, ...] = ()      # literal strings, matched case-insensitively
@@ -115,6 +139,10 @@ class ReaderTrace:
     recovered_text: str = ""
     answer: str = ""
     evidence_defects: tuple[str, ...] = ()
+    # Things that were true of the recovery but do not on their own void a score — a paged
+    # result is the normal shape of lcm_expand, not a defect. One of them is promoted to a
+    # defect only when it actually explains a miss (see ``score_navigation``).
+    observations: tuple[str, ...] = ()
 
 
 def score_navigation(cases: Sequence[NavigationCase],
@@ -122,12 +150,14 @@ def score_navigation(cases: Sequence[NavigationCase],
     traces_by_id = {trace.question_id: trace for trace in traces}
 
     node_expected = node_hit = 0
+    nodes_expanded = nodes_needed = 0
     source_expected = source_hit = 0
     topics_checked = topics_missed = 0
     claims_checked = claims_found = 0
     scored = reader_unavailable = evidence_unscored = not_applicable = 0
     answered_without_expansion = 0
     defect_counts: dict[str, int] = {}
+    observation_counts: dict[str, int] = {}
     missed_samples: list[dict[str, Any]] = []
     claim_samples: list[dict[str, Any]] = []
     incomplete: list[str] = []
@@ -188,24 +218,55 @@ def score_navigation(cases: Sequence[NavigationCase],
             per_case.append(entry)
             continue
 
-        scored += 1
         chosen = set(trace.chosen_node_ids)
         recovered = _normalize(trace.recovered_text).lower()
 
         case_node_hit = case_source_hit = case_source_expected = 0
         for store_id in required:
-            node_expected += 1
             if chosen.intersection(case.covering_node_ids.get(store_id, ())):
-                node_hit += 1
                 case_node_hit += 1
             snippet = _normalize(case.evidence_snippets.get(store_id, "")).lower()
             if not snippet:
                 continue
-            source_expected += 1
             case_source_expected += 1
             if snippet in recovered:
-                source_hit += 1
                 case_source_hit += 1
+
+        # A line that did not come back out of a PAGED recovery may simply be on the next
+        # page: lcm_expand returns one page and a cursor. Attributing that miss to the reader
+        # would book another issue's bound as a model failure, so the case is withdrawn from
+        # the denominators and named instead.
+        bounded_by = [name for name in BOUNDED_OBSERVATIONS if name in trace.observations]
+        if case_source_hit < case_source_expected and bounded_by:
+            evidence_unscored += 1
+            label = "evidence:bounded_recovery"
+            defect_counts[label] = defect_counts.get(label, 0) + 1
+            entry.update(status="unscored_evidence_defect", evidence_defects=[label],
+                         bounded_by=bounded_by)
+            entry["reasons"].append(label)
+            incomplete.append(
+                f"{case.question_id}: {case_source_expected - case_source_hit} labelled line(s) "
+                f"did not come back and the recovery was bounded ({', '.join(bounded_by)}) — "
+                f"the evidence may be behind the cursor or inside what the marker names, so "
+                f"this is not scored as a model failure"
+            )
+            per_case.append(entry)
+            continue
+
+        scored += 1
+        node_expected += len(required)
+        node_hit += case_node_hit
+        source_expected += case_source_expected
+        source_hit += case_source_hit
+        for label in dict.fromkeys(trace.observations):
+            observation_counts[label] = observation_counts.get(label, 0) + 1
+        # Recall alone rewards a reader that expands the whole DAG; precision is what makes
+        # "it opened everything" visible next to a perfect recall.
+        nodes_expanded += len(chosen)
+        needed_nodes = {node for store_id in required
+                        for node in case.covering_node_ids.get(store_id, ())}
+        needed_nodes.update(case.path_node_ids)
+        nodes_needed += len(chosen & needed_nodes)
 
         if not trace.chosen_node_ids:
             entry["reasons"].append("reader:no_expansion")
@@ -255,6 +316,8 @@ def score_navigation(cases: Sequence[NavigationCase],
         "answered_without_expansion": answered_without_expansion,
         "node_recall": {"expected": node_expected, "hit": node_hit,
                         "fraction": _fraction(node_hit, node_expected)},
+        "node_precision": {"expanded": nodes_expanded, "needed": nodes_needed,
+                           "fraction": _fraction(nodes_needed, nodes_expanded)},
         "source_recall": {"expected": source_expected, "hit": source_hit,
                           "fraction": _fraction(source_hit, source_expected)},
         "missed_topics": {"checked": topics_checked, "missed": topics_missed,
@@ -262,6 +325,7 @@ def score_navigation(cases: Sequence[NavigationCase],
         "false_assertions": {"checked": claims_checked, "found": claims_found,
                              "sample": claim_samples[:12]},
         "evidence_defects": defect_counts,
+        "observations": observation_counts,
         "complete": not incomplete,
         "incomplete_reasons": incomplete,
         "per_case": per_case,
@@ -326,9 +390,17 @@ def _empty_bucket() -> dict[str, int]:
 def _classify(claim: StateClaim, text: str) -> tuple[str, str]:
     """Return ``(outcome, evidence)`` for one claim against one text."""
     for sentence in _sentences(text):
-        forbidden = _matches(claim.forbidden_patterns, sentence)
-        if forbidden and not _matches(claim.hedge_patterns, sentence):
-            return "false_claims", sentence[:200]
+        found = _search(claim.forbidden_patterns, sentence)
+        if found is None:
+            continue
+        # Hedge suppression is LOCAL. A published summary is often one unbroken block, and
+        # over a whole block a single stray "unknown" four hundred characters away would
+        # excuse a lie at the other end.
+        window = sentence[max(0, found.start() - _HEDGE_WINDOW):found.end() + _HEDGE_WINDOW]
+        if not _matches(claim.hedge_patterns, window):
+            # Report the span that matched, not the head of the block it sits in: a sample a
+            # reader cannot check is not evidence.
+            return "false_claims", found.group(0)[:180]
     if claim.true_state in UNCERTAIN_STATES:
         hedge = _matches(claim.hedge_patterns, text)
         if hedge and (claim.entity.lower() in text.lower()

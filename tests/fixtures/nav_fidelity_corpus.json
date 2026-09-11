@@ -1,0 +1,284 @@
+{
+  "name": "ledger-sync-nav-fidelity-v1",
+  "version": "1",
+  "notes": "Labelled corpus for scripts/e2e_index_navigation.py. Anchors are injected into generated filler at `position` (a fraction of the run, so the same corpus works at 400 and at 3000 turns); every position is well before the fresh tail so the anchor is actually compacted and has to be reached through the index. `evidence` is the exact original substring that must come back out of lcm_expand, and it doubles as the sentinel that maps the anchor to its store_id after ingest. No question names an anchor id, a store id or any synthetic marker: a reader that can only find FACT-00417 has been handed the answer. must_mention entries are literal strings matched case-insensitively; must_not_claim and the state patterns are regexes.",
+  "anchors": [
+    {
+      "anchor_id": "runbook-owner",
+      "category": "rare-early",
+      "position": 0.01,
+      "evidence": "Priya Raghunathan owns the reconciliation runbook",
+      "messages": [
+        {"role": "user", "content": "Before we start on ledger-sync: who owns the reconciliation runbook for the shards, and what is the approval path?"},
+        {"role": "assistant", "content": "Priya Raghunathan owns the reconciliation runbook (docs/runbooks/ledger-reconcile.md). Page her before touching shard 7 - she is the only approver for a manual replay, and the runbook says an unapproved replay is a sev-2 by definition."}
+      ]
+    },
+    {
+      "anchor_id": "timeout-value",
+      "category": "exact-value",
+      "position": 0.03,
+      "evidence": "LEDGER_SYNC_TIMEOUT_MS is set to 4750 in deploy/ledger-sync.yaml",
+      "messages": [
+        {"role": "user", "content": "What did we settle on for the ledger-sync request timeout?"},
+        {"role": "assistant", "content": "LEDGER_SYNC_TIMEOUT_MS is set to 4750 in deploy/ledger-sync.yaml. Anything at or above 5000 trips the gateway's own deadline before our client gives up, so 4750 leaves 250 ms of slack for the retry bookkeeping."}
+      ]
+    },
+    {
+      "anchor_id": "discarded-backoff",
+      "category": "discarded-alternative",
+      "position": 0.06,
+      "evidence": "We chose a fixed 900 ms interval instead, capped at 6 attempts",
+      "messages": [
+        {"role": "user", "content": "Should the ledger-sync retries use exponential backoff with jitter?"},
+        {"role": "assistant", "content": "We considered exponential backoff with jitter and rejected it: the ledger API rate-limits per minute, not per second, so backoff only shifts the burst to the next window without lowering the minute total. We chose a fixed 900 ms interval instead, capped at 6 attempts."}
+      ]
+    },
+    {
+      "anchor_id": "negated-cache",
+      "category": "negation",
+      "position": 0.09,
+      "evidence": "The read-through cache for ledger balances is explicitly ruled out",
+      "messages": [
+        {"role": "user", "content": "Can we put a read-through cache in front of the ledger balances to cut the load?"},
+        {"role": "assistant", "content": "No. The read-through cache for ledger balances is explicitly ruled out - balances have to be strongly consistent inside the settlement window, and a cache hit one second stale produces a settlement that does not reconcile. This is a standing constraint, not a later item."}
+      ]
+    },
+    {
+      "anchor_id": "planned-index",
+      "category": "exact-value",
+      "position": 0.11,
+      "evidence": "We plan to add idx_ledger_entry_posted_at next sprint. Nothing has been created yet",
+      "messages": [
+        {"role": "user", "content": "What is the story with the posted_at index on ledger entries?"},
+        {"role": "assistant", "content": "We plan to add idx_ledger_entry_posted_at next sprint. Nothing has been created yet - the migration file does not exist, and the current scan on posted_at is the reason the reconcile job takes 40 minutes."}
+      ]
+    },
+    {
+      "anchor_id": "migration-started",
+      "category": "negation-uncertainty",
+      "position": 0.14,
+      "evidence": "migrate_ledger_v3 was started at 02:14 UTC",
+      "messages": [
+        {"role": "user", "content": "Kick off the v3 ledger migration on shard 7."},
+        {"role": "assistant", "content": "Starting it now."},
+        {"role": "assistant", "content": "migrate_ledger_v3 was started at 02:14 UTC. The runner lost its connection part-way through, so whether it completed is unknown. Do not treat it as finished until the row counts are checked."}
+      ]
+    },
+    {
+      "anchor_id": "canary-failed",
+      "category": "exact-value",
+      "position": 0.16,
+      "evidence": "deploy_ledger_sync_canary failed with exit code 12",
+      "messages": [
+        {"role": "user", "content": "Did the canary go out?"},
+        {"role": "assistant", "content": "deploy_ledger_sync_canary failed with exit code 12: the artifact digest did not match the signed manifest, so the admission controller refused the image. The rollout is blocked until the artifact is rebuilt."}
+      ]
+    },
+    {
+      "anchor_id": "exact-command",
+      "category": "exact-value",
+      "position": 0.19,
+      "evidence": "ledgerctl reconcile --since 2026-02-11T00:00:00Z --shard 7 --dry-run",
+      "messages": [
+        {"role": "user", "content": "Write down the exact reconcile command you ran, verbatim, so it can be repeated."},
+        {"role": "assistant", "content": "The command that was run, verbatim: ledgerctl reconcile --since 2026-02-11T00:00:00Z --shard 7 --dry-run . It printed a plan only; nothing was written."}
+      ]
+    },
+    {
+      "anchor_id": "focus-shift-invoice",
+      "category": "focus-shift",
+      "position": 0.21,
+      "evidence": "the open ledger-sync question we are leaving on the table is whether shard 7 needs a manual replay",
+      "messages": [
+        {"role": "user", "content": "Park ledger-sync for now - the invoice PDF renderer is throwing in staging and that is user-visible."},
+        {"role": "assistant", "content": "Switching to invoice-pdf. For the record, the open ledger-sync question we are leaving on the table is whether shard 7 needs a manual replay after the interrupted migration; nobody has answered it."}
+      ]
+    },
+    {
+      "anchor_id": "migration-claimed",
+      "category": "negation-uncertainty",
+      "position": 0.24,
+      "evidence": "Ops stated in standup that migrate_ledger_v3 finished",
+      "messages": [
+        {"role": "user", "content": "Ops said in standup that the v3 migration is done."},
+        {"role": "assistant", "content": "Recording that as a claim, not a confirmation. Ops stated in standup that migrate_ledger_v3 finished, but nobody has checked the row counts against the source, so it stays unverified."}
+      ]
+    },
+    {
+      "anchor_id": "migration-corrected",
+      "category": "negation-uncertainty",
+      "position": 0.27,
+      "evidence": "migrate_ledger_v3 stopped at batch 47 of 120",
+      "messages": [
+        {"role": "user", "content": "Row counts are back."},
+        {"role": "assistant", "content": "Correction to the standup claim: migrate_ledger_v3 stopped at batch 47 of 120. It did not finish. Shard 7 therefore still needs the manual replay, which means Priya has to approve it."}
+      ]
+    },
+    {
+      "anchor_id": "rate-limit-confirmed",
+      "category": "exact-value",
+      "position": 0.29,
+      "evidence": "the provider's status page documents the ledger API rate limit as 600 requests per minute",
+      "messages": [
+        {"role": "user", "content": "Do we actually know the ledger API rate limit, or are we guessing?"},
+        {"role": "assistant", "content": "It is confirmed externally: the provider's status page documents the ledger API rate limit as 600 requests per minute. That is published, not our estimate, which is why the fixed 900 ms interval with 6 attempts stays inside it."}
+      ]
+    }
+  ],
+  "questions": [
+    {
+      "question_id": "q-runbook-owner",
+      "category": "rare-early",
+      "question": "Who owns the reconciliation runbook for the ledger shards, and what has to happen before anyone touches shard 7?",
+      "anchor_ids": ["runbook-owner"],
+      "must_mention": ["Priya"],
+      "must_not_claim": []
+    },
+    {
+      "question_id": "q-timeout-value",
+      "category": "exact-value",
+      "question": "What exact request-timeout value was configured for ledger-sync, and in which file?",
+      "anchor_ids": ["timeout-value"],
+      "must_mention": ["4750", "deploy/ledger-sync.yaml"],
+      "must_not_claim": []
+    },
+    {
+      "question_id": "q-discarded-backoff",
+      "category": "discarded-alternative",
+      "question": "Which retry strategy was considered and dropped for ledger-sync, why was it dropped, and what replaced it?",
+      "anchor_ids": ["discarded-backoff"],
+      "must_mention": ["exponential backoff", "900"],
+      "must_not_claim": ["exponential backoff[^.]{0,80}\\b(was )?(adopted|chosen|selected|in use|implemented)\\b", "\\b(we|they) (use|chose|adopted)\\b[^.]{0,40}exponential backoff"]
+    },
+    {
+      "question_id": "q-negated-cache",
+      "category": "negation",
+      "question": "Is the read-through cache for ledger balances enabled, and what was the reasoning?",
+      "anchor_ids": ["negated-cache"],
+      "must_mention": ["consistent"],
+      "must_not_claim": ["read-through cache[^.]{0,80}\\b(is |was |has been )?(enabled|added|in place|adopted|introduced)\\b", "\\b(we|they) enabled[^.]{0,40}read-through cache"]
+    },
+    {
+      "question_id": "q-planned-index",
+      "category": "exact-value",
+      "question": "Does the idx_ledger_entry_posted_at index exist yet?",
+      "anchor_ids": ["planned-index"],
+      "must_mention": ["next sprint"],
+      "must_not_claim": ["idx_ledger_entry_posted_at[^.]{0,80}\\b(was |is |has been )?(created|added|exists|in place|live)\\b"]
+    },
+    {
+      "question_id": "q-migration-status",
+      "category": "negation-uncertainty",
+      "question": "What is the verified status of migrate_ledger_v3, and what is it based on?",
+      "anchor_ids": ["migration-started", "migration-corrected"],
+      "must_mention": ["batch 47"],
+      "must_not_claim": ["migrate_ledger_v3[^.]{0,80}\\b(succeeded|completed successfully|finished successfully)\\b", "\\bthe (v3 )?migration (succeeded|completed|is done|finished)\\b"]
+    },
+    {
+      "question_id": "q-canary-failure",
+      "category": "exact-value",
+      "question": "Why is the ledger-sync canary rollout blocked?",
+      "anchor_ids": ["canary-failed"],
+      "must_mention": ["exit code 12", "digest"],
+      "must_not_claim": ["deploy_ledger_sync_canary[^.]{0,80}\\b(succeeded|passed|is green)\\b"]
+    },
+    {
+      "question_id": "q-exact-command",
+      "category": "exact-value",
+      "question": "Quote the exact reconcile command that was run, verbatim.",
+      "anchor_ids": ["exact-command"],
+      "must_mention": ["ledgerctl reconcile --since 2026-02-11T00:00:00Z --shard 7 --dry-run"],
+      "must_not_claim": []
+    },
+    {
+      "question_id": "q-focus-shift",
+      "category": "focus-shift",
+      "question": "When the discussion moved away from ledger-sync to the invoice PDF renderer, which ledger-sync question was explicitly left open?",
+      "anchor_ids": ["focus-shift-invoice"],
+      "must_mention": ["shard 7", "replay"],
+      "must_not_claim": []
+    },
+    {
+      "question_id": "q-rate-limit",
+      "category": "exact-value",
+      "question": "What is the ledger API rate limit, and is that our own estimate or is it confirmed somewhere?",
+      "anchor_ids": ["rate-limit-confirmed"],
+      "must_mention": ["600", "status page"],
+      "must_not_claim": ["rate limit[^.]{0,80}\\b(estimate|estimated|assumed|unconfirmed|guess)\\b"]
+    }
+  ],
+  "state_claims": [
+    {
+      "claim_id": "migration-started",
+      "entity": "migrate_ledger_v3",
+      "true_state": "started",
+      "anchor_ids": ["migration-started"],
+      "truth_patterns": ["migrate_ledger_v3[^.]{0,160}\\b(was )?start(ed)?\\b", "\\bstart(ed)?\\b[^.]{0,160}migrate_ledger_v3"],
+      "forbidden_patterns": ["migrate_ledger_v3[^.]{0,160}\\b(succeeded|successful|completed|finished|is done)\\b", "\\b(completed|finished|succeeded)\\b[^.]{0,80}migrate_ledger_v3"],
+      "hedge_patterns": ["\\b(unknown|unconfirmed|unverified|not confirmed|claim(ed|s)?|stated|reported|said|did not finish|incomplete|stopped)\\b"]
+    },
+    {
+      "claim_id": "migration-claimed",
+      "entity": "migrate_ledger_v3",
+      "true_state": "claimed",
+      "anchor_ids": ["migration-claimed"],
+      "truth_patterns": ["\\b(claim(ed|s)?|stated|said|reported|according to)\\b[^.]{0,160}migrate_ledger_v3", "migrate_ledger_v3[^.]{0,160}\\b(claim(ed|s)?|stated|said|reported|unverified)\\b"],
+      "forbidden_patterns": ["migrate_ledger_v3[^.]{0,160}\\b(confirmed to have (finished|completed)|verified as (finished|complete))\\b"],
+      "hedge_patterns": ["\\b(unverified|unconfirmed|not verified|claim(ed|s)?|stated|reported|said)\\b"]
+    },
+    {
+      "claim_id": "migration-corrected",
+      "entity": "migrate_ledger_v3",
+      "true_state": "corrected",
+      "anchor_ids": ["migration-corrected"],
+      "truth_patterns": ["batch 47", "migrate_ledger_v3[^.]{0,160}\\b(did not finish|stopped|incomplete|corrected)\\b"],
+      "forbidden_patterns": ["migrate_ledger_v3[^.]{0,160}\\b(succeeded|completed successfully|finished successfully|all 120 batches)\\b"],
+      "hedge_patterns": ["\\b(claim(ed|s)?|stated|said|reported)\\b"]
+    },
+    {
+      "claim_id": "canary-failed",
+      "entity": "deploy_ledger_sync_canary",
+      "true_state": "failed",
+      "anchor_ids": ["canary-failed"],
+      "truth_patterns": ["deploy_ledger_sync_canary[^.]{0,160}\\bfail(ed|ure|s)?\\b", "exit code 12"],
+      "forbidden_patterns": ["deploy_ledger_sync_canary[^.]{0,160}\\b(succeeded|passed|is green|completed successfully)\\b"],
+      "hedge_patterns": ["\\b(claim(ed|s)?|stated|reported)\\b"]
+    },
+    {
+      "claim_id": "index-planned",
+      "entity": "idx_ledger_entry_posted_at",
+      "true_state": "planned",
+      "anchor_ids": ["planned-index"],
+      "truth_patterns": ["idx_ledger_entry_posted_at[^.]{0,160}\\b(plan(ned|s)?|next sprint|not yet|does not exist)\\b", "\\bplan(ned)?\\b[^.]{0,160}idx_ledger_entry_posted_at"],
+      "forbidden_patterns": ["idx_ledger_entry_posted_at[^.]{0,160}\\b(was |is |has been )?(created|added|exists|in place|live)\\b"],
+      "hedge_patterns": ["\\b(plan(ned|s)?|not yet|does not exist|next sprint)\\b"]
+    },
+    {
+      "claim_id": "rate-limit-confirmed",
+      "entity": "rate limit",
+      "true_state": "externally_confirmed",
+      "anchor_ids": ["rate-limit-confirmed"],
+      "truth_patterns": ["\\b600\\b[^.]{0,80}(requests per minute|rpm)", "status page[^.]{0,160}\\b600\\b"],
+      "forbidden_patterns": ["\\b(estimate|estimated|assumed|unconfirmed|unverified|guess)\\b[^.]{0,120}(rate limit|600 requests)", "(rate limit|600 requests)[^.]{0,120}\\b(estimate|estimated|assumed|unconfirmed|unverified|guess)\\b"],
+      "hedge_patterns": []
+    },
+    {
+      "claim_id": "cache-negated",
+      "entity": "read-through cache",
+      "true_state": "negated",
+      "anchor_ids": ["negated-cache"],
+      "truth_patterns": ["read-through cache[^.]{0,160}\\b(ruled out|rejected|not enabled|excluded|will not)\\b", "\\b(ruled out|rejected|excluded)\\b[^.]{0,160}read-through cache"],
+      "forbidden_patterns": ["read-through cache[^.]{0,160}\\b(is |was |has been )?(enabled|added|in place|adopted|introduced)\\b", "\\b(enabled|adopted|introduced)\\b[^.]{0,80}read-through cache"],
+      "hedge_patterns": ["\\b(claim(ed|s)?|proposed|considered|suggested)\\b"]
+    },
+    {
+      "claim_id": "backoff-negated",
+      "entity": "exponential backoff",
+      "true_state": "negated",
+      "anchor_ids": ["discarded-backoff"],
+      "truth_patterns": ["exponential backoff[^.]{0,160}\\b(rejected|ruled out|not used|not adopted|not chosen|dropped|discarded)\\b", "\\b(rejected|ruled out|dropped|discarded)\\b[^.]{0,120}exponential backoff"],
+      "forbidden_patterns": ["exponential backoff[^.]{0,160}\\b(was )?(adopted|chosen|selected|in use|implemented)\\b", "\\b(uses|used|using|adopted|chose|chosen)\\b[^.]{0,60}exponential backoff"],
+      "hedge_patterns": ["\\b(considered|proposed|suggested|instead of|rather than|rejected)\\b"]
+    }
+  ]
+}
