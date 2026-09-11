@@ -1412,6 +1412,12 @@ class TestEscalationStripReasoning:
         class _FakeChoice:
             def __init__(self, content):
                 self.message = _FakeMessage(content)
+                # fork: better-hermes-lcm — this double carried no finish_reason and the
+                # summariser accepted it anyway. The test is about reasoning stripping, not
+                # about how a generation ends, so it now declares the terminal state every
+                # supported host adapter sets (#32: a generation counts as finished only on
+                # positive evidence, so absent terminal evidence is refused).
+                self.finish_reason = "stop"
 
         class _FakeResponse:
             def __init__(self, content):
@@ -1471,6 +1477,10 @@ class TestEscalationStripReasoning:
         class _FakeChoice:
             def __init__(self, content):
                 self.message = _FakeMessage(content)
+                # fork: better-hermes-lcm — see the double above; an unclosed reasoning block
+                # must be discarded for its OWN reason (the text is reasoning, not a summary),
+                # which is only reachable once the response declares that it terminated (#32).
+                self.finish_reason = "stop"
 
         class _FakeResponse:
             def __init__(self, content):
@@ -1593,10 +1603,15 @@ class TestEscalationStripReasoning:
 
         def fake_call_llm(**kwargs):
             calls.append(kwargs)
+            # fork: better-hermes-lcm — the double carried no finish_reason, so this
+            # condensation published on a response that never said it had finished. The test
+            # is about node lineage and the prompt boundary, so the double now declares the
+            # terminal state every supported host adapter sets (#32).
             return SimpleNamespace(
                 choices=[
                     SimpleNamespace(
-                        message=SimpleNamespace(content="Grounded persisted condensation.")
+                        message=SimpleNamespace(content="Grounded persisted condensation."),
+                        finish_reason="stop",
                     )
                 ]
             )
@@ -23673,6 +23688,15 @@ class TestEngineTools:
 
         assert [item["store_id"] for item in result["expanded"]] == store_ids[1:3]
         assert [item["source_index"] for item in result["expanded"]] == [1, 2]
+        # fork: better-hermes-lcm — this used to assert `complete: True` on the same page that
+        # reports `has_more: True` and a continuation cursor. A page that stopped before the
+        # end of what the node holds is exact and resumable (every cursor below is unchanged,
+        # and the pages still reassemble the original byte for byte) but it is not COMPLETE,
+        # and reporting both let such a page enter a synthesis as fully-loaded evidence
+        # (#50a). The reason travels with the flag and is asserted separately, so this dict
+        # stays a strict check on the cursors.
+        reason = result["pagination"].pop("incomplete_reason", "")
+        assert "next_source_offset" in reason, reason
         assert result["pagination"] == {
             "source_offset": 1,
             "content_offset": 0,
@@ -23691,7 +23715,7 @@ class TestEngineTools:
             "next_envelope_offset": 0,
             "has_more": True,
             "remaining_sources": 2,
-            "complete": True,
+            "complete": False,
         }
 
     def test_handle_expand_keeps_ingest_placeholder_ref_unsliced_under_tiny_budget(self, engine):
@@ -25167,11 +25191,18 @@ class TestEngineTools:
         assert "transcript_content" in context_json
         assert "SECOND_RAW_DETAIL" not in context_json
         assert result["context_truncated"] is True
+        # fork: better-hermes-lcm — this used to require the unreachable second node to appear
+        # as an empty `messages` block carrying has_more and a zero cursor. The roots loop now
+        # stops once the budget is spent and names every node it did not reach in ONE receipt:
+        # a block plus a receipt per unreachable root made the emitted context grow with the
+        # caller's own node list, far past the budget it was given, and an oversized request is
+        # one a host may cut off mid-JSON (#51). Nothing is lost by the change — the node was
+        # never read, so "resume at offset 0" and "read this node" are the same instruction,
+        # and it is still named in `matches` either way.
         assert any(
-            item["node_id"] == second_node_id
-            and item["type"] == "messages"
-            and item.get("pagination", {}).get("has_more") is True
-            and item.get("expand_args") == {"node_id": second_node_id, "source_offset": 0, "content_offset": 0}
+            item["type"] == "unread_evidence"
+            and second_node_id in item["unread_node_ids"]
+            and item["expand_args"] == {"node_id": second_node_id}
             for item in result["context_pagination"]
         )
 

@@ -1019,6 +1019,27 @@ LCM_DESCRIBE = {
                 ),
                 "default": 0,
             },
+            # the handler reads both, and its own summary_continue_with sends
+            # summary_offset back here; a schema-driven caller could not see either (#52).
+            "summary_offset": {
+                "type": "integer",
+                "description": (
+                    "Character offset into the node's own summary, for continuing one that did "
+                    "not fit an earlier response. Use summary_next_offset (or "
+                    "summary_continue_with) from that response, or from a truncated child "
+                    "summary returned by lcm_expand."
+                ),
+                "default": 0,
+            },
+            "summary_max_chars": {
+                "type": "integer",
+                "description": (
+                    "Maximum characters of the node's summary to return from summary_offset "
+                    "(default 4000). The response always carries summary_chars, "
+                    "summary_complete and, when more remains, summary_next_offset."
+                ),
+                "default": 4000,
+            },
         },
         "required": [],
     },
@@ -1094,9 +1115,24 @@ LCM_EXPAND = {
                 "type": "integer",
                 "description": (
                     "character offset used to continue an oversized rendering "
-                    "of an assistant turn's tool CALLS in node_id mode. Use "
-                    "next_tool_calls_offset (or tool_calls_continue_with) from the previous "
-                    "response; store_id mode does not render tool calls."
+                    "of an assistant turn's tool CALLS, in node_id and store_id mode alike. "
+                    "Use next_tool_calls_offset (or tool_calls_continue_with) from the "
+                    "previous response, or the tool_calls_continue_with a bounded search "
+                    "result hands you."
+                ),
+                "default": 0,
+            },
+            # the handler reads it and its own tool_calls_continue_with /
+            # envelope_continue_with send it back here; a schema-driven caller could not see it,
+            # so following one of those continuations restarted the envelope at 0 (#52).
+            "envelope_offset": {
+                "type": "integer",
+                "description": (
+                    "character offset used to continue an oversized rendering of a "
+                    "message's host envelope (reasoning, api_content and the other fields the "
+                    "columns do not project) in node_id mode. Use envelope_next_offset (or "
+                    "envelope_continue_with / tool_calls_continue_with) from the previous "
+                    "response."
                 ),
                 "default": 0,
             },
