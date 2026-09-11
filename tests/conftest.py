@@ -147,6 +147,23 @@ def _fork_mock_summary(prompt, max_tokens, model="", timeout=None):
     return candidate
 
 
+def manifest_version() -> str:
+    """The version this checkout ships, read straight from ``plugin.yaml``.
+
+    Eight tests hardcoded ``1.0.0-rc.1`` while the manifest had moved to ``1.1.0-beta.2``, so
+    the release-identity gate had been red for two releases and nobody could cut the next one.
+    Deriving the number here is what stops that drifting again.
+
+    Deliberately NOT ``runtime_identity._plugin_metadata()``: that is the production reader
+    those tests exist to check, and comparing it against itself would assert nothing.
+    """
+    manifest = Path(__file__).resolve().parent.parent / "plugin.yaml"
+    for line in manifest.read_text(encoding="utf-8").splitlines():
+        if line.startswith("version:"):
+            return line.split(":", 1)[1].strip().strip('"').strip("'")
+    raise AssertionError(f"{manifest} declares no version")
+
+
 @_pytest.fixture(autouse=True)
 def _fork_mock_summariser(monkeypatch):
     # autouse because upstream's compaction tests ship no summariser and

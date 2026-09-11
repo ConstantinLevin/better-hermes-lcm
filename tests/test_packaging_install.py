@@ -10,6 +10,8 @@ import subprocess
 import sys
 import types
 
+from tests.conftest import manifest_version
+
 
 EXPECTED_LCM_TOOLS = {
     "lcm_grep",
@@ -425,7 +427,9 @@ def test_plugin_entrypoint_registers_lcm_context_engine():
     identity = engine.get_status()["runtime_identity"]
     repo_root = Path(__file__).resolve().parent.parent
     assert identity["plugin_name"] == "hermes-lcm"
-    assert identity["plugin_version"] == "1.0.0-rc.1"
+    # fork: better-hermes-lcm — was the literal "1.0.0-rc.1", which plugin.yaml stopped
+    # declaring two releases ago; derived so the pin cannot go stale again.
+    assert identity["plugin_version"] == manifest_version()
     assert Path(identity["plugin_path"]) == repo_root
     assert identity["database_path_source"] in {"config.database_path", "hermes_home", "default_home"}
     assert identity["plugin_git_commit"]

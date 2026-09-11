@@ -23,6 +23,7 @@ from hermes_lcm.config import LCMConfig
 from hermes_lcm.dag import SummaryNode
 from hermes_lcm.engine import LCMEngine
 from hermes_lcm.externalize import externalize_ingest_payload
+from tests.conftest import manifest_version
 from hermes_lcm.tokens import count_message_tokens, count_messages_tokens, count_tokens
 
 
@@ -1195,7 +1196,9 @@ def test_get_status_exposes_runtime_identity_for_loaded_plugin_tree(tmp_path):
 
     assert identity["engine"] == "lcm"
     assert identity["plugin_name"] == "hermes-lcm"
-    assert identity["plugin_version"] == "1.0.0-rc.1"
+    # fork: better-hermes-lcm — was the literal "1.0.0-rc.1", which plugin.yaml stopped
+    # declaring two releases ago; derived so the pin cannot go stale again.
+    assert identity["plugin_version"] == manifest_version()
     assert Path(identity["plugin_path"]) == repo_root
     assert Path(identity["module_path"]).name == "engine.py"
     assert Path(identity["database_path"]) == db_path
@@ -1221,11 +1224,13 @@ def test_plugin_metadata_refreshes_when_manifest_changes(tmp_path, monkeypatch):
 
     initial = identity_mod._plugin_metadata()
     assert initial["name"] == "hermes-lcm"
-    assert initial["version"] == "1.0.0-rc.1"
+    # fork: better-hermes-lcm — was the literal "1.0.0-rc.1"; see the note above.
+    shipped = manifest_version()
+    assert initial["version"] == shipped
 
-    updated = original.replace('version: "1.0.0-rc.1"', 'version: "9.9.9-test"')
+    updated = original.replace(f'version: "{shipped}"', 'version: "9.9.9-test"')
     if updated == original:
-        updated = original.replace('version: 1.0.0-rc.1', 'version: 9.9.9-test')
+        updated = original.replace(f'version: {shipped}', 'version: 9.9.9-test')
     assert updated != original
 
     try:
@@ -1263,7 +1268,8 @@ def test_lcm_doctor_json_includes_runtime_identity(engine):
     payload = json.loads(engine.handle_tool_call("lcm_doctor", {}))
 
     assert payload["runtime_identity"]["plugin_name"] == "hermes-lcm"
-    assert payload["runtime_identity"]["plugin_version"] == "1.0.0-rc.1"
+    # fork: better-hermes-lcm — was the literal "1.0.0-rc.1"; see the note above.
+    assert payload["runtime_identity"]["plugin_version"] == manifest_version()
     assert "plugin_git_commit" in payload["runtime_identity"]
 
 
