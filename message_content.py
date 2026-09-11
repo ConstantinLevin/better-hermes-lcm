@@ -13,6 +13,75 @@ from typing import Any
 
 _TEXT_PART_TYPES = {"text", "input_text", "output_text"}
 
+# The store's own record of what the host's ``content`` WAS, kept in ``envelope_extra``
+# beside the projected text. The `_lcm` prefix keeps it out of the host envelope a row
+# replays (``MessageStore.to_openai_msg`` skips that prefix) and out of the envelope the
+# change-detection fingerprint compares, so it can never reach a provider or be spoofed by a
+# host field of the same name.
+CONTENT_KIND_KEY = "_lcm_content_kind"
+
+CONTENT_KIND_STRING = "str"
+CONTENT_KIND_LIST = "list"
+CONTENT_KIND_DICT = "dict"
+CONTENT_KIND_NONE = "none"
+CONTENT_KIND_OTHER = "other"
+# A row stored before the type was recorded. It is NOT a guess to be resolved later: valid
+# JSON syntax is not evidence of having been JSON, so unknown stays unknown.
+CONTENT_KIND_UNKNOWN = "unknown"
+
+
+def content_kind(content: Any) -> str:
+    """What the content VALUE is, as handed to the writer.
+
+    It describes the value the row will hold, not what the host sent before ingest protection
+    may have rewritten it — that is what makes the stored text reconstructable from it.
+    """
+    if content is None:
+        return CONTENT_KIND_NONE
+    if isinstance(content, str):
+        return CONTENT_KIND_STRING
+    if isinstance(content, list):
+        return CONTENT_KIND_LIST
+    if isinstance(content, dict):
+        return CONTENT_KIND_DICT
+    return CONTENT_KIND_OTHER
+
+
+def text_is_ambiguously_typed(text: Any) -> bool:
+    """Could this stored text have been either a structured value or a string of its JSON?
+
+    Only then does the recorded type change anything: for every other text the value itself
+    fixes the type, and callers can leave their comparisons exactly as they were.
+    """
+    if not isinstance(text, str) or not text:
+        return False
+    try:
+        decoded = json.loads(text)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return False
+    return isinstance(decoded, (list, dict)) and normalize_content_value(decoded) == text
+
+
+def original_content_from_stored(stored_text: Any, kind: Any) -> Any:
+    """The original value a stored row held, given the type recorded with it.
+
+    Fails closed: when the recorded type no longer describes the stored text — ingest
+    protection or tool-result GC rewrites a row's content in place — the stored text is
+    returned as it stands rather than a shape invented from it. A caller that must know
+    compares ``content_kind(result)`` against the recorded kind.
+    """
+    if kind == CONTENT_KIND_NONE:
+        return None
+    if kind in (CONTENT_KIND_LIST, CONTENT_KIND_DICT) and isinstance(stored_text, str):
+        try:
+            decoded = json.loads(stored_text)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return stored_text
+        expected = list if kind == CONTENT_KIND_LIST else dict
+        if isinstance(decoded, expected) and normalize_content_value(decoded) == stored_text:
+            return decoded
+    return stored_text
+
 
 def _extract_text_part_value(value: Any) -> str | None:
     if isinstance(value, str):
@@ -73,19 +142,39 @@ def text_content_for_pattern_matching(content: Any) -> str | None:
     return normalize_content_value(content)
 
 
-def stored_text_content_for_pattern_matching(content: Any) -> str | None:
+def stored_text_content_for_pattern_matching(content: Any, kind: Any = None) -> str | None:
     """Return message-filter text for content read back from storage.
 
-    Structured content is persisted as canonical JSON. Decode that legacy stored
-    representation when it round-trips to the same normalized string so restart
-    reconciliation applies the same text-first ignore policy to durable rows as
-    it applies to live structured messages.
+    Structured content is persisted as canonical JSON, so a row that WAS a structured value
+    has to be decoded before the text-first ignore policy reads the text it reads live. Which
+    rows those are used to be GUESSED, by decoding any stored string that round-trips to the
+    same canonical text: a user message whose literal text happened to be that JSON was
+    decoded too, and started matching a pattern it had not matched live.
+
+    ``kind`` is the type recorded with the row (``MessageStore`` writes it on every row it
+    stores) and answers it exactly — including ``CONTENT_KIND_UNKNOWN`` for a row written
+    before the type was kept, where the answer is "nobody knows", so nothing is decoded and
+    valid JSON syntax is not read as evidence of having been JSON.
+
+    Omitting ``kind`` keeps the old guess. It is not a default the store needs — every row it
+    hands back carries ``content_kind`` — but the one caller that reads stored rows against
+    the ignore patterns still drops that field before it gets here
+    (``LCMEngine._matches_ignore_message_patterns``), and without the type the guess is the
+    only thing that still recognises a durable structured row as the one the live ignore
+    policy filtered out. Removing the guess before that caller passes the field made restart
+    reconciliation miss such a row and re-ingest the turn before it as a duplicate.
     """
-    if isinstance(content, str):
-        try:
-            decoded = json.loads(content)
-        except (TypeError, ValueError, json.JSONDecodeError):
-            return text_content_for_pattern_matching(content)
-        if isinstance(decoded, (list, dict)) and normalize_content_value(decoded) == content:
+    if kind is None:
+        if isinstance(content, str):
+            try:
+                decoded = json.loads(content)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                return text_content_for_pattern_matching(content)
+            if isinstance(decoded, (list, dict)) and normalize_content_value(decoded) == content:
+                return text_content_for_pattern_matching(decoded)
+        return text_content_for_pattern_matching(content)
+    if kind in (CONTENT_KIND_LIST, CONTENT_KIND_DICT) and isinstance(content, str):
+        decoded = original_content_from_stored(content, kind)
+        if decoded is not content:
             return text_content_for_pattern_matching(decoded)
     return text_content_for_pattern_matching(content)
