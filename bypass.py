@@ -456,4 +456,12 @@ class BypassMixin:
                 session_id,
                 target_tokens,
             )
+            return compacted
+        # name the actor and the absence of a copy: what the host removed here is in the host
+        # transcript and nowhere in lcm.db, so this is not the ordinary "compacted" boundary an
+        # operator reading the status would otherwise assume.
+        self._last_compression_noop_reason = (
+            f"LCM bypassed {reason}: Hermes' native compressor compacted this session; "
+            "LCM stores no copy of what it removed"
+        )
         return compacted
