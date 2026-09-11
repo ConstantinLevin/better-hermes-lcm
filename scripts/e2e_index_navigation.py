@@ -75,6 +75,7 @@ from benchmarking.nav_fidelity import (  # noqa: E402
     BOUNDED_OBSERVATIONS,
     CorpusPatternError,
     attribute_recovery_defects,
+    bind_node_wide,
     recovery_causes,
     NavigationCase,
     ReaderTrace,
@@ -780,6 +781,7 @@ class LexicalReader:
             "bounded_nodes": {node: sorted(labels) for node, labels in bounded_nodes.items()},
             "bounded_store_ids_direct": {s: sorted(v) for s, v in bounded_direct.items()},
             "unsourced_node_ids": (),  # it only ever opens ids it read from the frontier
+            "unbound_defects": (),     # every call it makes names the node it is about
             "tool_calls": len(results),
             "pages_followed": pages_followed,
             # A descent that ran out of hops before it reached a leaf did not look and find
@@ -840,6 +842,9 @@ class ModelReader:
         bounded_direct: dict[int, set[str]] = {}
         truncated_views: list[dict[str, Any]] = []
         unsourced: list[int] = []
+        # Defects a call reported that had nowhere to bind. They withdraw nothing — but they
+        # are reported, because a defect that binds nothing must still be visible.
+        unbound_defects: list[str] = []
         # Provenance for every node id the reader names. It starts as the ids rendered into the
         # frontier it was handed and grows with every id a tool result shows it. An id from
         # neither is a guess, not navigation — at the low anchor the holder leaves are literally
@@ -859,6 +864,7 @@ class ModelReader:
                 "bounded_nodes": {n: sorted(v) for n, v in bounded_nodes.items()},
                 "bounded_store_ids_direct": {s: sorted(v) for s, v in bounded_direct.items()},
                 "unsourced_node_ids": tuple(dict.fromkeys(unsourced)),
+                "unbound_defects": tuple(dict.fromkeys(unbound_defects)),
                 "tool_result_views_truncated": truncated_views,
                 "tool_calls": len(chosen) + len(unsourced),
             }
@@ -935,6 +941,18 @@ class ModelReader:
                         current = bounded_direct.setdefault(store_id_arg, set())
                         current.discard(paged)
                         current |= bounds
+                    else:
+                        # A query-shaped call — lcm_expand_query and the other synthesis tools —
+                        # names neither a node nor a row, so this branch used not to exist and
+                        # every node-wide label of such a call was dropped on the floor. Its
+                        # honest scope is the nodes the answer drew on; a call whose answer
+                        # names none binds nothing but is reported rather than lost.
+                        drew_on = sorted(_node_ids_in(result))
+                        bound, unattributable = bind_node_wide(sorted(bounds), drew_on)
+                        for bound_node, labels in bound.items():
+                            bounded_nodes.setdefault(bound_node, set()).update(labels)
+                        for name in unattributable:
+                            unbound_defects.append(f"{call.function.name}:{name}")
                 else:
                     # The text still went to the model — that is what the host would do — but
                     # it credits no recall, or probing small integers would score navigation.
@@ -1265,6 +1283,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             "budget_exhausted": bool(outcome.get("budget_exhausted")),
             "chosen_node_ids": list(outcome["chosen_node_ids"]),
             "unsourced_node_ids": list(outcome.get("unsourced_node_ids") or ()),
+            "unbound_defects": list(outcome.get("unbound_defects") or []),
             "bounded_nodes": outcome.get("bounded_nodes") or {},
             "tool_result_views_truncated": outcome.get("tool_result_views_truncated") or [],
             "answer_excerpt": (outcome["answer"] or "")[:240],
@@ -1274,6 +1293,18 @@ def main(argv: Optional[list[str]] = None) -> int:
     navigation["reader"] = reader.name
     navigation["measures_a_model"] = args.reader == "model"
     navigation["per_reader_call"] = reader_detail
+    unbound = sorted({label for item in reader_detail
+                      for label in item.get("unbound_defects") or []})
+    if unbound:
+        # A defect that could not be bound to any node or row withdraws nothing, so it cannot
+        # quietly inflate a recall — but it is a real failure the run saw, and silence about it
+        # would be the loss this fork exists to stop.
+        navigation["unbound_defects"] = unbound
+        navigation["complete"] = False
+        navigation["incomplete_reasons"] = list(navigation["incomplete_reasons"]) + [
+            f"{len(unbound)} recovery defect(s) had no node or row to bind to and therefore "
+            f"withdrew nothing: {', '.join(unbound)}"
+        ]
     exhausted = sum(1 for item in reader_detail if item.get("budget_exhausted"))
     navigation["reader_budget_exhausted"] = exhausted
     if exhausted:

@@ -176,6 +176,31 @@ def attribute_recovery_defects(
             tuple(sorted(node_wide)))
 
 
+def bind_node_wide(
+    labels: Sequence[str],
+    target_node_ids: Sequence[int],
+) -> tuple[dict[int, tuple[str, ...]], tuple[str, ...]]:
+    """Give node-wide labels the narrowest home the CALL provides.
+
+    ``attribute_recovery_defects`` says which labels the RESULT could not narrow; this says
+    where they land, which depends on what the call was about. An ``lcm_expand`` names its node.
+    A query-shaped call — ``lcm_expand_query`` and the other synthesis tools — names neither a
+    node nor a row, so the honest scope is the nodes the answer drew on.
+
+    Returns ``({node_id: labels}, unattributable_labels)``. When the call offers no target at
+    all the labels bind nothing, and they come back as ``unattributable`` so the caller reports
+    them: a defect that binds nothing must still be visible. Dropping them on the floor is how a
+    corrupt payload inside a synthesis answer came to bind nothing and charge the reader for
+    every line underneath it.
+    """
+    ordered = tuple(sorted(dict.fromkeys(labels)))
+    if not ordered:
+        return {}, ()
+    if not target_node_ids:
+        return {}, ordered
+    return {int(node_id): ordered for node_id in dict.fromkeys(target_node_ids)}, ()
+
+
 def _search(patterns: Sequence[str], text: str):
     """Return the first pattern's match object, or ``None``."""
     for pattern in patterns:
