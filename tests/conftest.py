@@ -69,12 +69,16 @@ if pkg_name not in sys.modules:
             continue
         sub_name = f"{pkg_name}.{py_file.stem}"
         if sub_name not in sys.modules:
-            sub_spec = importlib.util.spec_from_file_location(
-                sub_name, str(py_file),
-                submodule_search_locations=[],
-            )
+            # NO `submodule_search_locations` here. Passing it — even as [] — makes the spec a
+            # PACKAGE spec, so `spec.parent` becomes the module's own dotted name while
+            # `__package__` was being set to `hermes_lcm`; from 3.12 every relative import in such
+            # a module emits `DeprecationWarning: __package__ != __spec__.parent`. On 3.14 that
+            # was 4,941 warnings in one suite run, which buries the output the CI matrix exists to
+            # read. These are plain modules, not packages, so omitting it is also what they are.
+            sub_spec = importlib.util.spec_from_file_location(sub_name, str(py_file))
             sub_mod = importlib.util.module_from_spec(sub_spec)
-            sub_mod.__package__ = pkg_name
+            # `__package__` comes from `sub_spec.parent` via module_from_spec. Setting it by hand
+            # is what let the two disagree in the first place, so it is not set by hand.
             sys.modules[sub_name] = sub_mod
             setattr(mod, py_file.stem, sub_mod)
             try:
