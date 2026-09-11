@@ -74,8 +74,9 @@ sys.path.append(_ROOT)
 from benchmarking.nav_fidelity import (  # noqa: E402
     BOUNDED_OBSERVATIONS,
     CorpusPatternError,
+    RecoveryCause,
     attribute_recovery_defects,
-    bind_node_wide,
+    nearest_node_scopes,
     recovery_causes,
     NavigationCase,
     ReaderTrace,
@@ -99,6 +100,13 @@ _FRONTIER_BLOCK_RE = re.compile(
 # Every marker this fork leaves where something was cut is prefixed "[LCM"; host spills are
 # "[Externalized". Either one inside a recovery means the reader did not get the whole row.
 _LOSS_MARKER_RE = re.compile(r"\[LCM\b|\[Externalized\b")
+# Failures a tool reports without naming the rows they cost. They are scoped to the block that
+# contains them (nearest_node_scopes); only one sitting outside every block has no home.
+_UNIDENTIFIED_FAILURE_FIELDS = {
+    "missing_source_node_ids": "evidence:source_missing",
+    "corrupt_payloads": "evidence:source_missing",
+    "incomplete_context_blocks": "evidence:source_missing",
+}
 _WORD_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_.\-/]{2,}|\d{2,}")
 _STOPWORDS = frozenset("""
 about after all and any are our was were what which who whom why the that this these those
@@ -621,9 +629,8 @@ def label_evidence(result: dict[str, Any], recovered_text: str) -> tuple[list[st
                     unread_nodes.append(parsed)
                 else:
                     unidentified = True
-        # Failures the tool reported WITHOUT naming the rows they cost. The node is then the
-        # only honest scope; dropping them would charge the reader for what they removed.
-        for key in ("missing_source_node_ids", "corrupt_payloads", "incomplete_context_blocks"):
+        # Failures that name no row are scoped below, by the block that contains them.
+        for key in _UNIDENTIFIED_FAILURE_FIELDS:
             if holder.get(key):
                 unidentified = True
         if holder.get("complete") is False:
@@ -644,11 +651,22 @@ def label_evidence(result: dict[str, Any], recovered_text: str) -> tuple[list[st
         observations.append("evidence:paged_result")
     if _LOSS_MARKER_RE.search(recovered_text):
         observations.append("evidence:truncated_or_marked")
-    causes = recovery_causes(tool_failed=tool_failed, identified_missing_rows=identified,
-                             unidentified_failure=unidentified,
-                             declared_incomplete=declared_incomplete,
-                             has_more=has_more, unread_node_ids=unread_nodes)
-    return causes, sorted(dict.fromkeys(observations))
+    # A failure that named no row still usually sits INSIDE a block that names a node, and that
+    # block is its true scope. Spreading such a label over every node the answer mentioned bound
+    # nodes the answer had read perfectly well and hid real misses under them.
+    scoped, unscoped = nearest_node_scopes(result, _UNIDENTIFIED_FAILURE_FIELDS)
+    causes = list(recovery_causes(
+        tool_failed=tool_failed, identified_missing_rows=identified,
+        unidentified_failure=bool(unscoped),
+        declared_incomplete=declared_incomplete and not scoped,
+        has_more=has_more, unread_node_ids=unread_nodes))
+    for scoped_node, labels in scoped.items():
+        for label in labels:
+            causes.append(RecoveryCause(label, node_ids=(scoped_node,)))
+        if declared_incomplete:
+            causes.append(RecoveryCause("evidence:incomplete_recovery_declared",
+                                        node_ids=(scoped_node,)))
+    return tuple(causes), sorted(dict.fromkeys(observations))
 
 
 def _walk_dicts(value: Any):
@@ -943,15 +961,15 @@ class ModelReader:
                         current |= bounds
                     else:
                         # A query-shaped call — lcm_expand_query and the other synthesis tools —
-                        # names neither a node nor a row, so this branch used not to exist and
-                        # every node-wide label of such a call was dropped on the floor. Its
-                        # honest scope is the nodes the answer drew on; a call whose answer
-                        # names none binds nothing but is reported rather than lost.
-                        drew_on = sorted(_node_ids_in(result))
-                        bound, unattributable = bind_node_wide(sorted(bounds), drew_on)
-                        for bound_node, labels in bound.items():
-                            bounded_nodes.setdefault(bound_node, set()).update(labels)
-                        for name in unattributable:
+                        # names neither a node nor a row. Whatever COULD be scoped has already
+                        # been scoped to the block that contains it, above; what is left over
+                        # genuinely belongs to no node, so it binds nothing and is reported.
+                        #
+                        # It must not be spread over the nodes the answer mentions: that bound
+                        # nodes the answer had read perfectly well, and hid real misses under
+                        # them. Withdrawing is the dangerous direction, so an unknown scope
+                        # withdraws nothing.
+                        for name in sorted(bounds):
                             unbound_defects.append(f"{call.function.name}:{name}")
                 else:
                     # The text still went to the model — that is what the host would do — but

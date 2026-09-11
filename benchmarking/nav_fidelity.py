@@ -176,29 +176,53 @@ def attribute_recovery_defects(
             tuple(sorted(node_wide)))
 
 
-def bind_node_wide(
-    labels: Sequence[str],
-    target_node_ids: Sequence[int],
+def nearest_node_scopes(
+    result: Any,
+    field_labels: Mapping[str, str],
 ) -> tuple[dict[int, tuple[str, ...]], tuple[str, ...]]:
-    """Give node-wide labels the narrowest home the CALL provides.
+    """Scope each failure field to the node whose BLOCK contains it.
 
-    ``attribute_recovery_defects`` says which labels the RESULT could not narrow; this says
-    where they land, which depends on what the call was about. An ``lcm_expand`` names its node.
-    A query-shaped call — ``lcm_expand_query`` and the other synthesis tools — names neither a
-    node nor a row, so the honest scope is the nodes the answer drew on.
+    A synthesis answer is a tree of blocks, each about a node. A failure inside one is about
+    that block's node and nothing else — an earlier version spread such a label over every node
+    the answer *mentioned*, which bound nodes the answer had read perfectly well and hid real
+    misses under them. The containing block is the narrowest true scope, and a plain
+    ``lcm_expand`` result gets it for free because it carries its own ``node_id`` at the top.
 
-    Returns ``({node_id: labels}, unattributable_labels)``. When the call offers no target at
-    all the labels bind nothing, and they come back as ``unattributable`` so the caller reports
-    them: a defect that binds nothing must still be visible. Dropping them on the floor is how a
-    corrupt payload inside a synthesis answer came to bind nothing and charge the reader for
-    every line underneath it.
+    ``field_labels`` maps a tool field name to the label its presence raises; the mapping stays
+    with the caller, which is what knows the tool's response shape.
+
+    Returns ``({node_id: labels}, unscoped_labels)``. A failure sitting outside any block has no
+    node to belong to and binds nothing — it comes back as unscoped so the caller reports it,
+    because a defect that withdraws nothing must still be visible.
     """
-    ordered = tuple(sorted(dict.fromkeys(labels)))
-    if not ordered:
-        return {}, ()
-    if not target_node_ids:
-        return {}, ordered
-    return {int(node_id): ordered for node_id in dict.fromkeys(target_node_ids)}, ()
+    per_node: dict[int, set[str]] = {}
+    unscoped: set[str] = set()
+
+    def walk(value: Any, enclosing: int | None) -> None:
+        if isinstance(value, dict):
+            own = value.get("node_id")
+            if isinstance(own, bool):
+                own = None
+            elif isinstance(own, str) and own.strip().isdigit():
+                own = int(own.strip())
+            elif not isinstance(own, int):
+                own = None
+            scope = own if own is not None else enclosing
+            for field, label in field_labels.items():
+                if value.get(field):
+                    if scope is None:
+                        unscoped.add(label)
+                    else:
+                        per_node.setdefault(scope, set()).add(label)
+            for item in value.values():
+                walk(item, scope)
+        elif isinstance(value, list):
+            for item in value:
+                walk(item, enclosing)
+
+    walk(result, None)
+    return ({node_id: tuple(sorted(labels)) for node_id, labels in per_node.items()},
+            tuple(sorted(unscoped)))
 
 
 def _search(patterns: Sequence[str], text: str):

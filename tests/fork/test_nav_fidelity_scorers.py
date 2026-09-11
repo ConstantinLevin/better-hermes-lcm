@@ -13,7 +13,7 @@ from benchmarking.nav_fidelity import (
     CorpusPatternError,
     RecoveryCause,
     attribute_recovery_defects,
-    bind_node_wide,
+    nearest_node_scopes,
     recovery_causes,
     NavigationCase,
     ReaderTrace,
@@ -336,28 +336,42 @@ def test_an_unread_root_binds_that_node_and_not_the_reader():
     assert node_wide == ()
 
 
-def test_a_query_shaped_call_binds_its_node_wide_defects_to_what_the_answer_drew_on():
-    """lcm_expand_query names neither a node_id nor a store_id, so "the node" is not given.
+# fork: better-hermes-lcm — these replace two checks on a `bind_node_wide(labels, targets)`
+# helper that spread a synthesis answer's node-wide labels over every node the answer MENTIONED.
+# That hid unrelated misses: a node the answer read successfully was bound by another node's
+# corrupt payload. A nested failure belongs to the block that contains it, and nothing else.
 
-    The reader used to have no home for those labels and dropped them, so a corrupt payload
-    inside a synthesis answer bound nothing and every line under it was charged to the reader.
-    """
-    per_node, unattributable = bind_node_wide(
-        ("evidence:incomplete_recovery_declared", "evidence:source_missing"), (4, 9))
+def test_a_nested_failure_belongs_to_the_block_that_contains_it():
+    """lcm_expand_query answers in blocks; a failure inside one is about that block's node."""
+    result = {"answer": "...",
+              "blocks": [{"node_id": 9, "expanded": {"pagination": {"complete": True}}},
+                         {"node_id": 4, "expanded": {"pagination": {"corrupt": ["ref-b"]}}}]}
 
-    assert per_node == {
-        4: ("evidence:incomplete_recovery_declared", "evidence:source_missing"),
-        9: ("evidence:incomplete_recovery_declared", "evidence:source_missing"),
-    }
-    assert unattributable == ()
+    per_node, unscoped = nearest_node_scopes(result, {"corrupt": "evidence:source_missing"})
+
+    assert per_node == {4: ("evidence:source_missing",)}
+    assert 9 not in per_node, "a block the answer read fine must not carry another's failure"
+    assert unscoped == ()
 
 
-def test_a_defect_with_nowhere_to_bind_is_reported_rather_than_dropped():
-    """No target means no withdrawal — but silence would be the loss this fork exists to stop."""
-    per_node, unattributable = bind_node_wide(("evidence:source_missing",), ())
+def test_a_failure_outside_any_block_has_no_node_to_belong_to():
+    """No enclosing node means no withdrawal — but silence would be the loss we exist to stop."""
+    result = {"answer": "...", "corrupt": ["ref-b"]}
+
+    per_node, unscoped = nearest_node_scopes(result, {"corrupt": "evidence:source_missing"})
 
     assert per_node == {}
-    assert unattributable == ("evidence:source_missing",)
+    assert unscoped == ("evidence:source_missing",)
+
+
+def test_a_plain_expansion_scopes_everything_to_the_node_it_is_about():
+    """An lcm_expand result carries its own node_id at the top, so the whole result is scoped."""
+    result = {"node_id": 7, "pagination": {"corrupt": ["ref-b"]}}
+
+    per_node, unscoped = nearest_node_scopes(result, {"corrupt": "evidence:source_missing"})
+
+    assert per_node == {7: ("evidence:source_missing",)}
+    assert unscoped == ()
 
 
 def test_a_mixed_recovery_failure_keeps_both_attributions():
