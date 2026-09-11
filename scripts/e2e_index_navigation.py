@@ -72,12 +72,15 @@ from hermes_lcm.engine import LCMEngine  # noqa: E402
 # would shadow the host for any other module that imports ``tools`` mid-run.
 sys.path.append(_ROOT)
 from benchmarking.nav_fidelity import (  # noqa: E402
+    BOUNDED_OBSERVATIONS,
+    CorpusPatternError,
     NavigationCase,
     ReaderTrace,
     ScoredText,
     StateClaim,
     score_fidelity,
     score_navigation,
+    validate_patterns,
 )
 
 # The real route, captured before anything can replace it. `--summariser real` calls THIS and
@@ -138,7 +141,10 @@ def pin_tokenizer() -> dict[str, Any]:
     return {
         "backend": "tiktoken/cl100k_base" if encoder is not None else "char-estimate-fallback",
         "tiktoken_version": version,
-        "encoder_ready": bool(getattr(lcm_tokens, "_encoder_ready", False)),
+        # reports that the load ATTEMPT settled, not that an encoder exists — tokens.py sets
+        # it either way, and this fork polices exactly that wording (minor 12)
+        "loader_settled": bool(getattr(lcm_tokens, "_encoder_ready", False)),
+        "encoder_present": encoder is not None,
         "generation": int(getattr(lcm_tokens, "_encoder_generation", 0)),
         "pinned_before_run": True,
     }
@@ -507,6 +513,58 @@ def _collect_text(value: Any, sink: list[str], store_ids: set[int]) -> None:
         sink.append(value)
 
 
+def _as_int(value: Any) -> Optional[int]:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value.strip())
+    return None
+
+
+def _node_ids_in(value: Any, found: Optional[set[int]] = None) -> set[int]:
+    """Every node id a tool result showed the reader — what it may navigate to next."""
+    if found is None:
+        found = set()
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key in ("node_id", "parent_node_id") and _as_int(item) is not None:
+                found.add(_as_int(item))
+            else:
+                _node_ids_in(item, found)
+    elif isinstance(value, list):
+        for item in value:
+            _node_ids_in(item, found)
+    return found
+
+
+def _tool_message_content(result: dict[str, Any], args,
+                          truncated_views: list[dict[str, Any]]) -> str:
+    """The tool result as the reader sees it. Uncut by default.
+
+    This used to be ``json.dumps(result)[:200_000]``: the reader's only view of the evidence
+    silently shortened, with no marker and no counter, leaving broken JSON in its transcript —
+    while scoring used the untruncated text, so a line cut out of the reader's view was
+    charged to the reader as a miss. Cutting our own tooling's evidence without a marker is
+    the defect this fork exists to remove, so the default now cuts nothing. An operator who
+    sets a cap gets a valid JSON object that says what was withheld, by whom, and how to get
+    it back — and the event is recorded in the run's output.
+    """
+    rendered = json.dumps(result)
+    cap = int(getattr(args, "max_tool_result_chars", 0) or 0)
+    if cap <= 0 or len(rendered) <= cap:
+        return rendered
+    note = (
+        f"[HARNESS ELISION: this tool result was {len(rendered)} characters; the reader was "
+        f"shown the first {cap} and {len(rendered) - cap} were withheld by the harness, not by "
+        f"the tool. Re-run with --max-tool-result-chars 0 (the default) to see all of it.]"
+    )
+    truncated_views.append({"original_chars": len(rendered), "shown_chars": cap,
+                            "withheld_chars": len(rendered) - cap})
+    return json.dumps({"__harness_elision__": note, "result_head": rendered[:cap]})
+
+
 def label_evidence(result: dict[str, Any], recovered_text: str) -> tuple[list[str], list[str]]:
     """Separate 'the evidence was defective' from 'the reader chose badly'.
 
@@ -581,6 +639,7 @@ class LexicalReader:
         store_ids: set[int] = set()
         defects: list[str] = []
         observations: list[str] = []
+        bounded_nodes: dict[int, set[str]] = {}
         pages_followed = 0
         # One greedy descent, not a sweep of the DAG: take the best-matching rendered node,
         # then at each condensation take its best-matching child. Expanding everything would
@@ -617,16 +676,21 @@ class LexicalReader:
                 results.append(page)
                 found_defects, found_observations = label_evidence(page, piece)
                 defects.extend(found_defects)
-                # "paged" is re-derived per node below: an intermediate page saying has_more is
-                # just the cursor doing its job. Dropping that distinction here would either
-                # hide a real bound or void every case that ever turned a page.
-                observations.extend(name for name in found_observations
-                                    if name != "evidence:paged_result")
+                # Bounds are attributed to THIS NODE, not to the whole trace. A marker in one
+                # page of one node used to bound every line of every node the reader touched.
+                for name in found_observations:
+                    if name == "evidence:paged_result":
+                        continue  # re-derived from the last page below
+                    observations.append(name)
+                    if name in BOUNDED_OBSERVATIONS:
+                        bounded_nodes.setdefault(node_id, set()).add(name)
             last = pages[-1].get("pagination")
             if isinstance(last, dict) and last.get("has_more"):
                 # Still short after the cursor was followed to the hop limit: THIS is a bound
-                # the reader was actually left with.
+                # the reader was actually left with, on THIS node. An intermediate page saying
+                # has_more is just the cursor doing its job.
                 observations.append("evidence:paged_result")
+                bounded_nodes.setdefault(node_id, set()).add("evidence:paged_result")
             if pages[0].get("source_type") == "nodes":
                 children = [child for page in pages for child in (page.get("expanded") or [])
                             if isinstance(child, dict) and child.get("node_id") is not None]
@@ -650,6 +714,9 @@ class LexicalReader:
             "answer": answer,
             "evidence_defects": tuple(sorted(dict.fromkeys(defects))),
             "observations": tuple(sorted(dict.fromkeys(observations))),
+            "bounded_nodes": {node: sorted(labels) for node, labels in bounded_nodes.items()},
+            "bounded_store_ids_direct": {},
+            "unsourced_node_ids": (),  # it only ever opens ids it read from the frontier
             "tool_calls": len(results),
             "pages_followed": pages_followed,
             # A descent that ran out of hops before it reached a leaf did not look and find
@@ -706,20 +773,40 @@ class ModelReader:
         store_ids: set[int] = set()
         defects: list[str] = []
         observations: list[str] = []
+        bounded_nodes: dict[int, set[str]] = {}
+        bounded_direct: dict[int, set[str]] = {}
+        truncated_views: list[dict[str, Any]] = []
+        unsourced: list[int] = []
+        # Provenance for every node id the reader names. It starts as the ids rendered into the
+        # frontier it was handed and grows with every id a tool result shows it. An id from
+        # neither is a guess, not navigation — at the low anchor the holder leaves are literally
+        # 1, 2, 4, 5, so probing small integers would otherwise score.
+        visible_nodes = {node_id for _depth, node_id in delivered_frontier(context)}
         answer = ""
         status = "empty"
         detail = "the reader never produced a final message"
+
+        def _snapshot(**overrides) -> dict[str, Any]:
+            payload = {
+                "chosen_node_ids": tuple(chosen),
+                "recovered_store_ids": tuple(sorted(store_ids)),
+                "recovered_text": "\n".join(texts),
+                "evidence_defects": tuple(sorted(dict.fromkeys(defects))),
+                "observations": tuple(sorted(dict.fromkeys(observations))),
+                "bounded_nodes": {n: sorted(v) for n, v in bounded_nodes.items()},
+                "bounded_store_ids_direct": {s: sorted(v) for s, v in bounded_direct.items()},
+                "unsourced_node_ids": tuple(dict.fromkeys(unsourced)),
+                "tool_result_views_truncated": truncated_views,
+                "tool_calls": len(chosen) + len(unsourced),
+            }
+            payload.update(overrides)
+            return payload
+
         for _step in range(args.max_tool_calls + 1):
             try:
                 response, _route = call_reader_model(messages, tool_schemas, args)
             except Exception as exc:
-                return {"status": "error", "detail": f"{type(exc).__name__}: {exc}",
-                        "chosen_node_ids": tuple(chosen),
-                        "recovered_store_ids": tuple(sorted(store_ids)),
-                        "recovered_text": "\n".join(texts), "answer": "",
-                        "evidence_defects": tuple(sorted(dict.fromkeys(defects))),
-                        "observations": tuple(sorted(dict.fromkeys(observations))),
-                        "tool_calls": len(chosen)}
+                return _snapshot(status="error", detail=f"{type(exc).__name__}: {exc}", answer="")
             message = response.choices[0].message
             calls = getattr(message, "tool_calls", None) or []
             content = message.content if isinstance(message.content, str) else ""
@@ -741,35 +828,66 @@ class ModelReader:
                     arguments = json.loads(call.function.arguments or "{}")
                 except Exception:
                     arguments = {}
-                node_id = arguments.get("node_id")
-                if isinstance(node_id, int):
-                    chosen.append(node_id)
-                elif isinstance(node_id, str) and node_id.isdigit():
-                    chosen.append(int(node_id))
+                node_id = _as_int(arguments.get("node_id"))
+                store_id_arg = _as_int(arguments.get("store_id"))
+                sourced = node_id is None or node_id in visible_nodes
+                if node_id is not None:
+                    (chosen if sourced else unsourced).append(node_id)
+
                 result = run_tool(engine, call.function.name, arguments, messages, args)
                 sink: list[str] = []
-                _collect_text(result, sink, store_ids)
+                seen_ids: set[int] = set()
+                _collect_text(result, sink, seen_ids)
                 piece = "\n".join(sink)
-                texts.append(piece)
+                # Every node id this result showed the reader becomes navigable from here on.
+                visible_nodes.update(_node_ids_in(result))
                 found_defects, found_observations = label_evidence(result, piece)
-                defects.extend(found_defects)
-                observations.extend(found_observations)
+                if sourced:
+                    store_ids.update(seen_ids)
+                    texts.append(piece)
+                    defects.extend(found_defects)
+                    observations.extend(found_observations)
+                    # Attributed to the node (or the row) this call was about, and re-derived
+                    # per call: a later page of the same node that ends with has_more false
+                    # clears the bound, and a marker in one node's page never bounds another's.
+                    bounds = {name for name in found_observations
+                              if name in BOUNDED_OBSERVATIONS}
+                    paged = "evidence:paged_result"
+                    if node_id is not None:
+                        current = bounded_nodes.setdefault(node_id, set())
+                        current.discard(paged)
+                        current |= bounds
+                    elif store_id_arg is not None:
+                        current = bounded_direct.setdefault(store_id_arg, set())
+                        current.discard(paged)
+                        current |= bounds
+                else:
+                    # The text still went to the model — that is what the host would do — but
+                    # it credits no recall, or probing small integers would score navigation.
+                    observations.append("reader:unsourced_node_id")
+
                 messages.append({"role": "tool", "tool_call_id": call.id,
-                                 "content": json.dumps(result)[:200_000]})
-        return {
-            "status": status,
-            "detail": detail,
-            "chosen_node_ids": tuple(chosen),
-            "recovered_store_ids": tuple(sorted(store_ids)),
-            "recovered_text": "\n".join(texts),
-            "answer": answer,
-            "evidence_defects": tuple(sorted(dict.fromkeys(defects))),
-            "observations": tuple(sorted(dict.fromkeys(observations))),
-            "tool_calls": len(chosen),
-        }
+                                 "content": _tool_message_content(result, args,
+                                                                  truncated_views)})
+        return _snapshot(status=status, detail=detail, answer=answer)
 
 
 # ── the run ─────────────────────────────────────────────────────────────────────────────────
+
+def _corpus_patterns(corpus: dict) -> list[tuple[str, str]]:
+    """Every regex the corpus carries, each with a name a maintainer can find it by."""
+    entries: list[tuple[str, str]] = []
+    for question in corpus.get("questions", []):
+        for index, pattern in enumerate(question.get("must_not_claim", [])):
+            entries.append((f"questions[{question.get('question_id')}]"
+                            f".must_not_claim[{index}]", pattern))
+    for claim in corpus.get("state_claims", []):
+        for field_name in ("truth_patterns", "forbidden_patterns", "hedge_patterns"):
+            for index, pattern in enumerate(claim.get(field_name, [])):
+                entries.append((f"state_claims[{claim.get('claim_id')}]"
+                                f".{field_name}[{index}]", pattern))
+    return entries
+
 
 def _digest(value: Any) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True, default=str).encode()).hexdigest()
@@ -798,6 +916,10 @@ def main(argv: Optional[list[str]] = None) -> int:
                              "model_routing; empty means the task default")
     parser.add_argument("--reader-max-tokens", type=int, default=1200)
     parser.add_argument("--max-tool-calls", type=int, default=10)
+    parser.add_argument("--max-tool-result-chars", type=int, default=0,
+                        help="0 (the default) shows the reader every tool result whole. A "
+                             "positive value cuts, and the cut is marked in the reader's "
+                             "transcript and counted in the output — never silent")
     parser.add_argument("--max-pages", type=int, default=6,
                         help="how far the scripted reader follows lcm_expand's own cursor; "
                              "what is still bounded after that is reported as a bound")
@@ -824,6 +946,17 @@ def main(argv: Optional[list[str]] = None) -> int:
         corpus_raw = handle.read()
     corpus = json.loads(corpus_raw)
     corpus_digest = hashlib.sha256(corpus_raw.encode()).hexdigest()
+
+    # Compile every corpus pattern BEFORE anything runs. The scorer treats an uncompilable
+    # pattern as unmatched so one typo cannot crash a run mid-flight, which means a detector
+    # can be silently switched off and the run still reports false_claims: 0. This is the
+    # signal that makes that impossible.
+    try:
+        validate_patterns(_corpus_patterns(corpus))
+    except CorpusPatternError as exc:
+        print("=== e2e_index_navigation: NOT RUN ===")
+        print(str(exc))
+        return 5
 
     tokenizer = pin_tokenizer()
     if args.require_exact_tokenizer and not tokenizer["backend"].startswith("tiktoken"):
@@ -1022,8 +1155,21 @@ def main(argv: Optional[list[str]] = None) -> int:
         tool_schemas = []  # the scripted reader dispatches directly; nothing is offered to it
     traces: list[ReaderTrace] = []
     reader_detail: list[dict[str, Any]] = []
+    # One walk per node, reused for every question, so bound attribution is cheap.
+    store_ids_by_node = {node.node_id: store_ids_under(engine, node.node_id) for node in nodes}
     for case in cases:
         outcome = reader.read(engine, context, case.question, tool_schemas, args)
+        # A bound applies to the rows the bounded node holds, and to nothing else. Attributing
+        # it run-wide let one marker in one page bound every line the reader was looking for.
+        bounded_store_ids: dict[int, set[str]] = {
+            int(store_id): set(labels)
+            for store_id, labels in (outcome.get("bounded_store_ids_direct") or {}).items()
+        }
+        for node_id, labels in (outcome.get("bounded_nodes") or {}).items():
+            if not labels:
+                continue  # the node was read whole; it bounds nothing
+            for store_id in store_ids_by_node.get(int(node_id), ()):
+                bounded_store_ids.setdefault(store_id, set()).update(labels)
         traces.append(ReaderTrace(
             question_id=case.question_id,
             status=outcome["status"],
@@ -1034,6 +1180,9 @@ def main(argv: Optional[list[str]] = None) -> int:
             answer=outcome["answer"],
             evidence_defects=outcome["evidence_defects"],
             observations=outcome["observations"],
+            bounded_store_ids={sid: tuple(sorted(labels))
+                               for sid, labels in bounded_store_ids.items()},
+            unsourced_node_ids=tuple(outcome.get("unsourced_node_ids") or ()),
         ))
         reader_detail.append({
             "question_id": case.question_id,
@@ -1041,6 +1190,9 @@ def main(argv: Optional[list[str]] = None) -> int:
             "pages_followed": outcome.get("pages_followed", 0),
             "budget_exhausted": bool(outcome.get("budget_exhausted")),
             "chosen_node_ids": list(outcome["chosen_node_ids"]),
+            "unsourced_node_ids": list(outcome.get("unsourced_node_ids") or ()),
+            "bounded_nodes": outcome.get("bounded_nodes") or {},
+            "tool_result_views_truncated": outcome.get("tool_result_views_truncated") or [],
             "answer_excerpt": (outcome["answer"] or "")[:240],
         })
 
@@ -1074,6 +1226,52 @@ def main(argv: Optional[list[str]] = None) -> int:
     fidelity["summariser"] = args.summariser
     fidelity["measures_a_model"] = args.summariser == "real"
 
+    # A route that failed for SOME chunks leaves those chunks unsummarised — escalation raises
+    # rather than publishing a fallback — so the index this run scored is partly absent. That
+    # is not a clean measurement of anything, whichever way the numbers came out.
+    if recorder.failures:
+        reason = (
+            f"{recorder.failures} of {recorder.calls} summariser call(s) failed, so part of "
+            f"this run's index was never written: "
+            f"{'; '.join(recorder.errors[:3]) or 'no error recorded'}"
+        )
+        for block in (fidelity, navigation):
+            block["complete"] = False
+            block["incomplete_reasons"] = list(block["incomplete_reasons"]) + [reason]
+        fidelity["summariser_route_failures"] = recorder.failures
+
+    note = (
+        "A stub summariser or a lexical reader proves the chain and the scorers, and measures "
+        "no model. Only --summariser real --reader model measures one, and then only the route "
+        "this environment is configured for, on one labelled corpus."
+    )
+    # Mirrored into BOTH score blocks: either one gets copied into an issue on its own, and a
+    # block that does not carry its run's validity reads as valid even when condensation never
+    # fired (minor 7).
+    for block in (navigation, fidelity):
+        block["run_valid"] = not problems
+        block["preconditions_failed"] = problems
+        block["window"] = args.window
+        block["turns"] = args.turns
+        block["note"] = note
+    navigation["observations_note"] = (
+        "observations and recalls are tallied over SCORED cases only "
+        f"({navigation['scored']} of {navigation['cases_total']}); cases withdrawn for a "
+        "reader or evidence reason contribute to neither"
+    )
+    navigation["frontier_shape"] = {
+        "delivered_nodes": len(frontier),
+        "holder_leaves": len(run_block["holder_leaves_for_labelled_sources"]),
+        "note": (
+            "This run moved the condensation gate with --condense-budget-fraction "
+            f"{args.condense_budget_fraction}, which is not production's default. With a "
+            "single delivered node the run measures DESCENT to the holding leaf rather than "
+            "choice among delivered nodes; the >=2-holder-leaf precondition keeps it from "
+            "being vacuous, but the index shape under test is not the shape production has "
+            "today."
+        ),
+    }
+
     _print_block("navigation (#2) — source findability from the delivered frontier", navigation)
     _print_block("fidelity (#8) — statement truth in the same run's summaries and answers",
                  fidelity)
@@ -1085,11 +1283,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         "fidelity_complete": fidelity["complete"],
         "measures_a_model": {"navigation": navigation["measures_a_model"],
                              "fidelity": fidelity["measures_a_model"]},
-        "note": (
-            "A stub summariser or a lexical reader proves the chain and the scorers, and "
-            "measures no model. Only --summariser real --reader model measures one, and then "
-            "only the route this environment is configured for, on one labelled corpus."
-        ),
+        "note": note,
     }
     _print_block("verdict", verdict)
 

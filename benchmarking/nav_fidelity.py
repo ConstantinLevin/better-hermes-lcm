@@ -64,6 +64,28 @@ def _sentences(text: str) -> list[str]:
     return [part for part in parts if part]
 
 
+class CorpusPatternError(ValueError):
+    """A corpus pattern does not compile. Named and refused, never silently inert."""
+
+
+def validate_patterns(entries: Sequence[tuple[str, str]]) -> None:
+    """Compile every corpus pattern up front, naming the first that does not.
+
+    ``_search`` treats an uncompilable pattern as unmatched so one bad entry cannot crash a
+    whole run mid-flight — which means a detector can be silently switched off by a typo and
+    the run still reports ``false_claims: 0``. This is the signal that makes that impossible:
+    the caller validates at load and refuses to start.
+    """
+    for where, pattern in entries:
+        try:
+            re.compile(pattern)
+        except re.error as exc:
+            raise CorpusPatternError(
+                f"{where} does not compile: {exc}. Pattern: {pattern!r}. Nothing is scored "
+                f"with a detector that cannot run — fix the pattern or remove it."
+            ) from exc
+
+
 def _search(patterns: Sequence[str], text: str):
     """Return the first pattern's match object, or ``None``."""
     for pattern in patterns:
@@ -140,9 +162,15 @@ class ReaderTrace:
     answer: str = ""
     evidence_defects: tuple[str, ...] = ()
     # Things that were true of the recovery but do not on their own void a score — a paged
-    # result is the normal shape of lcm_expand, not a defect. One of them is promoted to a
-    # defect only when it actually explains a miss (see ``score_navigation``).
+    # result is the normal shape of lcm_expand, not a defect. Tallied for reporting only.
     observations: tuple[str, ...] = ()
+    # store_id -> the bounds that applied to the node(s) it lives under, attributed per node by
+    # the caller. A labelled line missing from a bounded recovery is withdrawn from source
+    # recall; nothing else is.
+    bounded_store_ids: Mapping[int, tuple[str, ...]] = field(default_factory=dict)
+    # Node ids the reader asked for that it could not have seen in the frontier or in any
+    # earlier tool result. Never credited as navigation.
+    unsourced_node_ids: tuple[int, ...] = ()
 
 
 def score_navigation(cases: Sequence[NavigationCase],
@@ -155,9 +183,10 @@ def score_navigation(cases: Sequence[NavigationCase],
     topics_checked = topics_missed = 0
     claims_checked = claims_found = 0
     scored = reader_unavailable = evidence_unscored = not_applicable = 0
-    answered_without_expansion = 0
+    answered_without_expansion = unsourced_cases = 0
     defect_counts: dict[str, int] = {}
     observation_counts: dict[str, int] = {}
+    withdrawn_samples: list[dict[str, Any]] = []
     missed_samples: list[dict[str, Any]] = []
     claim_samples: list[dict[str, Any]] = []
     incomplete: list[str] = []
@@ -222,42 +251,60 @@ def score_navigation(cases: Sequence[NavigationCase],
         recovered = _normalize(trace.recovered_text).lower()
 
         case_node_hit = case_source_hit = case_source_expected = 0
+        case_withdrawn: list[dict[str, Any]] = []
         for store_id in required:
-            if chosen.intersection(case.covering_node_ids.get(store_id, ())):
+            reached = bool(chosen.intersection(case.covering_node_ids.get(store_id, ())))
+            if reached:
                 case_node_hit += 1
             snippet = _normalize(case.evidence_snippets.get(store_id, "")).lower()
             if not snippet:
                 continue
-            case_source_expected += 1
             if snippet in recovered:
+                case_source_expected += 1
                 case_source_hit += 1
-
-        # A line that did not come back out of a PAGED recovery may simply be on the next
-        # page: lcm_expand returns one page and a cursor. Attributing that miss to the reader
-        # would book another issue's bound as a model failure, so the case is withdrawn from
-        # the denominators and named instead.
-        bounded_by = [name for name in BOUNDED_OBSERVATIONS if name in trace.observations]
-        if case_source_hit < case_source_expected and bounded_by:
-            evidence_unscored += 1
-            label = "evidence:bounded_recovery"
-            defect_counts[label] = defect_counts.get(label, 0) + 1
-            entry.update(status="unscored_evidence_defect", evidence_defects=[label],
-                         bounded_by=bounded_by)
-            entry["reasons"].append(label)
-            incomplete.append(
-                f"{case.question_id}: {case_source_expected - case_source_hit} labelled line(s) "
-                f"did not come back and the recovery was bounded ({', '.join(bounded_by)}) — "
-                f"the evidence may be behind the cursor or inside what the marker names, so "
-                f"this is not scored as a model failure"
-            )
-            per_case.append(entry)
-            continue
+                continue
+            # A line that did not come back out of a BOUNDED recovery may simply be on the
+            # next page, or inside what an "[LCM …]" marker names. That bound belongs to
+            # another issue (#50/#51/#52), so the LINE is withdrawn from source recall — but
+            # only the line, only when the reader actually opened a node covering it, and
+            # never node recall, which is about the choice and is unaffected by the bound.
+            #
+            # Withdrawing the whole CASE here was a real defect: on the model path every leaf
+            # expansion is paged, so it removed every question the reader got wrong from both
+            # denominators and walked the fractions toward 1.0 by selection.
+            bounds = [name for name in BOUNDED_OBSERVATIONS
+                      if name in (trace.bounded_store_ids.get(store_id) or ())]
+            if reached and bounds:
+                case_withdrawn.append({"question_id": case.question_id,
+                                       "store_id": store_id, "bounded_by": bounds})
+                continue
+            case_source_expected += 1
 
         scored += 1
         node_expected += len(required)
         node_hit += case_node_hit
         source_expected += case_source_expected
         source_hit += case_source_hit
+        if case_withdrawn:
+            label = "evidence:bounded_recovery"
+            defect_counts[label] = defect_counts.get(label, 0) + len(case_withdrawn)
+            withdrawn_samples.extend(case_withdrawn)
+            entry["source_recall_withdrawn"] = case_withdrawn
+            entry["reasons"].append(label)
+            incomplete.append(
+                f"{case.question_id}: {len(case_withdrawn)} labelled line(s) did not come back "
+                f"from a bounded recovery "
+                f"({', '.join(sorted({b for w in case_withdrawn for b in w['bounded_by']}))}) "
+                f"— withdrawn from source recall, not scored as a model failure. Node recall "
+                f"for this question is unaffected."
+            )
+        if trace.unsourced_node_ids:
+            # A node id the reader could not have seen is a guess, not navigation: at the low
+            # anchor the holder leaves are literally 1, 2, 4, 5. The caller keeps these out of
+            # chosen_node_ids so they cannot credit recall; this is where they are named.
+            unsourced_cases += 1
+            entry["unsourced_node_ids"] = list(trace.unsourced_node_ids)
+            entry["reasons"].append("reader:unsourced_node_id")
         for label in dict.fromkeys(trace.observations):
             observation_counts[label] = observation_counts.get(label, 0) + 1
         # Recall alone rewards a reader that expands the whole DAG; precision is what makes
@@ -320,6 +367,9 @@ def score_navigation(cases: Sequence[NavigationCase],
                            "fraction": _fraction(nodes_needed, nodes_expanded)},
         "source_recall": {"expected": source_expected, "hit": source_hit,
                           "fraction": _fraction(source_hit, source_expected)},
+        "source_recall_withdrawn": {"count": len(withdrawn_samples),
+                                    "sample": withdrawn_samples[:12]},
+        "unsourced_node_ids": unsourced_cases,
         "missed_topics": {"checked": topics_checked, "missed": topics_missed,
                           "sample": missed_samples[:12]},
         "false_assertions": {"checked": claims_checked, "found": claims_found,
@@ -387,6 +437,29 @@ def _empty_bucket() -> dict[str, int]:
     return {name: 0 for name in _OUTCOMES}
 
 
+def _local_hedge(claim: StateClaim, text: str) -> str:
+    """A hedge in the same sentence as this claim's anchor, and near it. Else ``""``.
+
+    The anchor is a truth-pattern match if there is one, otherwise the entity name. Requiring
+    both the sentence and the ``_HEDGE_WINDOW`` proximity mirrors the false-claim rule, so the
+    two directions are symmetric rather than one being generous and the other strict.
+    """
+    for sentence in _sentences(text):
+        anchor = _search(claim.truth_patterns, sentence)
+        if anchor is not None:
+            start, end = anchor.start(), anchor.end()
+        elif claim.entity and claim.entity.lower() in sentence.lower():
+            start = sentence.lower().index(claim.entity.lower())
+            end = start + len(claim.entity)
+        else:
+            continue
+        window = sentence[max(0, start - _HEDGE_WINDOW):end + _HEDGE_WINDOW]
+        hedge = _matches(claim.hedge_patterns, window)
+        if hedge:
+            return hedge
+    return ""
+
+
 def _classify(claim: StateClaim, text: str) -> tuple[str, str]:
     """Return ``(outcome, evidence)`` for one claim against one text."""
     for sentence in _sentences(text):
@@ -402,10 +475,13 @@ def _classify(claim: StateClaim, text: str) -> tuple[str, str]:
             # reader cannot check is not evidence.
             return "false_claims", found.group(0)[:180]
     if claim.true_state in UNCERTAIN_STATES:
-        hedge = _matches(claim.hedge_patterns, text)
-        if hedge and (claim.entity.lower() in text.lower()
-                      or _matches(claim.truth_patterns, text)):
-            return "correctly_named_uncertainty", hedge
+        # LOCAL, exactly like the false-claim test above. A published leaf is one multi-topic
+        # block, so a hedge belonging to another topic elsewhere in it would credit this claim
+        # with naming an uncertainty it never named — moving pairs out of the honest
+        # "undetermined" bucket into #8's positive one.
+        hedged = _local_hedge(claim, text)
+        if hedged:
+            return "correctly_named_uncertainty", hedged
     truth = _matches(claim.truth_patterns, text)
     if truth:
         return "faithful", truth
@@ -449,11 +525,17 @@ def score_fidelity(claims: Sequence[StateClaim],
             pairs += 1
             if not text.source_carries_claim.get(claim_id, True):
                 outcome, evidence = "unscored_evidence_defect", ""
-                label = "evidence:distinguishing_field_absent"
+                # The level matters and was being lost. At a LEAF this means the source rows
+                # themselves lacked the distinguishing text — ingest or the summariser
+                # projection (#31/#35/#37/#56/#63/#67). At a CONDENSATION it means the child
+                # summaries lacked it, so the level below dropped it and is already counted
+                # there as an omission; the parent is not to blame for either.
+                label = f"evidence:distinguishing_field_absent@{text.kind}"
                 defect_labels[label] = defect_labels.get(label, 0) + 1
                 incomplete.append(
                     f"{text.text_id}/{claim_id}: the statement was absent from this text's own "
-                    f"sources ({label}) — not scored as a model failure"
+                    f"{'source rows' if text.kind == 'leaf' else 'inputs'} ({label}) — not "
+                    f"scored as a model failure"
                 )
             else:
                 outcome, evidence = _classify(claim, text.text)

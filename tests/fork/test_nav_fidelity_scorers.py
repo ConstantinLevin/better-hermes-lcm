@@ -7,13 +7,17 @@ to separate them, and — the part that matters for this fork — it has to refu
 cannot score instead of reporting a zero or a hundred per cent.
 """
 
+import pytest
+
 from benchmarking.nav_fidelity import (
+    CorpusPatternError,
     NavigationCase,
     ReaderTrace,
     ScoredText,
     StateClaim,
     score_fidelity,
     score_navigation,
+    validate_patterns,
 )
 
 
@@ -137,33 +141,98 @@ def test_a_source_still_verbatim_in_the_delivered_context_needs_no_navigation():
     assert result["node_recall"]["expected"] == 0
 
 
+def test_a_bounded_recovery_withdraws_only_the_missing_line_not_the_whole_case():
+    """Withdrawing the case would drop node recall too, keeping only questions already right.
+
+    On the model path every leaf expansion is paged, so a case-wide withdrawal would remove
+    every question the reader got wrong from both denominators and walk the headline fractions
+    toward 1.0 by selection.
+    """
+    case = _case(
+        expected_store_ids=(11, 12),
+        covering_node_ids={11: (7,), 12: (7,)},
+        evidence_snippets={11: "fixed 900ms interval instead", 12: "the second labelled line"},
+    )
+    trace = _trace(bounded_store_ids={12: ("evidence:paged_result",)})
+
+    result = score_navigation([case], [trace])
+
+    assert result["scored"] == 1
+    assert result["node_recall"] == {"expected": 2, "hit": 2, "fraction": 1.0}
+    assert result["source_recall"] == {"expected": 1, "hit": 1, "fraction": 1.0}
+    assert result["source_recall_withdrawn"]["count"] == 1
+    assert result["evidence_defects"] == {"evidence:bounded_recovery": 1}
+    assert result["complete"] is False
+
+
+def test_a_bounded_recovery_from_a_node_the_reader_never_opened_is_still_a_miss():
+    """A bound only excuses a line the reader actually went to the right place for."""
+    trace = _trace(chosen_node_ids=(99,), recovered_text="",
+                   bounded_store_ids={11: ("evidence:paged_result",)})
+
+    result = score_navigation([_case()], [trace])
+
+    assert result["node_recall"] == {"expected": 1, "hit": 0, "fraction": 0.0}
+    assert result["source_recall"] == {"expected": 1, "hit": 0, "fraction": 0.0}
+    assert result["evidence_defects"] == {}
+
+
+def test_a_node_id_the_reader_could_not_have_seen_is_not_credited_as_navigation():
+    """Guessing small integers must not score: the holder leaves here are literally 1, 2, 4, 5."""
+    trace = _trace(chosen_node_ids=(), unsourced_node_ids=(7,),
+                   recovered_store_ids=(), recovered_text="")
+
+    result = score_navigation([_case()], [trace])
+
+    assert result["node_recall"] == {"expected": 1, "hit": 0, "fraction": 0.0}
+    assert result["unsourced_node_ids"] == 1
+    assert "reader:unsourced_node_id" in result["per_case"][0]["reasons"]
+
+
 def test_a_missing_line_that_was_paged_out_is_an_evidence_defect_not_a_reader_miss():
     """lcm_expand returns one page; the rest of the node is behind a cursor (#52 territory).
 
     A labelled line that did not come back from a PAGED recovery may simply be on the next
     page. Booking that as "the reader navigated badly" would attribute another issue's bound
     to the model.
+
+    # fork: better-hermes-lcm — this used to assert that the WHOLE CASE was withdrawn
+    # (unscored_evidence_defect == 1, source_recall.expected == 0), keyed off a run-level
+    # `observations` label. Adversarial review showed that is wrong and dangerous: on the model
+    # path every leaf expansion is paged, so a case-wide withdrawal removes every question the
+    # reader got wrong from BOTH denominators and walks the headline fractions toward 1.0 by
+    # selection. Only the missing line is withdrawn now, and only from source recall; node
+    # recall is about the choice and is counted either way.
     """
     trace = _trace(recovered_text="we rejected exponential backoff",
-                   observations=("evidence:paged_result",))
+                   bounded_store_ids={11: ("evidence:paged_result",)})
 
     result = score_navigation([_case()], [trace])
 
-    assert result["unscored_evidence_defect"] == 1
-    assert result["evidence_defects"] == {"evidence:bounded_recovery": 1}
+    assert result["scored"] == 1
+    assert result["node_recall"] == {"expected": 1, "hit": 1, "fraction": 1.0}
     assert result["source_recall"]["expected"] == 0
+    assert result["source_recall_withdrawn"]["count"] == 1
+    assert result["evidence_defects"] == {"evidence:bounded_recovery": 1}
     assert result["complete"] is False
 
 
 def test_a_missing_line_from_a_recovery_carrying_a_cut_marker_is_also_an_evidence_defect():
-    """An [LCM ...] marker in the recovered text says content was replaced (#50/#56)."""
+    """An [LCM ...] marker in the recovered text says content was replaced (#50/#56).
+
+    # fork: better-hermes-lcm — this used to read the marker off a run-level `observations`
+    # label and assert a per-case `bounded_by`. A marker anywhere in the concatenated recovery
+    # then voided every line of every node; the bound is attributed per node by the caller now.
+    """
     trace = _trace(recovered_text="we rejected exponential backoff [LCM elided 900 of 2000 chars]",
-                   observations=("evidence:truncated_or_marked",))
+                   bounded_store_ids={11: ("evidence:truncated_or_marked",)})
 
     result = score_navigation([_case()], [trace])
 
     assert result["evidence_defects"] == {"evidence:bounded_recovery": 1}
-    assert result["per_case"][0]["bounded_by"] == ["evidence:truncated_or_marked"]
+    assert result["per_case"][0]["source_recall_withdrawn"][0]["bounded_by"] == [
+        "evidence:truncated_or_marked"
+    ]
 
 
 def test_a_paged_recovery_that_did_return_the_line_is_scored_normally():
@@ -266,6 +335,28 @@ def test_a_hedge_far_from_the_claim_does_not_excuse_it():
     assert result["false_claims"]["count"] == 1
 
 
+def test_a_hedge_in_another_sentence_does_not_credit_this_claim():
+    """A published leaf is one multi-topic block; another topic's hedge is not this one's."""
+    text = _text(text="The shard-7 replay outcome is unknown. migrate_ledger_v3 is fine.")
+
+    result = score_fidelity([STARTED], [text])
+
+    assert result["correctly_named_uncertainty"]["count"] == 0
+    assert result["undetermined"]["count"] == 1
+    assert result["complete"] is False
+
+
+def test_a_pattern_that_does_not_compile_is_named_and_refused():
+    """A swallowed re.error silently disables a detector and the run still reports clean."""
+    with pytest.raises(CorpusPatternError) as excinfo:
+        validate_patterns([
+            ("state_claims[migration-started].forbidden_patterns[0]", "(unbalanced"),
+        ])
+
+    assert "migration-started" in str(excinfo.value)
+    assert "(unbalanced" in str(excinfo.value)
+
+
 def test_a_preserved_hedge_counts_as_correctly_named_uncertainty():
     text = _text(text="migrate_ledger_v3 was started; whether it completed is unknown.")
 
@@ -305,11 +396,31 @@ def test_a_claim_missing_from_the_texts_own_sources_is_an_evidence_defect():
     result = score_fidelity([STARTED], [text])
 
     assert result["unscored_evidence_defect"]["count"] == 1
+    # fork: better-hermes-lcm — this pinned the unqualified
+    # "evidence:distinguishing_field_absent". The label now carries the level, because at a leaf
+    # it means the source ROWS lacked the text and at a condensation it means the child
+    # SUMMARIES did — two different causes that were being reported as one.
     assert result["unscored_evidence_defect"]["labels"] == {
-        "evidence:distinguishing_field_absent": 1
+        "evidence:distinguishing_field_absent@leaf": 1
     }
     assert result["omitted_statements"]["count"] == 0
     assert result["complete"] is False
+
+
+def test_an_absent_statement_is_labelled_by_the_level_whose_input_lacked_it():
+    """A leaf whose SOURCE rows lacked it and a parent whose CHILD SUMMARIES lacked it are two
+    different defects: the first points at ingest/projection, the second at the level below."""
+    leaf = _text(text_id="node:7", kind="leaf", depth=0,
+                 source_carries_claim={"migrate-started": False})
+    parent = _text(text_id="node:9", kind="condensation", depth=1,
+                   source_carries_claim={"migrate-started": False})
+
+    result = score_fidelity([STARTED], [leaf, parent])
+
+    assert result["unscored_evidence_defect"]["labels"] == {
+        "evidence:distinguishing_field_absent@leaf": 1,
+        "evidence:distinguishing_field_absent@condensation": 1,
+    }
 
 
 def test_leaf_and_condensation_results_are_reported_separately():
