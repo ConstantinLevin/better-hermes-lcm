@@ -118,6 +118,33 @@ def test_the_whole_summary_is_reachable_by_following_the_default_pages(tmp_path)
         e.shutdown()
 
 
+def test_the_schema_does_not_deny_a_continuation_the_handler_serves(tmp_path):
+    """lcm_expand's tool_calls_offset said "store_id mode does not render tool calls". It does,
+    it pages them, and it honours the offset — and a raw search hit now names exactly that call
+    as the way to read the calls it could not fit."""
+    e = _engine(tmp_path, incremental_max_depth=0)
+    try:
+        e.on_session_start("ds", platform="cli", context_length=200_000)
+        store_id = e._store.append("ds", {
+            "role": "assistant", "content": "go",
+            "tool_calls": [{"id": "c1", "type": "function", "function": {
+                "name": "deploy", "arguments": json.dumps({"target": "x" * 400})}}],
+        }, source="cli")
+        e._store.commit()
+        page = json.loads(e.handle_tool_call(
+            "lcm_expand", {"store_id": store_id, "max_tokens": 40}))
+        assert page["tool_calls_truncated"] is True
+        following = json.loads(e.handle_tool_call(
+            "lcm_expand",
+            {k: v for k, v in page["tool_calls_continue_with"].items() if k != "tool"}))
+        assert following["tool_calls_offset"] == page["tool_calls_continue_with"]["tool_calls_offset"]
+
+        described = schemas.LCM_EXPAND["parameters"]["properties"]["tool_calls_offset"]["description"]
+        assert "does not render tool calls" not in described, described
+    finally:
+        e.shutdown()
+
+
 def test_every_continuation_the_handlers_emit_is_a_declared_tool_parameter(tmp_path):
     """A schema-driven model only ever sees the declared parameters. The handlers advertise
     summary_offset/summary_max_chars for lcm_describe and envelope_offset for lcm_expand, and

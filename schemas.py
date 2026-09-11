@@ -1115,9 +1115,10 @@ LCM_EXPAND = {
                 "type": "integer",
                 "description": (
                     "character offset used to continue an oversized rendering "
-                    "of an assistant turn's tool CALLS in node_id mode. Use "
-                    "next_tool_calls_offset (or tool_calls_continue_with) from the previous "
-                    "response; store_id mode does not render tool calls."
+                    "of an assistant turn's tool CALLS, in node_id and store_id mode alike. "
+                    "Use next_tool_calls_offset (or tool_calls_continue_with) from the "
+                    "previous response, or the tool_calls_continue_with a bounded search "
+                    "result hands you."
                 ),
                 "default": 0,
             },
