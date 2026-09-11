@@ -12,6 +12,7 @@ The contract asserted is always the ORIGINAL BYTES reaching the string the summa
 never a marker in their place. An assertion a convincing receipt could satisfy is the old
 contract — the one this fork exists to remove — and is the wrong assertion.
 """
+import importlib
 import json
 import time
 from datetime import datetime, timezone
@@ -343,6 +344,24 @@ def test_a_structured_content_list_and_its_json_text_stay_distinguishable(tmp_pa
     JSON, so a native image part and a user who pasted that exact JSON become the same row and
     the same identity. Nothing later can tell them apart — not a reader, not a pattern filter,
     not change detection.
+
+    # fork: better-hermes-lcm — this asserted `native["content"] == structured`, that the row
+    # dict from `get_session_messages` returns a LIST. That is over-demanding and #31 says so in
+    # as many words: "Originalcontent samt Typ dauerhaft eindeutig erhalten, getrennt von
+    # Such-/Tokenprojektionen". The row dict IS the search/comparison projection — pattern
+    # matching, search and token counting read it — and the issue names the conflation of the
+    # original, the comparison form and the visible search text as the causal problem. Demanding
+    # a list there merges the three representations it wants kept apart, and the claw model the
+    # issue holds up as the useful partial principle stores the SAME `messages.content`
+    # projection for both with DIFFERENT parts.
+    #
+    # So the assertion moves to the reconstruction, which is the reader whose job it is. That
+    # keeps what the previous version was right about: a fingerprint inequality alone would pass
+    # if the two were told apart only by a hash nobody can read back into a content list. It is
+    # answered here by actually reading one back.
+    #
+    # The kind vocabulary is deliberately not pinned — the assertion is that the two differ and
+    # that each reconstructs to its own original, so a fix may name the types what it likes.
     """
     structured = [
         {"type": "text", "text": "HEARTBEAT: Do not deploy."},
@@ -357,23 +376,45 @@ def test_a_structured_content_list_and_its_json_text_stay_distinguishable(tmp_pa
     try:
         native_id = store.append("t", {"role": "user", "content": structured}, source="cli")
         text_id = store.append("t", {"role": "user", "content": literal}, source="cli")
+        # a row as a build that did not keep the type wrote it: the same canonical JSON as text,
+        # with no envelope at all. "Altzeilen unbekannten Typs nicht als sicher typisiert
+        # behandeln" is the half of MC01 that a fix is most likely to skip, because inferring the
+        # type back from valid JSON syntax looks like a free upgrade and is the original defect
+        # wearing a different hat.
+        legacy_id = store.append("t", {"role": "user", "content": literal}, source="cli")
         store.commit()
-        rows = {int(row["store_id"]): row for row in store.get_session_messages("t")}
-        native, text = rows[int(native_id)], rows[int(text_id)]
+        store.connection.execute(
+            "UPDATE messages SET envelope_extra = NULL WHERE store_id = ?", (int(legacy_id),))
+        store.commit()
 
-        # The TYPE is what MC01 loses, so the roundtrip is what has to hold. An inequality of
-        # (content, fingerprint) alone would pass if only the fingerprint differed while both
-        # rows still stored the same flattened canonical JSON — the two would be told apart by a
-        # hash nobody can read back into a content list.
-        assert native.get("content") == structured, (
-            "a native content list does not read back as a list"
+        rows = {int(row["store_id"]): row for row in store.get_session_messages("t")}
+        native, text, legacy = rows[int(native_id)], rows[int(text_id)], rows[int(legacy_id)]
+
+        store_module = importlib.import_module("hermes_lcm.store")
+        content_module = importlib.import_module("hermes_lcm.message_content")
+        recorded_kind = getattr(store_module, "stored_content_kind", None)
+        reconstruct = getattr(content_module, "original_content_from_stored", None)
+        assert recorded_kind is not None and reconstruct is not None, (
+            "nothing records a stored row's original type and nothing reads one back, so the "
+            "store keeps only the canonical text both values flatten to and the roundtrip MC01 "
+            "asks for has no reader at all"
         )
-        assert text.get("content") == literal, (
-            "a literal JSON string does not read back as the string the user typed"
+
+        assert message_envelope_fingerprint(native) != message_envelope_fingerprint(text), (
+            "a native content list and a quoted copy of it have the same envelope identity"
         )
-        assert (native.get("content"), message_envelope_fingerprint(native)) != (
-            text.get("content"), message_envelope_fingerprint(text)
-        ), "a native content list and a quoted copy of it roundtrip to the same row identity"
+        assert recorded_kind(native) != recorded_kind(text), (
+            "the two rows recorded the same original type"
+        )
+        assert reconstruct(native["content"], recorded_kind(native)) == structured, (
+            "the native row does not read back as the list it was written as"
+        )
+        assert reconstruct(text["content"], recorded_kind(text)) == literal, (
+            "the literal row does not read back as the string the user typed"
+        )
+        assert not isinstance(
+            reconstruct(legacy["content"], recorded_kind(legacy)), (list, dict)
+        ), "a row with no recorded type was typed from its JSON syntax, which is the guess MC01 removes"
     finally:
         store.close()
 
