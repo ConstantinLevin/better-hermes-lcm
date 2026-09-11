@@ -213,9 +213,6 @@ def score_navigation(cases: Sequence[NavigationCase],
             per_case.append(entry)
             continue
 
-        if trace.answer.strip() and not trace.chosen_node_ids:
-            answered_without_expansion += 1
-
         raw = set(case.raw_in_context_store_ids)
         required = [sid for sid in case.expected_store_ids if sid not in raw]
         entry["raw_in_context_excluded"] = len(case.expected_store_ids) - len(required)
@@ -230,30 +227,36 @@ def score_navigation(cases: Sequence[NavigationCase],
             per_case.append(entry)
             continue
 
-        defects = list(trace.evidence_defects)
-        if any(not case.covering_node_ids.get(sid) for sid in required):
-            defects.append("evidence:no_frontier_coverage")
-        if defects:
-            evidence_unscored += 1
-            for label in dict.fromkeys(defects):
-                defect_counts[label] = defect_counts.get(label, 0) + 1
-            entry.update(status="unscored_evidence_defect",
-                         evidence_defects=sorted(dict.fromkeys(defects)))
-            entry["reasons"].extend(sorted(dict.fromkeys(defects)))
-            incomplete.append(
-                f"{case.question_id}: the evidence the reader needed was defective "
-                f"({', '.join(sorted(dict.fromkeys(defects)))}) — not scored as a model failure"
-            )
-            per_case.append(entry)
-            continue
-
+        # THE RULE, stated once: an evidence defect bears on what came BACK, never on what was
+        # CHOSEN. Node recall is a fact about the reader's choice and survives a broken, paged
+        # or truncated recovery. The only thing that withdraws a store_id from node recall is
+        # its being reachable from nothing the reader was handed — then the choice was not
+        # available to make.
+        #
+        # Withdrawing the whole CASE for either was a real defect, twice over: a case-wide
+        # withdrawal removes the questions the reader got WRONG from both denominators and
+        # walks the fractions toward 1.0 by selection. The bounded-recovery branch did it for
+        # every paged expansion, which on the model path is all of them; this branch did it
+        # wherever a preservation fix was still incomplete, which is the hardest questions of
+        # the very candidate this harness exists to measure.
+        recovery_defects = sorted(dict.fromkeys(trace.evidence_defects))
         chosen = set(trace.chosen_node_ids)
         recovered = _normalize(trace.recovered_text).lower()
 
-        case_node_hit = case_source_hit = case_source_expected = 0
+        case_node_expected = case_node_hit = 0
+        case_source_hit = case_source_expected = 0
         case_withdrawn: list[dict[str, Any]] = []
+        uncovered: list[int] = []
         for store_id in required:
-            reached = bool(chosen.intersection(case.covering_node_ids.get(store_id, ())))
+            covering = case.covering_node_ids.get(store_id) or ()
+            if not covering:
+                # Reachable from nothing delivered (#5, #31/#35/#37/#56/#63/#67): the reader
+                # could not have chosen it and could not have recovered it. Out of BOTH
+                # denominators — this line only, not its question.
+                uncovered.append(store_id)
+                continue
+            case_node_expected += 1
+            reached = bool(chosen.intersection(covering))
             if reached:
                 case_node_hit += 1
             snippet = _normalize(case.evidence_snippets.get(store_id, "")).lower()
@@ -263,31 +266,63 @@ def score_navigation(cases: Sequence[NavigationCase],
                 case_source_expected += 1
                 case_source_hit += 1
                 continue
-            # A line that did not come back out of a BOUNDED recovery may simply be on the
-            # next page, or inside what an "[LCM …]" marker names. That bound belongs to
-            # another issue (#50/#51/#52), so the LINE is withdrawn from source recall — but
-            # only the line, only when the reader actually opened a node covering it, and
-            # never node recall, which is about the choice and is unaffected by the bound.
-            #
-            # Withdrawing the whole CASE here was a real defect: on the model path every leaf
-            # expansion is paged, so it removed every question the reader got wrong from both
-            # denominators and walked the fractions toward 1.0 by selection.
+            # A line that did not come back out of a BOUNDED or BROKEN recovery may be on the
+            # next page, inside what an "[LCM …]" marker names, or behind the tool error. That
+            # belongs to another issue (#50/#51/#52), so the LINE leaves source recall — only
+            # when the reader actually opened a node covering it, and never node recall.
             bounds = [name for name in BOUNDED_OBSERVATIONS
                       if name in (trace.bounded_store_ids.get(store_id) or ())]
+            bounds.extend(recovery_defects)
             if reached and bounds:
                 case_withdrawn.append({"question_id": case.question_id,
-                                       "store_id": store_id, "bounded_by": bounds})
+                                       "store_id": store_id,
+                                       "bounded_by": sorted(dict.fromkeys(bounds))})
                 continue
             case_source_expected += 1
 
+        if uncovered:
+            label = "evidence:no_frontier_coverage"
+            defect_counts[label] = defect_counts.get(label, 0) + len(uncovered)
+            entry["uncovered_store_ids"] = uncovered
+            entry["reasons"].append(label)
+            incomplete.append(
+                f"{case.question_id}: {len(uncovered)} labelled source(s) are reachable from "
+                f"no delivered node ({label}) — withdrawn from both recalls, not scored as a "
+                f"model failure"
+            )
+        for label in recovery_defects:
+            defect_counts[label] = defect_counts.get(label, 0) + 1
+        if recovery_defects:
+            entry["recovery_defects"] = recovery_defects
+            entry["reasons"].extend(recovery_defects)
+
+        if case_node_expected == 0:
+            # Nothing this question asked for was reachable at all: there is no choice left to
+            # score, so the question is withdrawn rather than recorded as a zero.
+            evidence_unscored += 1
+            entry.update(status="unscored_evidence_defect",
+                         evidence_defects=sorted(dict.fromkeys(
+                             recovery_defects + ["evidence:no_frontier_coverage"] * bool(uncovered)
+                         )))
+            per_case.append(entry)
+            continue
+
         scored += 1
-        node_expected += len(required)
+        if trace.answer.strip() and not trace.chosen_node_ids:
+            answered_without_expansion += 1
+        node_expected += case_node_expected
         node_hit += case_node_hit
         source_expected += case_source_expected
         source_hit += case_source_hit
         if case_withdrawn:
-            label = "evidence:bounded_recovery"
-            defect_counts[label] = defect_counts.get(label, 0) + len(case_withdrawn)
+            # Counted only for lines withdrawn by a BOUND. A line withdrawn because the
+            # recovery was broken is already counted under that defect's own label; adding a
+            # second one would double-count one event under two names.
+            bounded_only = [item for item in case_withdrawn
+                            if any(name in BOUNDED_OBSERVATIONS for name in item["bounded_by"])]
+            if bounded_only:
+                label = "evidence:bounded_recovery"
+                defect_counts[label] = defect_counts.get(label, 0) + len(bounded_only)
             withdrawn_samples.extend(case_withdrawn)
             entry["source_recall_withdrawn"] = case_withdrawn
             entry["reasons"].append(label)
@@ -317,7 +352,7 @@ def score_navigation(cases: Sequence[NavigationCase],
 
         if not trace.chosen_node_ids:
             entry["reasons"].append("reader:no_expansion")
-        elif case_node_hit < len(required):
+        elif case_node_hit < case_node_expected:
             entry["reasons"].append("reader:wrong_node")
         elif case_source_hit < case_source_expected:
             entry["reasons"].append("reader:incomplete_recovery")
@@ -341,7 +376,7 @@ def score_navigation(cases: Sequence[NavigationCase],
 
         entry.update(
             status="scored",
-            node_recall={"expected": len(required), "hit": case_node_hit},
+            node_recall={"expected": case_node_expected, "hit": case_node_hit},
             source_recall={"expected": case_source_expected, "hit": case_source_hit},
             chosen_node_ids=list(trace.chosen_node_ids),
             recovered_store_ids=list(trace.recovered_store_ids),

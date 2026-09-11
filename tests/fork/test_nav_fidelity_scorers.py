@@ -177,6 +177,41 @@ def test_a_bounded_recovery_from_a_node_the_reader_never_opened_is_still_a_miss(
     assert result["evidence_defects"] == {}
 
 
+def test_a_source_reachable_from_no_delivered_node_withdraws_only_itself():
+    """An uncovered source must not take the rest of its question down with it.
+
+    `no_frontier_coverage` fires exactly where another group's preservation fix is still
+    incomplete, i.e. on the hardest questions of a candidate commit. Withdrawing the whole
+    case there is the same upward selection bias as withdrawing it for a paged recovery.
+    """
+    case = _case(
+        expected_store_ids=(11, 12),
+        covering_node_ids={11: (7,), 12: ()},
+        evidence_snippets={11: "fixed 900ms interval instead", 12: "the second labelled line"},
+    )
+
+    result = score_navigation([case], [_trace()])
+
+    assert result["scored"] == 1
+    assert result["node_recall"] == {"expected": 1, "hit": 1, "fraction": 1.0}
+    assert result["source_recall"] == {"expected": 1, "hit": 1, "fraction": 1.0}
+    assert result["evidence_defects"] == {"evidence:no_frontier_coverage": 1}
+    assert result["complete"] is False
+
+
+def test_a_broken_recovery_does_not_erase_what_the_reader_chose():
+    """An evidence defect bears on what came BACK, never on what was CHOSEN."""
+    trace = _trace(recovered_text="", evidence_defects=("evidence:tool_error",))
+
+    result = score_navigation([_case()], [trace])
+
+    assert result["scored"] == 1
+    assert result["node_recall"] == {"expected": 1, "hit": 1, "fraction": 1.0}
+    assert result["source_recall"] == {"expected": 0, "hit": 0, "fraction": None}
+    assert result["evidence_defects"] == {"evidence:tool_error": 1}
+    assert result["complete"] is False
+
+
 def test_a_node_id_the_reader_could_not_have_seen_is_not_credited_as_navigation():
     """Guessing small integers must not score: the holder leaves here are literally 1, 2, 4, 5."""
     trace = _trace(chosen_node_ids=(), unsourced_node_ids=(7,),
