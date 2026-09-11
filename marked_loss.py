@@ -8,6 +8,7 @@ a reader can find them, and the message-body marker keeps upstream's literal
 """
 from __future__ import annotations
 
+import json
 import re
 from typing import Any, Iterable, List, Sequence
 
@@ -476,13 +477,52 @@ def leading_turns_dropped_marker(dropped: int, roles: List[str]) -> str:
     )
 
 
-# Envelope fields that CHANGE what a turn means and are cheap to render inline.
-_INLINE_ENVELOPE_FIELDS = (
-    # small fields that change what the CONTENT means. `exit_code`/`error`
-    # were only named, not shown, so a reader saw "operation done" with no way to tell it had
-    # failed without a second call (round-5 verify-6 #8).
-    "name", "is_error", "status", "error_code", "error", "exit_code", "finish_reason",
-)
+# A value is rendered INLINE when it is a scalar short enough to sit beside the content;
+# everything else is rendered as JSON on its own line. Both forms carry the value WHOLE, so
+# this split decides only how a field is shown, never whether the summariser sees it.
+#
+# It replaces a seven-name allowlist (`name, is_error, status, error_code, error, exit_code,
+# finish_reason`). That list decided by FIELD NAME what reached the model, and everything else
+# — including `api_content`, the text Hermes actually sends to the provider in place of the
+# display content, and `reasoning`/`reasoning_content` — was offered as "name (N chars)". A
+# turn whose sidecar said "deployment revoked." was then indistinguishable, before the model,
+# from one that said "deployment allowed.": same name, same length (#67). The store always
+# held both; the summariser was handed neither.
+_INLINE_ENVELOPE_VALUE_MAX_CHARS = 200
+
+
+def _is_empty_envelope_value(value: Any) -> bool:
+    try:
+        return value in (None, "", [], {})
+    except Exception:  # pragma: no cover - a value with a hostile __eq__ is still a value
+        return False
+
+
+def _envelope_items(envelope: dict) -> tuple[List[tuple], List[tuple]]:
+    """Split an envelope into (inline scalar fields, fields that need their own rendering).
+
+    Inline entries carry the value already rendered as text; the others carry it as it is, so
+    the caller can decide between a full JSON rendering (the summary source) and a name
+    (a bounded preview such as ``lcm_load_session``).
+    """
+    inline: List[tuple] = []
+    rest: List[tuple] = []
+    if not isinstance(envelope, dict):
+        return inline, rest
+    for key, value in envelope.items():
+        if not isinstance(key, str) or key.startswith("lcm_") or _is_empty_envelope_value(value):
+            continue
+        if not isinstance(value, (dict, list)):
+            try:
+                rendered = str(value)
+            except Exception:
+                rest.append((key, value))
+                continue
+            if len(rendered) <= _INLINE_ENVELOPE_VALUE_MAX_CHARS and "\n" not in rendered:
+                inline.append((key, rendered))
+                continue
+        rest.append((key, value))
+    return inline, rest
 
 
 def envelope_inventory(envelope: dict) -> tuple[dict, list[str]]:
@@ -491,54 +531,71 @@ def envelope_inventory(envelope: dict) -> tuple[dict, list[str]]:
     Returns (inline outcome fields, names of the fields left in the store). JSON-shaped
     readers (``lcm_load_session``) need the structure rather than a rendered suffix; without
     it a tool row's ``is_error``/``exit_code`` never reached the reader and a failed operation
-    read exactly like a successful one (round-5 verify-6 #8).
+    read exactly like a successful one (round-5 verify-6 #8). This is a bounded PREVIEW, which
+    is why it still names the large fields instead of inlining them — it pairs with an
+    ``lcm_expand`` pointer, and it is not what the summariser is offered.
     """
     inline: dict = {}
-    listed: List[str] = []
     if not isinstance(envelope, dict):
-        return inline, listed
-    for key, value in envelope.items():
-        if not isinstance(key, str) or key.startswith("lcm_") or value in (None, "", [], {}):
-            continue
-        if key in _INLINE_ENVELOPE_FIELDS and not isinstance(value, (dict, list)):
-            inline[key] = value
-            continue
-        listed.append(key)
-    return inline, sorted(listed)
+        return inline, []
+    inline_fields, rest = _envelope_items(envelope)
+    for key, _rendered in inline_fields:
+        inline[key] = envelope[key]
+    return inline, sorted(key for key, _value in rest)
 
 
-def envelope_summary_suffix(envelope: dict, *, max_listed: int = 10) -> str:
-    """render the small outcome fields, inventory the rest.
+def _envelope_json(value: Any) -> "str | None":
+    """``value`` as JSON, or ``None`` when nothing can render it.
+
+    ``default=str`` is the same fallback ``store._envelope_extra_json`` used when it wrote the
+    archive, so the summariser is offered exactly the text the store holds rather than a
+    second, differently-lossy rendering of the same object.
+    """
+    try:
+        return json.dumps(value, ensure_ascii=False, default=str)
+    except Exception:
+        return None
+
+
+def envelope_summary_suffix(envelope: dict) -> str:
+    """offer every host envelope field's VALUE to the summariser.
 
     The summariser was given ``[ASSISTANT]: Visible`` for a turn whose envelope also carried
     ``reasoning_content="DECISION cancel"`` and ``is_error=True``: a failed step read exactly
     like a successful one and a decision reached the summariser nowhere (round-3 verify-4 #8).
-    Small fields are rendered; larger ones are named with their size and left in the store.
+    Naming the larger fields instead of showing them fixed the first half and left the second
+    (#67), so the value is now rendered whole — inline when it is small, as JSON when it is
+    not. A field is named rather than shown only when no serialisation of it exists at all,
+    and that case says so.
     """
     if not isinstance(envelope, dict) or not envelope:
         return ""
-    inline: List[str] = []
-    listed: List[str] = []
-    for key, value in envelope.items():
-        if not isinstance(key, str) or key.startswith("lcm_") or value in (None, "", [], {}):
-            continue
-        if key in _INLINE_ENVELOPE_FIELDS and not isinstance(value, (dict, list)):
-            inline.append(f"{key}={value}")
-            continue
-        try:
-            size = len(value) if isinstance(value, (str, list, dict)) else len(str(value))
-        except Exception:  # pragma: no cover - defensive
-            size = 0
-        listed.append(f"{key} ({size} chars)")
+    inline_fields, rest = _envelope_items(envelope)
     parts = []
-    if inline:
-        parts.append(" [" + ", ".join(inline[:max_listed]) + "]")
-    if listed:
-        shown = ", ".join(sorted(listed)[:max_listed])
-        more = f" (+{len(listed) - max_listed} more)" if len(listed) > max_listed else ""
+    if inline_fields:
+        # every inline field, not the first ten: the list used to be cut at ten with
+        # nothing in place of the rest (#67).
+        parts.append(" [" + ", ".join(f"{key}={rendered}" for key, rendered in inline_fields) + "]")
+    unrenderable: List[str] = []
+    if rest:
+        verbatim = dict(rest)
+        rendered = _envelope_json(verbatim)
+        if rendered is None:
+            # one hostile value must not take its neighbours with it
+            verbatim = {}
+            for key, value in rest:
+                if _envelope_json(value) is None:
+                    unrenderable.append(key)
+                else:
+                    verbatim[key] = value
+            rendered = _envelope_json(verbatim) if verbatim else None
+        if rendered is not None and verbatim:
+            parts.append(f"\n[envelope (verbatim): {rendered}]")
+    if unrenderable:
+        shown = ", ".join(sorted(unrenderable))
         parts.append(
-            f"\n{RECEIPT_LINE_PREFIX} envelope field(s) not summarised here: {shown}{more}; "
-            "the stored message holds them — lcm_expand]"
+            f"\n{RECEIPT_LINE_PREFIX} {len(unrenderable)} envelope field(s) could not be "
+            f"rendered here ({shown}); the stored message holds them — lcm_expand]"
         )
     return "".join(parts)
 
