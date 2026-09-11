@@ -139,6 +139,23 @@ def test_a_preserved_bypassed_turn_is_reported_as_an_abort(tmp_path, monkeypatch
         engine.shutdown()
 
 
+def test_a_declined_bypass_does_not_follow_the_engine_into_the_next_session(tmp_path, monkeypatch):
+    """The abort flag is the declined-compaction signal, and Hermes shows it to the user. It
+    belongs to the session that earned it: carried into a normal session it would report an
+    abort that did not happen, right after a compaction that did."""
+    _no_native_compressor(monkeypatch)
+    engine = _ignored_engine(tmp_path, "abort-not-inherited.db")
+    try:
+        engine.compress(_conversation(), current_tokens=100_000, force=True)
+        assert engine._last_compress_aborted is True
+
+        engine.on_session_start("normal:session", platform="cli", context_length=10_000)
+
+        assert engine._last_compress_aborted is False
+    finally:
+        engine.shutdown()
+
+
 def test_a_failing_native_compressor_does_not_license_an_lcm_trim(tmp_path, monkeypatch):
     """The native compressor raising is a missing capability, not permission to cut."""
     class _FailingCompressor:
